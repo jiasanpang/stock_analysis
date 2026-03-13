@@ -11,6 +11,7 @@ GET  /api/v1/picker/history/{id} — full detail of a single run
 
 import asyncio
 import logging
+import os
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -19,6 +20,9 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Configurable via PICKER_TIMEOUT env (seconds). Default 300s for slow networks/APIs.
+_PICKER_TIMEOUT = int(os.getenv("PICKER_TIMEOUT", "300"))
 
 
 class ScreenStatsResponse(BaseModel):
@@ -89,9 +93,6 @@ class PickerHistoryItem(BaseModel):
 class PickerHistoryListResponse(BaseModel):
     items: List[PickerHistoryItem] = Field(default_factory=list)
     total: int = 0
-
-
-_PICKER_TIMEOUT = 150  # seconds — screening ~5s + intel ~15s + news ~15s + LLM ~60s
 
 
 def _get_db():

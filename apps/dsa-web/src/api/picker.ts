@@ -68,9 +68,12 @@ export interface PickerHistoryListResponse {
   total: number;
 }
 
+// Picker runs screening + news + LLM; backend default 300s, client waits longer
+const PICKER_REQUEST_TIMEOUT_MS = 600_000; // 10 min
+
 export async function fetchRecommendations(): Promise<PickerResponse> {
   const res = await apiClient.post<PickerResponse>('/api/v1/picker/recommend', null, {
-    timeout: 180_000,
+    timeout: PICKER_REQUEST_TIMEOUT_MS,
   });
   return res.data;
 }
