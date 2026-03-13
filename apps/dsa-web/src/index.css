@@ -1,0 +1,377 @@
+@import "tailwindcss";
+
+/* ============ Tailwind v4 Theme ============ */
+@theme {
+  --color-cyan: #2563eb;
+  --color-cyan-dim: #1d4ed8;
+  --color-cyan-glow: rgba(37, 99, 235, 0.15);
+
+  --color-purple: #6366f1;
+  --color-purple-dim: #4f46e5;
+  --color-purple-glow: rgba(99, 102, 241, 0.12);
+
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+
+  --color-base: #f8fafc;
+  --color-card: #ffffff;
+  --color-elevated: #f1f5f9;
+  --color-surface-hover: #e2e8f0;
+
+  --color-primary: #0f172a;
+  --color-secondary: #475569;
+  --color-muted: #94a3b8;
+
+  --color-border: rgba(0, 0, 0, 0.08);
+  --color-border-dim: rgba(0, 0, 0, 0.04);
+  --color-border-accent: rgba(37, 99, 235, 0.3);
+  --color-border-purple: rgba(99, 102, 241, 0.25);
+
+  --shadow-glow-cyan: 0 2px 12px rgba(37, 99, 235, 0.15);
+  --shadow-glow-purple: 0 2px 12px rgba(99, 102, 241, 0.12);
+
+  --animate-fade-in: fadeIn 0.3s ease-out;
+  --animate-slide-up: slideUp 0.4s ease-out;
+  --animate-slide-in-right: slideInRight 0.3s ease-out;
+  --animate-pulse-glow: pulseGlow 2s ease-in-out infinite;
+  --animate-spin-slow: spin 2s linear infinite;
+}
+
+/* ============ Design Tokens (for manual CSS rules) ============ */
+:root {
+  --color-cyan: #2563eb;
+  --color-cyan-dim: #1d4ed8;
+  --color-cyan-glow: rgba(37, 99, 235, 0.15);
+
+  --color-purple: #6366f1;
+  --color-purple-dim: #4f46e5;
+  --color-purple-glow: rgba(99, 102, 241, 0.12);
+
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+
+  --bg-base: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-elevated: #f1f5f9;
+  --bg-surface-hover: #e2e8f0;
+
+  --border-dim: rgba(0, 0, 0, 0.04);
+  --border-default: rgba(0, 0, 0, 0.08);
+  --border-accent: rgba(37, 99, 235, 0.3);
+  --border-purple: rgba(99, 102, 241, 0.25);
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+
+  font-family: 'Inter', 'SF Pro Display', system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ============ Base ============ */
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: var(--bg-base);
+  color: var(--text-primary);
+}
+
+/* ============ Card Variants ============ */
+.terminal-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.terminal-card-hover {
+  transition: all 0.3s ease;
+}
+
+.terminal-card-hover:hover {
+  border-color: var(--border-accent);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+}
+
+.gradient-border-card {
+  background: var(--bg-card);
+  border-radius: 12px;
+  position: relative;
+  padding: 1px;
+  border: 1px solid var(--border-default);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.gradient-border-card-inner {
+  background: var(--bg-card);
+  border-radius: 11px;
+  height: 100%;
+}
+
+.glass-card {
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+/* ============ History List ============ */
+.history-item {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-dim);
+  transition: all 0.2s ease;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.history-item:hover {
+  background: var(--bg-elevated);
+  border-color: var(--border-default);
+  transform: translateX(2px);
+}
+
+.history-item.active {
+  background: rgba(37, 99, 235, 0.06);
+  border-color: rgba(37, 99, 235, 0.2);
+}
+
+/* ============ Typography ============ */
+.label-uppercase {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-purple);
+}
+
+/* ============ Gauge Ring ============ */
+.gauge-ring {
+  filter: drop-shadow(0 0 8px var(--color-cyan-glow));
+}
+
+/* ============ Form Controls ============ */
+.input-terminal {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+  transition: all 0.2s ease;
+}
+
+.input-terminal::placeholder {
+  color: var(--text-muted);
+}
+
+.input-terminal:focus {
+  border-color: var(--border-accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.08);
+}
+
+.input-terminal:hover:not(:focus) {
+  border-color: rgba(0, 0, 0, 0.15);
+}
+
+/* ============ Buttons ============ */
+.btn-primary {
+  background: linear-gradient(135deg, var(--color-cyan) 0%, var(--color-cyan-dim) 100%);
+  color: #ffffff;
+  font-weight: 600;
+  padding: 10px 20px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 13px;
+}
+
+.btn-primary:hover {
+  box-shadow: 0 4px 12px var(--color-cyan-glow);
+  transform: translateY(-1px);
+}
+
+.btn-primary:active {
+  transform: translateY(0);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-secondary {
+  background: transparent;
+  color: var(--text-secondary);
+  font-weight: 500;
+  padding: 10px 20px;
+  border-radius: 8px;
+  border: 1px solid var(--border-default);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 13px;
+}
+
+.btn-secondary:hover {
+  border-color: var(--border-accent);
+  color: var(--color-cyan);
+}
+
+/* ============ Badges ============ */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.badge-purple {
+  background: rgba(99, 102, 241, 0.08);
+  color: var(--color-purple);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+}
+
+/* ============ Scrollbar ============ */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+/* ============ Animations ============ */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(100%); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 12px var(--color-cyan-glow); }
+  50% { box-shadow: 0 0 24px var(--color-cyan-glow); }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-fade-in { animation: fadeIn 0.3s ease-out; }
+.animate-slide-up { animation: slideUp 0.4s ease-out; }
+.animate-slide-in-right { animation: slideInRight 0.3s ease-out; }
+.animate-pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+.animate-spin { animation: spin 1s linear infinite; }
+
+/* ============ Semantic Utilities ============ */
+.text-cyan { color: var(--color-cyan); }
+.text-purple { color: var(--color-purple); }
+.text-success { color: var(--color-success); }
+.text-danger { color: var(--color-danger); }
+.text-warning { color: var(--color-warning); }
+.text-muted { color: var(--text-muted); }
+.text-secondary { color: var(--text-secondary); }
+
+.bg-base { background: var(--bg-base); }
+.bg-card { background: var(--bg-card); }
+.bg-elevated { background: var(--bg-elevated); }
+
+.border-accent { border-color: var(--border-accent); }
+.border-purple { border-color: var(--border-purple); }
+
+/* ============ Prose Table Override ============ */
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 8px 0;
+}
+
+.prose thead {
+  background: var(--bg-elevated);
+}
+
+.prose th,
+.prose td {
+  border: 1px solid var(--border-default);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.prose th {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.prose td {
+  color: var(--text-secondary);
+}
+
+.prose tr:nth-child(even) {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+/* ============ Prose Pre/Code Block ============ */
+.prose pre {
+  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 8px 0;
+}
+
+.prose pre code {
+  font-family: inherit;
+  background: transparent;
+  padding: 0;
+  border: none;
+}
