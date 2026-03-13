@@ -17,18 +17,9 @@
 
 [**功能特性**](#-功能特性) · [**快速開始**](#-快速開始) · [**推送效果**](#-推送效果) · [**完整指南**](full-guide.md) · [**常見問題**](FAQ.md) · [**更新日誌**](CHANGELOG.md)
 
- 繁體中文[English] | (../README_EN.md) | [简体中文](../README.md)
+[简体中文](../README.md) | [English](README_EN.md) | 繁體中文
 
 </div>
-
-## 💖 贊助商 (Sponsors)
-
-<div align="center">
-  <a href="https://serpapi.com/" target="_blank">
-    <img src="../sources/serpapi_banner_zh.png" alt="輕鬆抓取搜尋引擎上的即時金融新聞數據 - SerpApi" height="160">
-  </a>
-</div>
-<br>
 
 ## ✨ 功能特性
 
@@ -279,19 +270,7 @@ stock_analysis/
 - [x] 港股支持
 - [x] Web 管理界面 (簡易版)
 - [x] 美股支持
-- [ ] 歷史分析回測
-
-## ☕ 支持項目
-
-<div align="center">
-  <a href="https://ko-fi.com/mumu157" target="_blank">
-    <img src="https://storage.ko-fi.com/cdn/kofi3.png?v=3" alt="Buy Me a Coffee at ko-fi.com" style="height: 40px !important;">
-  </a>
-</div>
-
-| 支付寶 (Alipay) | 微信支付 (WeChat) | Ko-fi |
-| :---: | :---: | :---: |
-| <img src="../sources/alipay.jpg" width="200" alt="Alipay"> | <img src="../sources/wechatpay.jpg" width="200" alt="WeChat Pay"> | <a href="https://ko-fi.com/mumu157" target="_blank"><img src="../sources/ko-fi.png" width="200" alt="Ko-fi"></a> |
+- [x] 歷史分析回測
 
 ## 貢獻
 
@@ -300,25 +279,10 @@ stock_analysis/
 詳見 [貢獻指南](CONTRIBUTING.md)
 
 ## License
-[MIT License](../LICENSE) 
-如果你在項目中使用或基於本项目进行二次开发，
-非常歡迎在 README 或文檔中註明來源並附上本倉庫鏈接。
-這將有助於項目的持續維護和社區發展。
 
-## 聯繫與合作
-- GitHub Issues：[提交 Issue](https://github.com/jiasanpang/stock_analysis/issues)
-- 合作郵箱：zhuls345@gmail.com
+[MIT License](../LICENSE)
 
-## Star History
-**如果覺得有用，請給個 ⭐ Star 支持一下！**
-
-<a href="https://star-history.com/#jiasanpang/stock_analysis&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jiasanpang/stock_analysis&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jiasanpang/stock_analysis&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=jiasanpang/stock_analysis&type=Date" />
- </picture>
-</a>
+本項目參考自 [ZhuLinsen/daily_stock_analysis](https://github.com/ZhuLinsen/daily_stock_analysis)。如果你在項目中使用或基於本項目進行二次開發，請註明來源於原項目並附上鏈接。
 
 ## 免責聲明
 

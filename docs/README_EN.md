@@ -21,15 +21,6 @@ English | [简体中文](../README.md) | [繁體中文](README_CHT.md)
 
 </div>
 
-## 💖 Sponsors
-
-<div align="center">
-  <a href="https://serpapi.com/" target="_blank">
-    <img src="../sources/serpapi_banner_en.png" alt="Easily scrape real-time financial news data from search engines - SerpApi" height="160">
-  </a>
-</div>
-<br>
-
 ## ✨ Key Features
 
 | Module | Feature | Description |
@@ -445,18 +436,6 @@ Enable the FastAPI service for configuration management and triggering analysis 
 
 ---
 
-## ☕ Support the Project
-
-<div align="center">
-  <a href="https://ko-fi.com/mumu157" target="_blank">
-    <img src="https://storage.ko-fi.com/cdn/kofi3.png?v=3" alt="Buy Me a Coffee at ko-fi.com" style="height: 40px !important;">
-  </a>
-</div>
-
-| Alipay | WeChat Pay | Ko-fi |
-| :---: | :---: | :---: |
-| <img src="../sources/alipay.jpg" width="200" alt="Alipay"> | <img src="../sources/wechatpay.jpg" width="200" alt="WeChat Pay"> | <a href="https://ko-fi.com/mumu157" target="_blank"><img src="../sources/ko-fi.png" width="200" alt="Ko-fi"></a> |
-
 ## 🤝 Contributing
 
 Contributions are welcome! Please:
@@ -473,21 +452,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+[MIT License](LICENSE)
+
+This project is based on [ZhuLinsen/daily_stock_analysis](https://github.com/ZhuLinsen/daily_stock_analysis). If you use or derive from this project, please credit the original project and include the link.
 
 ---
-
-## ⭐ Star History
-**Made with ❤️ by AI enthusiasts | Star ⭐ this repo if you find it useful!**
-
-
-<a href="https://star-history.com/#jiasanpang/stock_analysis&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jiasanpang/stock_analysis&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jiasanpang/stock_analysis&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=jiasanpang/stock_analysis&type=Date" />
- </picture>
-</a>
 
 ## ⚠️ Disclaimer
 
@@ -510,11 +479,5 @@ The developers of this tool are not liable for any financial losses resulting fr
 - All contributors who helped improve this project
 
 ---
-
-## 📞 Contact
-
-- GitHub Issues: [Report bugs or request features](https://github.com/jiasanpang/stock_analysis/issues)
-- Discussions: [Join discussions](https://github.com/jiasanpang/stock_analysis/discussions)
-- Email: zhuls345@gmail.com
 
 ----
