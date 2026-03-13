@@ -210,6 +210,12 @@ def parse_arguments() -> argparse.Namespace:
         help='强制回测（即使已有回测结果也重新计算）'
     )
 
+    parser.add_argument(
+        '--picker',
+        action='store_true',
+        help='运行 AI 智能选股并推送报告'
+    )
+
     return parser.parse_args()
 
 
@@ -253,6 +259,58 @@ def _compute_trading_day_filter(
 
     should_skip_all = (not filtered_codes) and (effective_region or '') == ''
     return (filtered_codes, effective_region, should_skip_all)
+
+
+def _format_picker_report(result_dict: dict) -> str:
+    """Format picker result as markdown for notification."""
+    parts = ["# 📊 AI 智能选股"]
+    if result_dict.get("market_summary"):
+        parts.append(f"\n**市场概览**：{result_dict['market_summary']}\n")
+    picks = result_dict.get("picks") or []
+    if picks:
+        parts.append("## 推荐标的\n")
+        for i, p in enumerate(picks, 1):
+            att = p.get("attention", "medium")
+            label = {"high": "🟢 强烈关注", "medium": "🟡 适度关注", "low": "🔵 跟踪"}.get(att, att)
+            parts.append(f"### {i}. {p.get('name', '')}({p.get('code', '')}) {label}")
+            parts.append(f"- **理由**：{p.get('reason', '')}")
+            if p.get("catalyst"):
+                parts.append(f"- **催化**：{p['catalyst']}")
+            if p.get("risk_note"):
+                parts.append(f"- **风险**：{p['risk_note']}")
+            parts.append("")
+    if result_dict.get("sectors_to_watch"):
+        parts.append(f"**关注板块**：{', '.join(result_dict['sectors_to_watch'])}\n")
+    if result_dict.get("risk_warning"):
+        parts.append(f"**风险提示**：{result_dict['risk_warning']}\n")
+    parts.append(f"*生成于 {result_dict.get('generated_at', '')}，耗时 {result_dict.get('elapsed_seconds', 0):.0f}s*")
+    return "\n".join(parts)
+
+
+def _run_picker_and_notify() -> None:
+    """Run stock picker and push report to configured channels."""
+    from src.services.stock_picker_service import StockPickerService
+    from src.notification import NotificationService
+
+    logger.info("开始 AI 智能选股...")
+    service = StockPickerService()
+    result = service.run()
+    result_dict = result.to_dict()
+
+    if not result_dict.get("success"):
+        logger.warning(f"选股未成功: {result_dict.get('error', 'unknown')}")
+        return
+
+    notifier = NotificationService()
+    if not notifier.is_available():
+        logger.warning("未配置通知渠道，选股报告无法推送")
+        return
+
+    report = _format_picker_report(result_dict)
+    if notifier.send(report, email_send_to_all=True):
+        logger.info("AI 智能选股报告已推送")
+    else:
+        logger.warning("AI 智能选股报告推送失败")
 
 
 def run_full_analysis(
@@ -417,6 +475,14 @@ def run_full_analysis(
 
         except Exception as e:
             logger.error(f"飞书文档生成失败: {e}")
+
+        # === AI 智能选股推送 ===
+        picker_enabled = getattr(args, 'picker', False) or _is_truthy_env('PICKER_ENABLED', 'false')
+        if picker_enabled and not args.no_notify:
+            try:
+                _run_picker_and_notify()
+            except Exception as e:
+                logger.warning(f"AI 智能选股推送失败（已忽略）: {e}")
 
         # === Auto backtest ===
         try:

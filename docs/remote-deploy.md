@@ -34,6 +34,12 @@ README 已有 [快速开始](../README.md#快速开始) 4 步，本文档补充 
 | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | @BotFather / @userinfobot |
 | `PUSHPLUS_TOKEN` | https://www.pushplus.plus |
 
+### 运行配置
+
+| Name | 说明 |
+|------|------|
+| `PICKER_ENABLED` | 每日分析后是否运行 AI 智能选股并推送（默认 true） |
+
 ### 可选（搜索 / 数据）
 
 | Name | 获取地址 |
