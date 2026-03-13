@@ -43,7 +43,9 @@
 
 | 变量 | 说明 | 默认 |
 |------|------|------|
-| `REPORT_TYPE` | `simple` / `full` | - |
+| `REPORT_TYPE` | `simple` / `full` / `brief` | `simple` |
+| `PUSH_REPORT_TYPE` | 推送报告类型，不配置则同 REPORT_TYPE | - |
+| `NOTIFY_ENABLED` | 是否发送推送，本地可设 `false` | `true` |
 | `AGENT_MODE` | 启用 Agent 问股 | `false` |
 | `TRADING_DAY_CHECK_ENABLED` | 交易日检查 | `true` |
 | `SCHEDULE_TIME` | 定时执行时间 | `18:00` |

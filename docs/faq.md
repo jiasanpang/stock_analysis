@@ -18,6 +18,8 @@
 
 **非交易日想执行？** 手动触发时勾选 `force_run`，或设 `TRADING_DAY_CHECK_ENABLED=false`。
 
+**本地分析不想推送？** 设 `NOTIFY_ENABLED=false`，或命令行加 `--no-notify`。
+
 ## 其他
 
 **Web 服务启动失败？** 检查端口 8000 是否被占用。`WEBUI_AUTO_BUILD=false` 可关闭自动编译前端。
