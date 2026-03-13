@@ -371,10 +371,11 @@ def run_full_analysis(
         )
 
         # 1. 运行个股分析
+        send_notification = _should_send_notification(args)
         results = pipeline.run(
             stock_codes=stock_codes,
             dry_run=args.dry_run,
-            send_notification=not args.no_notify,
+            send_notification=send_notification,
             merge_notification=merge_notification
         )
 
@@ -400,7 +401,7 @@ def run_full_analysis(
                 notifier=pipeline.notifier,
                 analyzer=pipeline.analyzer,
                 search_service=pipeline.search_service,
-                send_notification=not args.no_notify,
+                send_notification=send_notification,
                 merge_notification=merge_notification,
                 override_region=effective_region,
             )
@@ -409,7 +410,7 @@ def run_full_analysis(
                 market_report = review_result
 
         # Issue #190: 合并推送（个股+大盘复盘）
-        if merge_notification and (results or market_report) and not args.no_notify:
+        if merge_notification and (results or market_report) and send_notification:
             parts = []
             if market_report:
                 parts.append(f"# 📈 大盘复盘\n\n{market_report}")
@@ -472,7 +473,7 @@ def run_full_analysis(
                 if doc_url:
                     logger.info(f"飞书云文档创建成功: {doc_url}")
                     # 可选：将文档链接也推送到群里
-                    if not args.no_notify:
+                    if send_notification:
                         pipeline.notifier.send(f"[{now.strftime('%Y-%m-%d %H:%M')}] 复盘文档创建成功: {doc_url}")
 
         except Exception as e:
@@ -480,7 +481,7 @@ def run_full_analysis(
 
         # === AI 智能选股推送 ===
         picker_enabled = getattr(args, 'picker', False) or _is_truthy_env('PICKER_ENABLED', 'false')
-        if picker_enabled and not args.no_notify:
+        if picker_enabled and send_notification:
             try:
                 _run_picker_and_notify()
             except Exception as e:
@@ -541,6 +542,11 @@ def _is_truthy_env(var_name: str, default: str = "true") -> bool:
     """Parse common truthy / falsy environment values."""
     value = os.getenv(var_name, default).strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _should_send_notification(args: argparse.Namespace) -> bool:
+    """Whether to send notifications: NOTIFY_ENABLED=false disables for local runs."""
+    return not getattr(args, "no_notify", False) and _is_truthy_env("NOTIFY_ENABLED", "true")
 
 def start_bot_stream_clients(config: Config) -> None:
     """Start bot stream clients when enabled in config."""
@@ -724,7 +730,7 @@ def main() -> int:
                 notifier=notifier,
                 analyzer=analyzer,
                 search_service=search_service,
-                send_notification=not args.no_notify,
+                send_notification=_should_send_notification(args),
                 override_region=effective_region,
             )
             return 0
