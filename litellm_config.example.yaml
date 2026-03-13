@@ -1,7 +1,7 @@
 # ===================================
 # LiteLLM Router 配置模板
 # ===================================
-# 配套文档：docs/LLM_CONFIG_GUIDE.md 第 3.2 节
+# 配套文档：docs/guide.md
 #
 # 用法：
 # 1. 复制此文件为 litellm_config.yaml
