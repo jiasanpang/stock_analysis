@@ -39,6 +39,8 @@ README 已有 [快速开始](../README.md#快速开始) 4 步，本文档补充 
 | Name | 说明 |
 |------|------|
 | `PICKER_ENABLED` | 每日分析后是否运行 AI 智能选股并推送（默认 true） |
+| `REPORT_TYPE` | 报告类型（分析/仪表盘）：`simple`、`full`、`brief` |
+| `PUSH_REPORT_TYPE` | 推送报告类型：不配置则同 REPORT_TYPE；可设为 `brief` 使推送精简、仪表盘保持详细 |
 
 ### 可选（搜索 / 数据）
 

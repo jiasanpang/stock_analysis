@@ -193,8 +193,13 @@ class Config:
     # 单股推送模式：每分析完一只股票立即推送，而不是汇总后推送
     single_stock_notify: bool = False
 
-    # 报告类型：simple(精简) 或 full(完整)
+    # 报告类型：simple(精简)、full(完整)、brief(3-5句概括)
+    # 用于分析生成与 Web 仪表盘/本地保存的报告
     report_type: str = "simple"
+
+    # 推送报告类型：不配置时与 report_type 一致
+    # 可单独设为 brief 使推送精简，而仪表盘仍显示详细报告
+    push_report_type: Optional[str] = None
 
     # 仅分析结果摘要：true 时只推送汇总，不含个股详情（Issue #262）
     report_summary_only: bool = False
@@ -658,6 +663,7 @@ class Config:
             astrbot_token=os.getenv('ASTRBOT_TOKEN'),
             single_stock_notify=os.getenv('SINGLE_STOCK_NOTIFY', 'false').lower() == 'true',
             report_type=cls._parse_report_type(os.getenv('REPORT_TYPE', 'simple')),
+            push_report_type=cls._parse_push_report_type(os.getenv('PUSH_REPORT_TYPE')),
             report_summary_only=os.getenv('REPORT_SUMMARY_ONLY', 'false').lower() == 'true',
             report_templates_dir=os.getenv('REPORT_TEMPLATES_DIR', 'templates'),
             report_renderer_enabled=os.getenv('REPORT_RENDERER_ENABLED', 'false').lower() == 'true',
@@ -983,6 +989,20 @@ class Config:
         return 'simple'
 
     @classmethod
+    def _parse_push_report_type(cls, value: Optional[str]) -> Optional[str]:
+        """Parse PUSH_REPORT_TYPE; None means use report_type (dashboard detailed, push follows)."""
+        if not value or not value.strip():
+            return None
+        v = value.strip().lower()
+        if v in ('simple', 'full', 'brief'):
+            return v
+        import logging
+        logging.getLogger(__name__).warning(
+            f"PUSH_REPORT_TYPE '{value}' invalid, fallback to None (valid: simple/full/brief)"
+        )
+        return None
+
+    @classmethod
     def _parse_market_review_region(cls, value: str) -> str:
         """解析大盘复盘市场区域，非法值记录警告后回退为 cn"""
         import logging
@@ -1252,6 +1272,13 @@ class Config:
 def get_config() -> Config:
     """获取全局配置实例的快捷方式"""
     return Config.get_instance()
+
+
+def get_effective_push_report_type(cfg: Optional[Config] = None) -> str:
+    """Return report type for push: PUSH_REPORT_TYPE or REPORT_TYPE."""
+    if cfg is None:
+        cfg = get_config()
+    return (cfg.push_report_type or cfg.report_type)
 
 
 # ============================================================

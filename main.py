@@ -47,7 +47,7 @@ from data_provider.base import canonical_stock_code
 from src.core.pipeline import StockAnalysisPipeline
 from src.core.market_review import run_market_review
 from src.webui_frontend import prepare_webui_frontend_assets
-from src.config import get_config, Config
+from src.config import get_config, Config, get_effective_push_report_type
 from src.logging_config import setup_logging
 
 
@@ -262,28 +262,30 @@ def _compute_trading_day_filter(
 
 
 def _format_picker_report(result_dict: dict) -> str:
-    """Format picker result as markdown for notification."""
+    """Format picker result as concise markdown for notification."""
     parts = ["# 📊 AI 智能选股"]
     if result_dict.get("market_summary"):
-        parts.append(f"\n**市场概览**：{result_dict['market_summary']}\n")
+        summary = result_dict["market_summary"].strip()
+        if len(summary) > 80:
+            summary = summary[:77] + "..."
+        parts.append(f"\n{summary}\n")
     picks = result_dict.get("picks") or []
     if picks:
-        parts.append("## 推荐标的\n")
-        for i, p in enumerate(picks, 1):
+        for p in picks[:8]:  # max 8 picks
             att = p.get("attention", "medium")
-            label = {"high": "🟢 强烈关注", "medium": "🟡 适度关注", "low": "🔵 跟踪"}.get(att, att)
-            parts.append(f"### {i}. {p.get('name', '')}({p.get('code', '')}) {label}")
-            parts.append(f"- **理由**：{p.get('reason', '')}")
-            if p.get("catalyst"):
-                parts.append(f"- **催化**：{p['catalyst']}")
-            if p.get("risk_note"):
-                parts.append(f"- **风险**：{p['risk_note']}")
-            parts.append("")
+            dot = {"high": "🟢", "medium": "🟡", "low": "🔵"}.get(att, "🟡")
+            name, code = p.get("name", ""), p.get("code", "")
+            reason = (p.get("reason", "") or "")[:60]
+            if len((p.get("reason", "") or "")) > 60:
+                reason = reason.rstrip() + "..."
+            parts.append(f"{dot} {name}({code}) {reason}")
     if result_dict.get("sectors_to_watch"):
-        parts.append(f"**关注板块**：{', '.join(result_dict['sectors_to_watch'])}\n")
+        parts.append(f"\n板块: {', '.join(result_dict['sectors_to_watch'][:5])}")
     if result_dict.get("risk_warning"):
-        parts.append(f"**风险提示**：{result_dict['risk_warning']}\n")
-    parts.append(f"*生成于 {result_dict.get('generated_at', '')}，耗时 {result_dict.get('elapsed_seconds', 0):.0f}s*")
+        rw = result_dict["risk_warning"].strip()[:80]
+        if len(result_dict["risk_warning"]) > 80:
+            rw = rw.rstrip() + "..."
+        parts.append(f"⚠️ {rw}")
     return "\n".join(parts)
 
 
@@ -414,7 +416,7 @@ def run_full_analysis(
             if results:
                 dashboard_content = pipeline.notifier.generate_aggregate_report(
                     results,
-                    getattr(config, 'report_type', 'simple'),
+                    get_effective_push_report_type(config),
                 )
                 parts.append(f"# 🚀 个股决策仪表盘\n\n{dashboard_content}")
             if parts:
@@ -457,11 +459,11 @@ def run_full_analysis(
                 if market_report:
                     full_content += f"# 📈 大盘复盘\n\n{market_report}\n\n---\n\n"
 
-                # 添加个股决策仪表盘（使用 NotificationService 生成，按 report_type 分支）
+                # 添加个股决策仪表盘（使用 report_type 保持详细，供文档查阅）
                 if results:
                     dashboard_content = pipeline.notifier.generate_aggregate_report(
                         results,
-                        getattr(config, 'report_type', 'simple'),
+                        config.report_type,
                     )
                     full_content += f"# 🚀 个股决策仪表盘\n\n{dashboard_content}"
 

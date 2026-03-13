@@ -1022,7 +1022,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "REPORT_TYPE": {
         "title": "Report Type",
-        "description": "Report format: 'simple' (concise), 'full' (detailed), or 'brief' (3-5 sentences).",
+        "description": "Report format for analysis/dashboard: 'simple' (concise), 'full' (detailed), or 'brief' (3-5 sentences).",
         "category": "notification",
         "data_type": "string",
         "ui_control": "select",
@@ -1033,6 +1033,20 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": ["simple", "full", "brief"],
         "validation": {"enum": ["simple", "full", "brief"]},
         "display_order": 55,
+    },
+    "PUSH_REPORT_TYPE": {
+        "title": "Push Report Type",
+        "description": "Report format for push notifications. Unset = same as REPORT_TYPE. Set to 'brief' for short push while dashboard stays detailed.",
+        "category": "notification",
+        "data_type": "string",
+        "ui_control": "select",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "options": ["", "simple", "full", "brief"],
+        "validation": {"enum": ["", "simple", "full", "brief"]},
+        "display_order": 56,
     },
     "REPORT_TEMPLATES_DIR": {
         "title": "Report Templates Dir",
@@ -1046,7 +1060,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "default_value": "templates",
         "options": [],
         "validation": {},
-        "display_order": 56,
+        "display_order": 57,
     },
     "REPORT_RENDERER_ENABLED": {
         "title": "Report Renderer Enabled",
