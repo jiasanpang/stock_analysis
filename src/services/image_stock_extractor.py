@@ -199,10 +199,27 @@ def _parse_items_from_text(text: str) -> List[Tuple[str, Optional[str], str]]:
 
 
 def _resolve_vision_model() -> str:
-    """Determine the litellm model to use for vision, with gemini-3 downgrade."""
+    """Determine the litellm model to use for vision, with gemini-3 downgrade.
+
+    When a channel config exists for the model, we respect the original model_name
+    stored in the channel (including its provider prefix) so that litellm uses the
+    matching SDK protocol.  Only when no channel is configured do we attempt to
+    infer/correct the provider prefix.
+    """
     cfg = get_config()
     # Prefer explicit vision model, then OPENAI_VISION_MODEL alias, then primary litellm model
     model = (cfg.vision_model or cfg.openai_vision_model or cfg.litellm_model or "").strip()
+
+    # If a channel is configured for this model, use the stored model_name verbatim.
+    # The channel owner deliberately set the provider prefix; we must not override it.
+    if model and cfg.llm_model_list:
+        channel = _get_channel_info(model, cfg)
+        if channel:
+            stored_name = channel.get("model_name") or channel.get("litellm_params", {}).get("model")
+            if stored_name:
+                model = stored_name
+                logger.debug("[ImageExtractor] resolved vision model from channel: %s", model)
+
     if not model:
         # Fallback: infer from available keys
         if cfg.gemini_api_keys:
@@ -219,13 +236,76 @@ def _resolve_vision_model() -> str:
     return model
 
 
+def _get_channel_info(model: str, cfg: Config) -> Optional[dict]:
+    """Find the matching channel entry from llm_model_list.
+
+    Tries exact match first, then match by model name suffix (ignoring provider prefix).
+    This handles cases where the normalized model name differs from the stored model_name.
+    e.g., stored 'anthropic/qwen3.5-plus', looking for 'openai/qwen3.5-plus'
+    """
+    if not cfg.llm_model_list:
+        return None
+
+    model_suffix = model.split("/", 1)[-1] if "/" in model else model
+
+    # Pass 1: exact match
+    for item in cfg.llm_model_list:
+        if item.get("model_name") == model:
+            return item
+
+    # Pass 2: match by model name suffix (ignore provider prefix)
+    for item in cfg.llm_model_list:
+        stored = item.get("model_name", "")
+        stored_suffix = stored.split("/", 1)[-1] if "/" in stored else stored
+        if stored_suffix == model_suffix:
+            return item
+
+    # Pass 3: return first channel entry as last resort
+    return cfg.llm_model_list[0] if cfg.llm_model_list else None
+
+
 def _get_api_keys_for_model(model: str, cfg: Config) -> List[str]:
     """Return available API keys for the given litellm model."""
+    model_lower = model.lower()
+
+    # Priority 1: Channel mode - extract key from matching channel
+    channel = _get_channel_info(model, cfg)
+    if channel:
+        key = channel.get("litellm_params", {}).get("api_key")
+        if key and len(key) >= 8:
+            return [key]
+
+    # Priority 2: Legacy mode
     if model.startswith("gemini/") or model.startswith("vertex_ai/"):
-        return [k for k in cfg.gemini_api_keys if k and len(k) >= 8]
+        keys = [k for k in cfg.gemini_api_keys if k and len(k) >= 8]
+        if keys:
+            return keys
+
     if model.startswith("anthropic/"):
-        return [k for k in cfg.anthropic_api_keys if k and len(k) >= 8]
-    return [k for k in cfg.openai_api_keys if k and len(k) >= 8]
+        if any(x in model_lower for x in ["claude", "anthropic"]):
+            keys = [k for k in cfg.anthropic_api_keys if k and len(k) >= 8]
+            if keys:
+                return keys
+
+    keys = [k for k in cfg.openai_api_keys if k and len(k) >= 8]
+    if keys:
+        return keys
+
+    legacy_keys = cfg.gemini_api_keys + cfg.anthropic_api_keys + cfg.openai_api_keys
+    return [k for k in legacy_keys if k and len(k) >= 8]
+
+
+def _get_api_base_for_model(model: str, cfg: Config) -> Optional[str]:
+    """Get api_base for the given model from channel config or legacy config."""
+    # Priority 1: Channel mode
+    channel = _get_channel_info(model, cfg)
+    if channel:
+        params = channel.get("litellm_params", {})
+        api_base = params.get("api_base") or params.get("base_url")
+        if api_base:
+            return api_base
+    # Priority 2: Legacy mode
+    return cfg.openai_base_url
 
 
 def _call_litellm_vision(image_b64: str, mime_type: str, api_key: Optional[str] = None) -> str:
@@ -256,11 +336,16 @@ def _call_litellm_vision(image_b64: str, mime_type: str, api_key: Optional[str] 
         "api_key": key,
         "timeout": VISION_API_TIMEOUT,
     }
-    # Add api_base and custom headers for OpenAI-compatible providers
-    if not model.startswith("gemini/") and not model.startswith("anthropic/") and not model.startswith("vertex_ai/"):
-        if cfg.openai_base_url:
-            call_kwargs["api_base"] = cfg.openai_base_url
-        if cfg.openai_base_url and "aihubmix.com" in cfg.openai_base_url:
+    # Inject api_base and extra_headers when configured via channel or legacy config.
+    # For all non-native-Gemini/VertexAI models: always pass api_base if available,
+    # so that the correct gateway endpoint is used regardless of provider prefix.
+    is_native_gemini = model.startswith("gemini/") or model.startswith("vertex_ai/")
+
+    if not is_native_gemini:
+        api_base = _get_api_base_for_model(model, cfg)
+        if api_base:
+            call_kwargs["api_base"] = api_base
+        if api_base and "aihubmix.com" in api_base:
             call_kwargs["extra_headers"] = {"APP-Code": "GPIJ3886"}
 
     response = litellm.completion(**call_kwargs)

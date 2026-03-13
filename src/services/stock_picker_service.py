@@ -28,50 +28,74 @@ logger = logging.getLogger(__name__)
 
 # ── System prompt ────────────────────────────────────────────────
 
-PICK_SYSTEM_PROMPT = """你是一位专业的 A 股市场分析师，擅长结合量化数据和市场情报选股。
+PICK_SYSTEM_PROMPT = """你是一位专业的 A 股市场分析师，负责从优质股票池中精选最具投资价值的标的。
 
 ## 你的任务
 你将收到两类数据：
-1. **量化筛选池**：系统已从全市场 5000+ 只股票中，通过多层量化条件筛选出的候选标的（含实时行情指标）
+1. **量化筛选池**：系统已从全市场 5000+ 只股票中，通过严格的量化条件（正向趋势、合理估值、健康量能）筛选出的优质候选标的
 2. **市场情报**：今日大盘指数、板块排行、热点新闻
 
-请从量化筛选池中，结合市场情报，精选 5-10 只最值得关注的股票。
+请从量化筛选池中，结合市场情报，**精选 3-8 只**最具投资价值的股票。
 
-## 选股原则
-1. **优先从筛选池选择**：筛选池中的股票已通过基本面和技术面初筛，优先从中推荐
-2. **板块共振**：筛选池个股所在板块与今日领涨板块重合时，提升关注度
-3. **量价配合**：量比 > 1.5 且换手率适中(2-10%)的标的优先
-4. **估值安全**：PE 合理（10-60 倍）、市值适中的标的优先
-5. **新闻催化**：有近期利好消息或事件驱动的标的加分
-6. **风险规避**：涨幅已过大(>7%)、换手率过高(>15%)的标的降级或排除
-7. 如果筛选池质量不佳或市场环境恶劣，可以减少推荐数量并明确建议观望
+## 核心选股原则（严格遵循）
+
+### 1. 严进策略（不追高）
+- **乖离率是核心指标**：优先推荐乖离率 < 3% 的标的（最佳买点区间）
+- 乖离率 3-5%：可适度关注，但需有强催化剂支撑
+- 乖离率 > 5%：即使趋势好也应降级为"观望"或排除
+- **公式**：乖离率 = (现价 - MA5) / MA5 × 100%
+
+### 2. 趋势质量优先
+- 60日涨幅 > 20%：强势趋势，加分
+- 60日涨幅 10-20%：稳健趋势，正常评估
+- 60日涨幅 5-10%：弱势趋势，需更强催化剂才考虑
+- **今日涨幅**：2-6% 为健康上涨，>7% 需警惕追高风险
+
+### 3. 估值安全边际
+- PE 10-30 倍：理想区间，优先推荐
+- PE 30-50 倍：需有业绩成长性支撑
+- PE > 50 倍：谨慎，除非有强催化剂
+
+### 4. 量能健康度
+- 量比 1.0-2.5：健康放量，加分
+- 量比 > 3.0：需警惕过度投机
+- 换手率 2-8%：理想区间
+
+### 5. 板块与市场共振
+- 个股所在板块与今日领涨板块重合时，提升优先级
+- 逆板块上涨（板块跌个股涨）需有独立催化剂才考虑
+
+### 6. 风险控制
+- 如果筛选池中乖离率 > 5% 的标的占比过高，说明市场整体偏高，应减少推荐数量并明确建议观望
+- 市场成交量萎缩或指数大跌时，优先建议空仓观望
 
 ## 输出格式
 严格输出 JSON，不要输出 markdown 或解释文字：
 
 ```json
 {
-  "market_summary": "一句话概括今日市场特征",
+  "market_summary": "一句话概括今日市场特征及选股难度",
   "picks": [
     {
       "code": "600519",
       "name": "贵州茅台",
       "sector": "白酒",
-      "reason": "推荐理由（50字以内，需引用具体数据）",
+      "reason": "推荐理由（引用具体数据：乖离率X%，60日涨幅X%，PE X倍）",
       "catalyst": "催化剂/驱动因素",
       "attention": "high/medium/low",
-      "risk_note": "主要风险提示"
+      "risk_note": "主要风险提示（必须包含乖离率风险提示）"
     }
   ],
   "sectors_to_watch": ["板块1", "板块2", "板块3"],
-  "risk_warning": "整体市场风险提示"
+  "risk_warning": "整体市场风险提示（如：当前市场乖离率偏高，建议控制仓位）"
 }
 ```
 
 ## 注意事项
 - code 和 name 必须使用筛选池中提供的真实数据
-- attention: high（强烈关注）、medium（适度关注）、low（跟踪观察）
-- reason 中应引用具体的量化指标（如"量比2.3，换手率3.5%，PE 25倍"）
+- attention: high（强烈关注，乖离率<3%且趋势强）、medium（适度关注）、low（跟踪观察，乖离率接近5%）
+- **宁缺毋滥**：如果池子质量不佳，宁可只推荐 1-2 只，也不要硬凑数量
+- reason 中**必须引用乖离率**，这是与后续分析保持一致的关键
 """
 
 
@@ -415,16 +439,16 @@ class StockScreener:
         return df
 
     def _filter_momentum(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Layer 2: Positive momentum — today green + medium-term uptrend."""
-        # Today's change > -1% (allow slight dip if in uptrend)
+        """Layer 2: Strong positive momentum — strict uptrend filter."""
+        # Today's change > 0% (must be positive, showing strength)
         if "涨跌幅" in df.columns:
             pct = pd.to_numeric(df["涨跌幅"], errors="coerce")
-            df = df[pct > -1]
+            df = df[pct > 0]
 
-        # 60-day change > -5% (not in severe downtrend)
+        # 60-day change > 5% (clear medium-term uptrend)
         if "60日涨跌幅" in df.columns:
             pct60 = pd.to_numeric(df["60日涨跌幅"], errors="coerce")
-            df = df[pct60 > -5]
+            df = df[pct60 > 5]
 
         return df
 
@@ -448,7 +472,12 @@ class StockScreener:
         return df
 
     def _score_and_rank(self, df: pd.DataFrame, top_n: int = 30) -> List[ScreenedStock]:
-        """Score remaining stocks and return top N."""
+        """Score remaining stocks and return top N.
+
+        Scoring philosophy: Prioritize trend strength and reasonable valuation
+        over short-term volume spikes. This aligns with the analyzer's strict
+        criteria (bias < 5%, bullish alignment).
+        """
         records = []
         for _, row in df.iterrows():
             try:
@@ -464,17 +493,46 @@ class StockScreener:
                 amount = float(pd.to_numeric(row.get("成交额", 0), errors="coerce") or 0)
                 pct_60d = float(pd.to_numeric(row.get("60日涨跌幅", 0), errors="coerce") or 0)
 
-                # Composite score:
-                # Favor: high volume ratio, moderate turnover, positive momentum, reasonable PE
+                # Composite score: Trend-focused, quality-first approach
                 score = 0.0
-                score += min(vol_ratio, 5) * 15          # volume ratio (max 75)
-                score += min(change_pct, 5) * 5           # today's change (max 25)
-                score += min(turnover, 8) * 3              # turnover (max 24)
-                score += max(0, min(pct_60d, 30)) * 0.5   # 60d trend (max 15)
-                if 10 < pe < 40:
-                    score += 10                            # PE sweet spot bonus
-                if 100e8 < total_mv < 1000e8:
-                    score += 5                             # mid-cap bonus
+
+                # 1. Trend strength (highest weight) - max 40 points
+                # Strong 60-day uptrend indicates sustained momentum
+                score += min(max(pct_60d, 0), 40) * 1.0
+
+                # 2. Today's momentum - max 20 points
+                # Positive daily change, but cap to avoid over-weighting single day
+                score += min(change_pct, 8) * 2.5
+
+                # 3. Volume confirmation - max 20 points
+                # Healthy volume (1.0-3.0 is ideal), not excessive
+                if 1.0 <= vol_ratio <= 3.0:
+                    score += 20
+                elif vol_ratio > 3.0:
+                    score += 15  # High volume but could be speculative
+                elif vol_ratio > 0.8:
+                    score += 10
+
+                # 4. Turnover health - max 10 points
+                # 2-8% is the sweet spot for liquidity without speculation
+                if 2 <= turnover <= 8:
+                    score += 10
+                elif 1 <= turnover < 2:
+                    score += 5
+                elif 8 < turnover <= 12:
+                    score += 3
+
+                # 5. Valuation quality - max 10 points
+                # Reasonable PE indicates fundamental support
+                if 10 < pe < 30:
+                    score += 10
+                elif 5 < pe <= 10 or 30 <= pe < 50:
+                    score += 5
+
+                # 6. Market cap stability - bonus 5 points
+                # Mid-cap stocks often have better growth potential
+                if 50e8 < total_mv < 500e8:
+                    score += 5
 
                 records.append(ScreenedStock(
                     code=code, name=name, price=price,
