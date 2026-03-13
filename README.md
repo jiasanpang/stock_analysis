@@ -57,8 +57,8 @@ Docker：`docker-compose -f docker/docker-compose.yml up -d server`
 ## 文档
 
 - [配置指南](docs/guide.md) — 环境变量、Docker、LLM、通知渠道
-- [远端部署](docs/REMOTE_DEPLOY.md) — Token 获取、自建服务器
-- [常见问题](docs/FAQ.md)
+- [远端部署](docs/remote-deploy.md) — Token 获取、自建服务器
+- [常见问题](docs/faq.md)
 - [更新日志](docs/CHANGELOG.md)
 
 ## 贡献
