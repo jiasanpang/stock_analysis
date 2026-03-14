@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Stock picker: LLM picks 1-5 (was 3-8), explicit empty-position trigger (乖离率>5%占比>60%).
 - Stock picker: 60-day gain >30% score decay to avoid end-of-trend buys.
 - Stock picker: Volume ratio filter 0.8 → 1.0 to exclude cold stocks.
+- Stock picker: PE filter 200 → 100 (PE_MAX constant).
+- Stock picker: Limit-up streak filter — exclude 2+ limit-up days in last 5 days (连板/妖股).
 
 ### Removed
 - Unused: `send_daily_report`, `get_notification_service` (notification.py); `analyze_stock` wrapper (stock_analyzer.py); `RealtimeQuote` alias (akshare); `EfinanceRealtimeQuote` (efinance); module-level test blocks in notification.py and stock_analyzer.py.

@@ -109,6 +109,28 @@ def test_volume_ratio_min_constant():
     assert VOLUME_RATIO_MIN == 1.0
 
 
+def test_pe_max_constant():
+    """Verify PE filter uses PE_MAX=100."""
+    try:
+        from src.services.stock_picker_service import PE_MAX
+    except ImportError:
+        PE_MAX = _get_picker_module().PE_MAX
+
+    assert PE_MAX == 100
+
+
+def test_pe_filter_excludes_above_100():
+    """PE > 100 should be excluded by basic filter."""
+    screener = _screener()
+    df = pd.DataFrame([
+        _row(**{"市盈率-动态": 50}),
+        _row(代码="B", 名称="B", **{"市盈率-动态": 150}),
+    ])
+    filtered = screener._filter_basic(df)
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["代码"] == "600519"
+
+
 def test_60d_decay_scoring():
     """Verify 60-day gain >30% gets decay, not full 40 points."""
     screener = _screener()
@@ -153,6 +175,8 @@ if __name__ == "__main__":
         test_prompt_contains_1_5_picks,
         test_bias_constant,
         test_volume_ratio_min_constant,
+        test_pe_max_constant,
+        test_pe_filter_excludes_above_100,
         test_60d_decay_scoring,
         test_60d_25_vs_40_ordering,
         test_volume_filter_excludes_below_1_0,

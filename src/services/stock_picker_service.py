@@ -35,6 +35,13 @@ VOLUME_RATIO_MIN = 1.0
 # 60-day trend decay: gains above this % get score decay (avoid end-of-trend buys)
 TREND_DECAY_THRESHOLD_PCT = 30.0
 
+# Limit-up streak filter: exclude if >= this many limit-up days in last 5 days
+LIMIT_UP_DAYS_THRESHOLD = 2
+LIMIT_UP_PCT_THRESHOLD = 9.5  # pct_chg >= this treated as limit-up (main board ~10%)
+
+# PE filter: exclude stocks with PE > this (obvious bubble)
+PE_MAX = 100
+
 # ── System prompt ────────────────────────────────────────────────
 
 PICK_SYSTEM_PROMPT = """你是一位专业的 A 股市场分析师，负责从优质股票池中精选最具投资价值的标的。
@@ -256,6 +263,13 @@ class StockScreener:
         if len(candidates) < before_bias:
             logger.info(f"[Screener] After bias filter: {stats.final_pool} candidates (excluded {before_bias - len(candidates)})")
 
+        # Layer 6: Limit-up streak filter (exclude 连板/妖股)
+        before_limit_up = len(candidates)
+        candidates = self._filter_limit_up_streak(candidates)
+        if len(candidates) < before_limit_up:
+            stats.final_pool = len(candidates)
+            logger.info(f"[Screener] After limit-up filter: {stats.final_pool} candidates (excluded {before_limit_up - len(candidates)})")
+
         return candidates, stats
 
     def _filter_by_bias(self, candidates: List[ScreenedStock], max_bias_pct: float = PICKER_MAX_BIAS_PCT) -> List[ScreenedStock]:
@@ -287,6 +301,40 @@ class StockScreener:
             except Exception as e:
                 logger.debug(f"[Screener] Bias check failed for {s.code}: {e}")
                 filtered.append(s)  # Keep on error
+        return filtered
+
+    def _filter_limit_up_streak(
+        self,
+        candidates: List[ScreenedStock],
+        days: int = 5,
+        min_limit_up_days: int = LIMIT_UP_DAYS_THRESHOLD,
+        pct_threshold: float = LIMIT_UP_PCT_THRESHOLD,
+    ) -> List[ScreenedStock]:
+        """Exclude stocks with 2+ limit-up days in last 5 days (连板/妖股 risk)."""
+        if not self._data_manager or not candidates:
+            return candidates
+        filtered = []
+        for s in candidates:
+            try:
+                df_daily, _ = self._data_manager.get_daily_data(s.code, days=days + 5)
+                if df_daily is None or len(df_daily) < days:
+                    filtered.append(s)
+                    continue
+                pct_col = next((c for c in ["pct_chg", "涨跌幅"] if c in df_daily.columns), None)
+                if pct_col is None:
+                    filtered.append(s)
+                    continue
+                date_col = next((c for c in ["date", "日期"] if c in df_daily.columns), df_daily.columns[0])
+                df_daily = df_daily.sort_values(date_col).tail(days)
+                pct = pd.to_numeric(df_daily[pct_col], errors="coerce").fillna(0)
+                limit_up_count = int((pct >= pct_threshold).sum())
+                if limit_up_count >= min_limit_up_days:
+                    logger.debug(f"[Screener] Exclude {s.code} limit-up streak: {limit_up_count} days in last {days}")
+                else:
+                    filtered.append(s)
+            except Exception as e:
+                logger.debug(f"[Screener] Limit-up check failed for {s.code}: {e}")
+                filtered.append(s)
         return filtered
 
     _UA_LIST = [
@@ -526,10 +574,10 @@ class StockScreener:
         if "最新价" in df.columns:
             df = df[pd.to_numeric(df["最新价"], errors="coerce") > 3]
 
-        # PE > 0 (profitable) and PE < 200 (not crazy overvalued)
+        # PE > 0 (profitable) and PE < PE_MAX (exclude obvious bubble)
         if "市盈率-动态" in df.columns:
             pe = pd.to_numeric(df["市盈率-动态"], errors="coerce")
-            df = df[(pe > 0) & (pe < 200)]
+            df = df[(pe > 0) & (pe < PE_MAX)]
 
         return df
 
