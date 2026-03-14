@@ -22,7 +22,7 @@ from json_repair import repair_json
 
 from src.config import get_config
 from src.search_service import SearchService
-from data_provider.base import DataFetcherManager
+from data_provider.base import DataFetcherManager, is_kc_cy_stock
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,8 @@ TREND_DECAY_THRESHOLD_PCT = 30.0
 
 # Limit-up streak filter: exclude if >= this many limit-up days in last 5 days
 LIMIT_UP_DAYS_THRESHOLD = 2
-LIMIT_UP_PCT_THRESHOLD = 9.5  # pct_chg >= this treated as limit-up (main board ~10%)
+LIMIT_UP_PCT_MAIN = 9.5   # main board (60/00/002) ~10%
+LIMIT_UP_PCT_KC_CY = 19.0  # ChiNext/STAR (30/688) ~20%
 
 # PE filter: exclude stocks with PE > this (obvious bubble)
 PE_MAX = 100
@@ -79,6 +80,12 @@ PICK_SYSTEM_PROMPT = """你是一位专业的 A 股市场分析师，负责从�
 ### 5. 板块与市场共振
 - 个股所在板块与今日领涨板块重合时，提升优先级
 - 逆板块上涨（板块跌个股涨）需有独立催化剂才考虑
+- **行业分散**：建议推荐标的分散于不同行业，避免单行业过度集中
+
+### 5b. 筹码集中度（如有数据）
+- 90%集中度 < 10%：筹码高度集中，主力控盘，加分
+- 90%集中度 10-15%：筹码较集中，正常评估
+- 获利比例 50-80%：健康区间；>90% 警惕派发
 
 ### 6. 风险控制
 - **空仓触发**：若池中乖离率 > 5% 的标的占比 > 60%，说明市场整体偏高，应输出空仓观望、减少或零推荐
@@ -308,14 +315,16 @@ class StockScreener:
         candidates: List[ScreenedStock],
         days: int = 5,
         min_limit_up_days: int = LIMIT_UP_DAYS_THRESHOLD,
-        pct_threshold: float = LIMIT_UP_PCT_THRESHOLD,
     ) -> List[ScreenedStock]:
-        """Exclude stocks with 2+ limit-up days in last 5 days (连板/妖股 risk)."""
+        """Exclude stocks with 2+ limit-up days in last 5 days (连板/妖股 risk).
+        Uses board-specific threshold: main 10%, ChiNext/STAR 20%.
+        """
         if not self._data_manager or not candidates:
             return candidates
         filtered = []
         for s in candidates:
             try:
+                pct_threshold = LIMIT_UP_PCT_KC_CY if is_kc_cy_stock(s.code) else LIMIT_UP_PCT_MAIN
                 df_daily, _ = self._data_manager.get_daily_data(s.code, days=days + 5)
                 if df_daily is None or len(df_daily) < days:
                     filtered.append(s)
@@ -753,7 +762,8 @@ class StockPickerService:
             # ── Stage 2: Gather market intel + AI selection ──
             logger.info("[StockPicker] === Stage 2: AI Selection ===")
             intel = self._gather_market_intel()
-            prompt = self._build_prompt(intel, candidates)
+            chip_map = self._fetch_chip_for_candidates(candidates)
+            prompt = self._build_prompt(intel, candidates, chip_map)
             llm_output = self._call_llm(prompt)
 
             if not llm_output:
@@ -832,28 +842,89 @@ class StockPickerService:
 
         return intel
 
-    def _build_prompt(self, intel: Dict[str, Any], candidates: List[ScreenedStock]) -> str:
-        """Build the prompt with both quant pool and market intel."""
+    def _fetch_chip_for_candidates(
+        self, candidates: List[ScreenedStock], max_stocks: int = 25, timeout_per_stock: float = 2.0
+    ) -> Dict[str, Dict[str, Any]]:
+        """Fetch chip distribution for candidates. Returns {code: {concentration_90, profit_ratio}}."""
+        chip_map: Dict[str, Dict[str, Any]] = {}
+        if not getattr(self.config, "enable_chip_distribution", True):
+            return chip_map
+        if not self._data_manager or not candidates:
+            return chip_map
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+        def _fetch_one(code: str) -> Optional[Dict[str, Any]]:
+            try:
+                chip = self._data_manager.get_chip_distribution(code)
+                if chip:
+                    return {
+                        "concentration_90": chip.concentration_90,
+                        "profit_ratio": chip.profit_ratio,
+                    }
+            except Exception as e:
+                logger.debug(f"[StockPicker] Chip fetch failed for {code}: {e}")
+            return None
+
+        to_fetch = [s.code for s in candidates[:max_stocks]]
+        with ThreadPoolExecutor(max_workers=5, thread_name_prefix="chip") as pool:
+            futures = {pool.submit(_fetch_one, code): code for code in to_fetch}
+            for fut in futures:
+                code = futures[fut]
+                try:
+                    data = fut.result(timeout=timeout_per_stock)
+                    if data:
+                        chip_map[code] = data
+                except FuturesTimeout:
+                    logger.debug(f"[StockPicker] Chip fetch timeout for {code}")
+                except Exception as e:
+                    logger.debug(f"[StockPicker] Chip fetch error for {code}: {e}")
+
+        if chip_map:
+            logger.info(f"[StockPicker] Fetched chip data for {len(chip_map)}/{len(to_fetch)} candidates")
+        return chip_map
+
+    def _build_prompt(
+        self, intel: Dict[str, Any], candidates: List[ScreenedStock], chip_map: Optional[Dict[str, Dict[str, Any]]] = None
+    ) -> str:
+        """Build the prompt with quant pool, chip data (if any), and market intel."""
+        chip_map = chip_map or {}
         today = datetime.now().strftime("%Y-%m-%d")
         parts = [f"# 今日选股分析 ({today})\n"]
 
         # ── Quant pool ──
         if candidates:
             parts.append(f"## 量化筛选池（从全市场筛选出的 {len(candidates)} 只候选）")
-            parts.append(
-                "| 代码 | 名称 | 现价 | 涨跌% | 量比 | 换手% | PE | 市值(亿) | 60日% | 评分 |"
-            )
-            parts.append(
-                "|------|------|------|-------|------|-------|-----|---------|-------|------|"
-            )
-            for s in candidates:
+            has_chip = any(s.code in chip_map for s in candidates)
+            if has_chip:
                 parts.append(
+                    "| 代码 | 名称 | 现价 | 涨跌% | 量比 | 换手% | PE | 市值(亿) | 60日% | 筹码90% | 获利% | 评分 |"
+                )
+                parts.append(
+                    "|------|------|------|-------|------|-------|-----|---------|-------|---------|-------|------|"
+                )
+            else:
+                parts.append(
+                    "| 代码 | 名称 | 现价 | 涨跌% | 量比 | 换手% | PE | 市值(亿) | 60日% | 评分 |"
+                )
+                parts.append(
+                    "|------|------|------|-------|------|-------|-----|---------|-------|------|"
+                )
+            for s in candidates:
+                row = (
                     f"| {s.code} | {s.name} | {s.price:.2f} | "
                     f"{s.change_pct:+.2f} | {s.volume_ratio:.1f} | "
                     f"{s.turnover_rate:.1f} | {s.pe:.0f} | "
-                    f"{s.market_cap:.0f} | {s.change_pct_60d:+.1f} | "
-                    f"{s.score:.0f} |"
+                    f"{s.market_cap:.0f} | {s.change_pct_60d:+.1f} |"
                 )
+                if has_chip:
+                    chip = chip_map.get(s.code, {})
+                    c90 = chip.get("concentration_90")
+                    pr = chip.get("profit_ratio")
+                    c90_str = f"{c90:.1%}" if c90 is not None else "-"
+                    pr_str = f"{pr:.0%}" if pr is not None else "-"
+                    row += f" {c90_str} | {pr_str} |"
+                row += f" {s.score:.0f} |"
+                parts.append(row)
             parts.append("")
         else:
             parts.append("## 量化筛选池\n（今日筛选未产出候选，请仅基于市场情报推荐）\n")
@@ -904,8 +975,8 @@ class StockPickerService:
             parts.append("")
 
         parts.append(
-            "请从量化筛选池和市场情报中，精选 5-10 只最值得关注的 A 股股票。"
-            "优先从筛选池中选择，可结合新闻热点补充池外标的。"
+            "请从量化筛选池和市场情报中，精选 1-5 只最值得关注的 A 股股票。"
+            "优先从筛选池中选择，建议行业分散、避免单行业过度集中。"
             "严格按照 JSON 格式输出。"
         )
 

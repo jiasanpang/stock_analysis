@@ -37,6 +37,7 @@ def _get_picker_module():
     cfg.get_config = lambda: type("C", (), {
         "bocha_api_keys": [], "tavily_keys": [], "brave_keys": [],
         "serpapi_keys": [], "minimax_keys": [], "searxng_base_urls": [],
+        "enable_chip_distribution": True,
     })()
     sys.modules["src"] = types.ModuleType("src")
     sys.modules["src.config"] = cfg
@@ -46,6 +47,12 @@ def _get_picker_module():
     sys.modules["data_provider"] = types.ModuleType("data_provider")
     base = types.ModuleType("base")
     base.DataFetcherManager = type("DataFetcherManager", (), {})
+
+    def _is_kc_cy(code):
+        c = (code or "").strip().split(".")[0]
+        return c.startswith("688") or c.startswith("30")
+
+    base.is_kc_cy_stock = _is_kc_cy
     sys.modules["data_provider.base"] = base
 
     path = _root / "src" / "services" / "stock_picker_service.py"
@@ -119,6 +126,19 @@ def test_pe_max_constant():
     assert PE_MAX == 100
 
 
+def test_limit_up_thresholds():
+    """Verify limit-up thresholds: main 9.5%, ChiNext/STAR 19%."""
+    try:
+        from src.services.stock_picker_service import LIMIT_UP_PCT_MAIN, LIMIT_UP_PCT_KC_CY
+    except ImportError:
+        mod = _get_picker_module()
+        LIMIT_UP_PCT_MAIN = mod.LIMIT_UP_PCT_MAIN
+        LIMIT_UP_PCT_KC_CY = mod.LIMIT_UP_PCT_KC_CY
+
+    assert LIMIT_UP_PCT_MAIN == 9.5
+    assert LIMIT_UP_PCT_KC_CY == 19.0
+
+
 def test_pe_filter_excludes_above_100():
     """PE > 100 should be excluded by basic filter."""
     screener = _screener()
@@ -176,6 +196,7 @@ if __name__ == "__main__":
         test_bias_constant,
         test_volume_ratio_min_constant,
         test_pe_max_constant,
+        test_limit_up_thresholds,
         test_pe_filter_excludes_above_100,
         test_60d_decay_scoring,
         test_60d_25_vs_40_ordering,
