@@ -74,6 +74,9 @@ verify_*.py
 .claude/
 CLAUDE.md
 
+# 公众号文章（本地草稿，不提交）
+公众号/
+
 # ignore static files
 static/
 /apps/dsa-desktop/dist/

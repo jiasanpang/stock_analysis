@@ -52,9 +52,6 @@ from .realtime_types import (
 from .us_index_mapping import is_us_index_code, is_us_stock_code
 
 
-# 保留旧的 RealtimeQuote 别名，用于向后兼容
-RealtimeQuote = UnifiedRealtimeQuote
-
 
 logger = logging.getLogger(__name__)
 

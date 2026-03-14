@@ -26,6 +26,9 @@ from data_provider.base import DataFetcherManager
 
 logger = logging.getLogger(__name__)
 
+# Bias filter threshold (严进策略): exclude stocks with MA5 bias > this %
+PICKER_MAX_BIAS_PCT = 8.0
+
 # ── System prompt ────────────────────────────────────────────────
 
 PICK_SYSTEM_PROMPT = """你是一位专业的 A 股市场分析师，负责从优质股票池中精选最具投资价值的标的。
@@ -241,7 +244,45 @@ class StockScreener:
         stats.final_pool = len(candidates)
         logger.info(f"[Screener] Final pool: {len(candidates)} candidates")
 
+        # Layer 5: Bias filter (严进策略 — exclude MA5 bias > PICKER_MAX_BIAS_PCT)
+        before_bias = len(candidates)
+        candidates = self._filter_by_bias(candidates, max_bias_pct=PICKER_MAX_BIAS_PCT)
+        stats.final_pool = len(candidates)
+        if len(candidates) < before_bias:
+            logger.info(f"[Screener] After bias filter: {stats.final_pool} candidates (excluded {before_bias - len(candidates)})")
+
         return candidates, stats
+
+    def _filter_by_bias(self, candidates: List[ScreenedStock], max_bias_pct: float = PICKER_MAX_BIAS_PCT) -> List[ScreenedStock]:
+        """Filter out stocks with MA5 bias > max_bias_pct (严进策略)."""
+        if not self._data_manager or not candidates:
+            return candidates
+        filtered = []
+        for s in candidates:
+            try:
+                df_daily, _ = self._data_manager.get_daily_data(s.code, days=10)
+                if df_daily is None or len(df_daily) < 5:
+                    filtered.append(s)  # Keep if no data (don't exclude)
+                    continue
+                close_col = next((c for c in ["close", "收盘"] if c in df_daily.columns), None)
+                if close_col is None:
+                    filtered.append(s)
+                    continue
+                date_col = next((c for c in ["date", "日期"] if c in df_daily.columns), df_daily.columns[0])
+                df_daily = df_daily.sort_values(date_col).tail(5)
+                ma5 = float(df_daily[close_col].mean())
+                if ma5 <= 0:
+                    filtered.append(s)
+                    continue
+                bias_pct = (s.price - ma5) / ma5 * 100
+                if bias_pct <= max_bias_pct:
+                    filtered.append(s)
+                else:
+                    logger.debug(f"[Screener] Exclude {s.code} bias={bias_pct:.1f}% > {max_bias_pct}%")
+            except Exception as e:
+                logger.debug(f"[Screener] Bias check failed for {s.code}: {e}")
+                filtered.append(s)  # Keep on error
+        return filtered
 
     _UA_LIST = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
@@ -443,7 +484,8 @@ class StockScreener:
         # Today's change > 0% (must be positive, showing strength)
         if "涨跌幅" in df.columns:
             pct = pd.to_numeric(df["涨跌幅"], errors="coerce")
-            df = df[pct > 0]
+            # Chase risk: exclude near limit-up (today > 9% = likely overextended)
+            df = df[(pct > 0) & (pct < 9.0)]
 
         # 60-day change > 5% (clear medium-term uptrend)
         if "60日涨跌幅" in df.columns:
@@ -503,6 +545,12 @@ class StockScreener:
                 # 2. Today's momentum - max 20 points
                 # Positive daily change, but cap to avoid over-weighting single day
                 score += min(change_pct, 8) * 2.5
+                # Chase risk penalty (align with 严进策略: 乖离率 > 5% 不追高)
+                # Today's gain as proxy for short-term extension
+                if change_pct > 10:
+                    score -= 30
+                elif change_pct > 7:
+                    score -= 15
 
                 # 3. Volume confirmation - max 20 points
                 # Healthy volume (1.0-3.0 is ideal), not excessive

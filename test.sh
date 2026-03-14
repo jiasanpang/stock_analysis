@@ -159,7 +159,15 @@ test_quick() {
     success "快速测试完成"
 }
 
-# 测试10: 代码识别测试
+# 测试10: AI 智能选股（含乖离率过滤）
+test_picker() {
+    header "测试场景: AI 智能选股"
+    info "运行选股流程（量化筛选 + 乖离率过滤 + AI 精选）..."
+    python3 main.py --picker-only --no-notify
+    success "选股测试完成"
+}
+
+# 测试11: 代码识别测试
 test_code_recognition() {
     header "测试场景: 代码识别"
     info "测试股票代码识别逻辑..."
@@ -200,7 +208,7 @@ PYTEST
     success "代码识别测试完成"
 }
 
-# 测试11: YFinance代码转换测试
+# 测试12: YFinance代码转换测试
 test_yfinance_convert() {
     header "测试场景: YFinance 代码转换"
     info "测试YFinance代码转换逻辑..."
@@ -240,7 +248,7 @@ PYTEST
     success "YFinance 代码转换测试完成"
 }
 
-# 测试12: 语法检查
+# 测试13: 语法检查
 test_syntax() {
     header "测试场景: Python 语法检查"
     info "检查所有Python文件语法..."
@@ -253,7 +261,7 @@ test_syntax() {
     success "语法检查通过"
 }
 
-# 测试13: Flake8 静态检查
+# 测试14: Flake8 静态检查
 test_flake8() {
     header "测试场景: Flake8 静态检查"
     info "运行 Flake8 检查严重错误..."
@@ -334,6 +342,10 @@ main() {
             shift
             test_quick "$@"
             ;;
+        picker|pick)
+            shift
+            test_picker "$@"
+            ;;
         code|recognition)
             shift
             test_code_recognition "$@"
@@ -368,6 +380,7 @@ main() {
             echo "  dry-run     - 仅获取数据"
             echo "  full        - 完整流程"
             echo "  quick       - 快速测试（推荐）"
+            echo "  picker      - AI 智能选股（含乖离率过滤）"
             echo "  code        - 代码识别测试"
             echo "  yfinance    - YFinance转换测试"
             echo "  syntax      - 语法检查"

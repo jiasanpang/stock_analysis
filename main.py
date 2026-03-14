@@ -69,6 +69,7 @@ def parse_arguments() -> argparse.Namespace:
   python main.py --single-notify    # 启用单股推送模式（每分析完一只立即推送）
   python main.py --schedule         # 启用定时任务模式
   python main.py --market-review    # 仅运行大盘复盘
+  python main.py --picker-only      # 仅运行 AI 智能选股（跳过个股分析）
         '''
     )
 
@@ -214,6 +215,12 @@ def parse_arguments() -> argparse.Namespace:
         '--picker',
         action='store_true',
         help='运行 AI 智能选股并推送报告'
+    )
+
+    parser.add_argument(
+        '--picker-only',
+        action='store_true',
+        help='仅运行 AI 智能选股（跳过个股分析和大盘复盘）'
     )
 
     return parser.parse_args()
@@ -661,7 +668,17 @@ def main() -> int:
         return 0
 
     try:
-        # 模式0: 回测
+        # 模式0: 仅选股（快速验证选股流程）
+        if getattr(args, 'picker_only', False):
+            logger.info("模式: 仅 AI 智能选股")
+            try:
+                _run_picker_and_notify()
+            except Exception as e:
+                logger.exception(f"选股失败: {e}")
+                return 1
+            return 0
+
+        # 模式1: 回测
         if getattr(args, 'backtest', False):
             logger.info("模式: 回测")
             from src.services.backtest_service import BacktestService
