@@ -9,6 +9,7 @@
 | 模块 | 说明 |
 |------|------|
 | AI 分析 | 决策仪表盘、精确买卖点位、操作检查清单 |
+| AI 选股 | 量化筛选 + 乖离率过滤 + LLM 精选 1–5 只（严进策略） |
 | 多维度 | 技术面 + 筹码分布 + 舆情情报 + 实时行情 |
 | 市场 | A股、港股、美股 |
 | Agent 问股 | 多轮策略问答，13 种内建策略（Web/Bot/API） |
@@ -57,6 +58,7 @@ Docker：`docker-compose -f docker/docker-compose.yml up -d server`
 ## 文档
 
 - [配置指南](docs/guide.md) — 环境变量、Docker、LLM、通知渠道
+- [分析策略指南](docs/analysis-strategy-guide.md) — 核心理念、选股原则、策略说明
 - [远端部署](docs/remote-deploy.md) — Token 获取、自建服务器
 - [常见问题](docs/faq.md)
 - [更新日志](docs/CHANGELOG.md)

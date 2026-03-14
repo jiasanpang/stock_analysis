@@ -167,6 +167,14 @@ test_picker() {
     success "选股测试完成"
 }
 
+# 测试10b: 选股策略验证（离线，无需网络）
+test_picker_validation() {
+    header "测试场景: 选股策略验证"
+    info "验证 Phase 1 & 2 改进（60日衰减、量比1.0、Prompt 等）..."
+    python3 tests/test_stock_picker_validation.py
+    success "选股策略验证完成"
+}
+
 # 测试11: 代码识别测试
 test_code_recognition() {
     header "测试场景: 代码识别"
@@ -346,6 +354,10 @@ main() {
             shift
             test_picker "$@"
             ;;
+        picker-validation|picker-val)
+            shift
+            test_picker_validation "$@"
+            ;;
         code|recognition)
             shift
             test_code_recognition "$@"
@@ -381,6 +393,7 @@ main() {
             echo "  full        - 完整流程"
             echo "  quick       - 快速测试（推荐）"
             echo "  picker      - AI 智能选股（含乖离率过滤）"
+            echo "  picker-validation - 选股策略验证（离线）"
             echo "  code        - 代码识别测试"
             echo "  yfinance    - YFinance转换测试"
             echo "  syntax      - 语法检查"
