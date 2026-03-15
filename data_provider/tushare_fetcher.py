@@ -21,6 +21,7 @@ import time
 from datetime import datetime
 from typing import Optional, Tuple, List, Dict, Any
 
+import numpy as np
 import pandas as pd
 import requests
 from tenacity import (
@@ -32,7 +33,7 @@ from tenacity import (
 )
 
 from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code
-from .realtime_types import UnifiedRealtimeQuote
+from .realtime_types import UnifiedRealtimeQuote, ChipDistribution, safe_float
 from src.config import get_config
 import os
 from zoneinfo import ZoneInfo
@@ -499,7 +500,112 @@ class TushareFetcher(BaseFetcher):
             logger.warning(f"Tushare 获取股票列表失败: {e}")
         
         return None
-    
+
+    def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
+        """
+        Get chip distribution via Tushare cyq_chips (requires 5000+ points).
+
+        Data source: pro.cyq_chips() - daily cost distribution by price level.
+        Updates 18-19:00 daily. Fallback when Akshare (Eastmoney) fails.
+        """
+        if self._api is None:
+            return None
+        if _is_us_code(stock_code):
+            logger.debug(f"[API跳过] {stock_code} 是美股，无筹码分布数据")
+            return None
+        if _is_etf_code(stock_code):
+            logger.debug(f"[API跳过] {stock_code} 是 ETF，无筹码分布数据")
+            return None
+
+        try:
+            self._check_rate_limit()
+            ts_code = self._convert_stock_code(stock_code)
+            china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            end_date = china_now.strftime("%Y%m%d")
+            start_date = (china_now - pd.Timedelta(days=10)).strftime("%Y%m%d")
+
+            df_cal = self._api.trade_cal(exchange="SSE", start_date=start_date, end_date=end_date)
+            if df_cal is None or df_cal.empty:
+                return None
+            df_cal.columns = [c.lower() for c in df_cal.columns]
+            open_dates = df_cal[df_cal["is_open"] == 1]["cal_date"].tolist()
+            if not open_dates:
+                return None
+            trade_date = open_dates[-1]
+
+            self._check_rate_limit()
+            df = self._api.cyq_chips(ts_code=ts_code, trade_date=trade_date)
+            if df is None or df.empty:
+                logger.debug(f"[筹码分布] Tushare cyq_chips 返回空 {stock_code} {trade_date}")
+                return None
+
+            df.columns = [c.lower() for c in df.columns]
+            if df.empty:
+                return None
+
+            price = pd.to_numeric(df["price"], errors="coerce")
+            pct = pd.to_numeric(df["percent"], errors="coerce").fillna(0)
+            valid = price.notna() & (pct > 0)
+            price = price[valid].values
+            pct = pct[valid].values
+            if len(price) == 0:
+                return None
+
+            avg_cost = float(np.sum(price * pct) / 100)
+            if avg_cost <= 0:
+                return None
+
+            self._check_rate_limit()
+            df_daily = self._api.daily(ts_code=ts_code, trade_date=trade_date)
+            close_price = None
+            if df_daily is not None and not df_daily.empty:
+                df_daily.columns = [c.lower() for c in df_daily.columns]
+                close_price = safe_float(df_daily.iloc[0].get("close"))
+
+            idx = np.argsort(price)
+            price_s = price[idx]
+            pct_s = pct[idx]
+            cum = np.cumsum(pct_s)
+
+            def _percentile_price(pct_target: float) -> float:
+                i = np.searchsorted(cum, pct_target)
+                return float(price_s[min(i, len(price_s) - 1)])
+
+            cost_90_low = _percentile_price(5)
+            cost_90_high = _percentile_price(95)
+            cost_70_low = _percentile_price(15)
+            cost_70_high = _percentile_price(85)
+            concentration_90 = (cost_90_high - cost_90_low) / avg_cost if avg_cost > 0 else 0
+            concentration_70 = (cost_70_high - cost_70_low) / avg_cost if avg_cost > 0 else 0
+
+            profit_ratio = 0.0
+            if close_price and close_price > 0:
+                below = pct_s[price_s < close_price]
+                profit_ratio = float(np.sum(below) / 100) if len(below) > 0 else 0
+
+            date_str = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+            chip = ChipDistribution(
+                code=stock_code,
+                date=date_str,
+                source="tushare",
+                profit_ratio=profit_ratio,
+                avg_cost=avg_cost,
+                cost_90_low=cost_90_low,
+                cost_90_high=cost_90_high,
+                concentration_90=concentration_90,
+                cost_70_low=cost_70_low,
+                cost_70_high=cost_70_high,
+                concentration_70=concentration_70,
+            )
+            logger.info(
+                f"[筹码分布] {stock_code} Tushare 日期={date_str}: 获利比例={chip.profit_ratio:.1%}, "
+                f"平均成本={chip.avg_cost:.2f}, 90%集中度={chip.concentration_90:.2%}"
+            )
+            return chip
+        except Exception as e:
+            logger.warning(f"[筹码分布] Tushare 获取 {stock_code} 失败: {e}")
+            return None
+
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
         获取实时行情

@@ -1420,8 +1420,8 @@ class AkshareFetcher(BaseFetcher):
         def _do_fetch() -> Optional[ChipDistribution]:
             self._set_random_user_agent()
             self._enforce_rate_limit()
-            # Extra delay for chip API (Eastmoney rate-limits aggressively)
-            time.sleep(random.uniform(0.5, 1.2))
+            # Extra delay for chip API (Eastmoney closes connections on frequent requests)
+            time.sleep(random.uniform(1.5, 3.0))
 
             logger.info(f"[API调用] ak.stock_cyq_em(symbol={stock_code}) 获取筹码分布...")
             api_start = time.time()

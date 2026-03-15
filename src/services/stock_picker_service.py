@@ -727,18 +727,25 @@ class StockScreener:
             # Check 3: Retracement limit
             if len(close_series) >= 10 and high_col:
                 high_series = pd.to_numeric(df_daily[high_col], errors="coerce").fillna(0)
+                low_col = self._first_col(df_daily, "low", "最低")
+                if low_col:
+                    low_series = pd.to_numeric(df_daily[low_col], errors="coerce").fillna(0)
+                else:
+                    low_series = close_series  # Fallback to close if no low column
                 # Prior 10d high and low
                 recent_high = float(high_series.tail(10).max())
-                recent_low = float(close_series.tail(10).min())
+                recent_low = float(low_series.tail(10).min())
                 rally = recent_high - recent_low
-                if rally > 0 and recent_high > 0:
+                if rally > 0.01 and recent_high > 0:  # Avoid near-zero division
                     current_pullback = recent_high - s.price
-                    retracement = current_pullback / rally if rally > 0 else 0
-                    if retracement > mode_params.max_retracement_pct:
-                        logger.debug(
-                            f"[Screener] Exclude {s.code}: retracement {retracement:.1%} > max {mode_params.max_retracement_pct:.1%}"
-                        )
-                        continue
+                    # Only check if actually pulled back (current_pullback > 0)
+                    if current_pullback > 0:
+                        retracement = current_pullback / rally
+                        if retracement > mode_params.max_retracement_pct:
+                            logger.debug(
+                                f"[Screener] Exclude {s.code}: retracement {retracement:.1%} > max {mode_params.max_retracement_pct:.1%}"
+                            )
+                            continue
 
             filtered.append(s)
 
@@ -1371,8 +1378,8 @@ class StockPickerService:
             return None
 
         to_fetch = [s.code for s in candidates[:max_stocks]]
-        # max_workers=2 to avoid Eastmoney rate limit; timeout 8s for retries
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="chip") as pool:
+        # max_workers=1: Eastmoney chip API closes connections on parallel requests
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="chip") as pool:
             futures = {pool.submit(_fetch_one, code): code for code in to_fetch}
             for fut in futures:
                 code = futures[fut]

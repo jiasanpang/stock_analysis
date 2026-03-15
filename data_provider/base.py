@@ -916,10 +916,10 @@ class DataFetcherManager:
 
         circuit_breaker = get_chip_circuit_breaker()
 
-        # 定义筹码数据源优先级列表
+        # 定义筹码数据源优先级列表（Tushare 优先：5000 积分稳定，Akshare 东方财富易限流）
         chip_sources = [
-            ("AkshareFetcher", "akshare_chip"),
             ("TushareFetcher", "tushare_chip"),
+            ("AkshareFetcher", "akshare_chip"),
             ("EfinanceFetcher", "efinance_chip"),
         ]
 
