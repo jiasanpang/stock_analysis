@@ -22,6 +22,7 @@ import pandas as pd
 from json_repair import repair_json
 
 from src.config import get_config
+from src.core.trading_calendar import get_last_trading_day
 from src.search_service import SearchService
 from data_provider.base import DataFetcherManager, is_kc_cy_stock
 
@@ -65,6 +66,12 @@ B_WAVE_RETRACE_LO = 0.35    # Fibonacci B-wave zone: 38.2% retracement
 B_WAVE_RETRACE_HI = 0.65    # 61.8% retracement
 B_WAVE_LOW_DAYS_AGO_MIN = 2  # Low must be at least 2 days ago (we've bounced)
 B_WAVE_LOW_DAYS_AGO_MAX = 14  # Low not more than 14 days ago (recent drop)
+
+
+def _resolve_fallback_trade_date(china_now: datetime) -> str:
+    """Resolve trade_date for live mode when today has no data (e.g. weekend)."""
+    last_td = get_last_trading_day("cn", china_now.date())
+    return last_td.strftime("%Y%m%d") if last_td else (china_now - pd.Timedelta(days=1)).strftime("%Y%m%d")
 
 
 @dataclass
@@ -679,11 +686,10 @@ class StockScreener:
 
             df_daily = tushare_api.daily(trade_date=trade_date)
             if (df_daily is None or df_daily.empty) and not is_historical:
-                # Live mode: maybe market hasn't opened yet; try yesterday
-                yesterday = (china_now - pd.Timedelta(days=1)).strftime("%Y%m%d")
-                logger.info(f"[Screener] No data for {trade_date}, trying {yesterday}...")
-                df_daily = tushare_api.daily(trade_date=yesterday)
-                trade_date = yesterday
+                fallback_date = _resolve_fallback_trade_date(china_now)
+                logger.info(f"[Screener] No data for {trade_date}, trying last trading day {fallback_date}...")
+                df_daily = tushare_api.daily(trade_date=fallback_date)
+                trade_date = fallback_date
 
             if df_daily is None or df_daily.empty:
                 logger.warning("[Screener] Tushare daily returned empty")

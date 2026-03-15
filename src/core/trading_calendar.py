@@ -16,6 +16,8 @@ import logging
 from datetime import date, datetime
 from typing import Optional, Set
 
+import pandas as pd
+
 logger = logging.getLogger(__name__)
 
 # Exchange-calendars availability
@@ -88,6 +90,35 @@ def is_market_open(market: str, check_date: date) -> bool:
     except Exception as e:
         logger.warning("trading_calendar.is_market_open fail-open: %s", e)
         return True
+
+
+def get_last_trading_day(market: str, check_date: date) -> Optional[date]:
+    """
+    Get the most recent trading day before the given date.
+
+    When check_date is a non-trading day (e.g. weekend), returns the previous
+    trading day (e.g. Friday). Used by picker to fetch daily data on weekends.
+
+    Args:
+        market: 'cn' | 'hk' | 'us'
+        check_date: Reference date
+
+    Returns:
+        The last trading day date, or None if exchange-calendars unavailable
+    """
+    if not _XCALS_AVAILABLE:
+        return None
+    ex = MARKET_EXCHANGE.get(market)
+    if not ex:
+        return None
+    try:
+        cal = xcals.get_calendar(ex)
+        ts = datetime(check_date.year, check_date.month, check_date.day)
+        session = cal.minute_to_session(pd.Timestamp(ts), direction="previous")
+        return session.date() if session is not None else None
+    except Exception as e:
+        logger.warning("trading_calendar.get_last_trading_day: %s", e)
+        return None
 
 
 def get_open_markets_today() -> Set[str]:
