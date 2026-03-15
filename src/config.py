@@ -316,7 +316,7 @@ class Config:
     akshare_sleep_min: float = 2.0
     akshare_sleep_max: float = 5.0
     
-    # Tushare 每分钟最大请求数（免费配额）
+    # Tushare 每分钟最大请求数。免费 80，5000 积分 500。可通过 TUSHARE_RATE_LIMIT_PER_MINUTE 覆盖
     tushare_rate_limit_per_minute: int = 80
     
     # 重试配置
@@ -770,7 +770,8 @@ class Config:
             # - tushare: Tushare Pro，需要2000积分，数据全面
             realtime_source_priority=cls._resolve_realtime_source_priority(),
             realtime_cache_ttl=int(os.getenv('REALTIME_CACHE_TTL', '600')),
-            circuit_breaker_cooldown=int(os.getenv('CIRCUIT_BREAKER_COOLDOWN', '300'))
+            circuit_breaker_cooldown=int(os.getenv('CIRCUIT_BREAKER_COOLDOWN', '300')),
+            tushare_rate_limit_per_minute=int(os.getenv('TUSHARE_RATE_LIMIT_PER_MINUTE', '80')),
         )
     
     @classmethod
