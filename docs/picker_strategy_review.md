@@ -13,17 +13,19 @@
 | Stage 1 量化筛选 | 全市场 → 约 30 只候选 | Tushare / AkShare / efinance |
 | Stage 2 AI 精选 | 候选 + 市场情报 → 1–5 只 | LLM + 板块排行 + 新闻 |
 
-### 1.2 量化筛选层级（7 层）
+### 1.2 量化筛选层级（9 层）
 
 | 层级 | 名称 | 当前实现 | 状态 |
 |------|------|----------|------|
 | 1 | 基本面过滤 | ST/退市/ETF/低价股/PE 过滤 | ✅ |
-| 2 | 动量过滤 | 今日涨幅 0–9% | 60 日涨幅 > 5% | ✅ |
+| 2 | 动量过滤（回踩策略） | 按模式设定涨幅范围：defensive [-2%,+2%] / balanced [-1%,+4%] / offensive [0%,+6%]；60 日涨幅 > 5% | ✅ 重构 |
 | 3 | 量能过滤 | 量比 > 1，换手 1–15%，成交额按市值分层 | ✅ |
-| 4 | 评分排序 | 趋势 + 动量 + 量能 + PE + 中盘加分 | ✅ |
+| 4 | 评分排序 | 趋势 + 回踩优先评分 + 量能 + PE + 中盘加分 | ✅ 重构 |
 | 5 | 乖离率过滤 | MA5 乖离率 > 模式阈值排除，龙头可豁免 | ✅ |
 | 6 | 连板过滤 | 近 5 日 2+ 涨停排除 | ✅ |
-| 7 | B 浪风险 | 疑似 B 浪反弹（反弹 35–65%，低点 2–14 日前）排除 | ✅ 新增 |
+| 6b | 连涨过滤 | 按模式限制连涨天数：defensive ≤2 / balanced ≤3 / offensive ≤4 | ✅ 新增 |
+| 6c | 健康回踩确认 | 均线多头排列 + 回调幅度限制 + 缩量要求（模式差异化） | ✅ 新增 |
+| 7 | B 浪风险 | 疑似 B 浪反弹（反弹 35–65%，低点 2–14 日前）排除 | ✅ |
 
 ---
 
@@ -113,11 +115,11 @@
 | PE 过滤 | PE > 0 且 < 模式上限；`PICKER_ALLOW_LOSS=true` 时允许 PE≤0 | ✅ |
 | ETF | 排除 51/52/56/58/15/16/18 前缀 | ✅ |
 
-### 4.2 动量过滤（_filter_momentum）
+### 4.2 动量过滤（_filter_momentum）—— 回踩策略
 
 | 项目 | 当前 | 优化空间 |
 |------|------|----------|
-| 今日涨幅 | 0 < pct < 9% | 9% 接近涨停，可微调 |
+| 今日涨幅 | 按模式：defensive [-2%,+2%] / balanced [-1%,+4%] / offensive [0%,+6%] | ✅ 已改为回踩策略 |
 | 60 日涨幅 | > 5% | 可考虑 5–10% 弱趋势单独评分 |
 
 ### 4.3 量能过滤（_filter_volume）
@@ -133,7 +135,7 @@
 | 维度 | 权重/逻辑 | 优化空间 |
 |------|-----------|----------|
 | 趋势 | 5–30% 线性，>30% 衰减 | 可考虑 30–50% 区间微调 |
-| 动量 | 今日涨幅 × 2.5，>7% 扣 15 | 可加「温和放量」加分 |
+| 动量（回踩优先） | **涨幅越低得分越高**：[-2%,+1%] 20分，[1%,3%] 15分，[3%,5%] 8分，>5% 扣分 | ✅ 已改为回踩评分 |
 | 量比 | 1–3 满分，>3 部分分 | ✅ |
 | 换手 | 2–8% 满分 | ✅ |
 | PE | 模式理想区间满分 | ✅ |
@@ -153,6 +155,22 @@
 |------|------|----------|
 | 主板 | 近 5 日 2+ 次 ≥9.5% | ✅ |
 | 创业板/科创板 | ≥19% | ✅ | 可合并日线拉取 |
+
+### 4.6b 连涨过滤（_filter_consecutive_up_days）—— 新增
+
+| 项目 | 当前 | 说明 |
+|------|------|------|
+| defensive | 连涨 ≤2 天 | 避免买在连涨末端 |
+| balanced | 连涨 ≤3 天 | 适度容忍 |
+| offensive | 连涨 ≤4 天 | 容忍较强动量 |
+
+### 4.6c 健康回踩过滤（_filter_healthy_pullback）—— 新增
+
+| 确认项 | 说明 | 模式差异 |
+|--------|------|----------|
+| 均线多头排列 | MA5 > MA10 > MA20 | 全部要求 |
+| 回调幅度限制 | 回调 ≤ 近10日涨幅的 X%（斐波那契） | defensive 38.2% / balanced 50% / offensive 61.8% |
+| 缩量回调 | 回踩日量比 < 1.0 | defensive 必须，其他可选 |
 
 ### 4.7 B 浪过滤（_filter_b_wave_risk）
 
@@ -244,4 +262,27 @@ B_WAVE_LOOKBACK_DAYS = 20
 B_WAVE_MIN_DROOP_PCT = 5.0
 B_WAVE_RETRACE_LO/HI = 0.35, 0.65
 B_WAVE_LOW_DAYS_AGO_MIN/MAX = 2, 14
+```
+
+## 九、附录：模式参数对照表（新增）
+
+```
+# PickerModeParams 完整参数
+PICKER_MODE_PARAMS = {
+    "defensive": PickerModeParams(
+        max_bias_pct=6.0, pe_max=50, pe_ideal_low=10, pe_ideal_high=25,
+        daily_change_min=-2.0, daily_change_max=2.0, max_consecutive_up_days=2,
+        require_volume_shrink=True, require_ma_bullish=True, max_retracement_pct=0.382,
+    ),
+    "balanced": PickerModeParams(
+        max_bias_pct=8.0, pe_max=100, pe_ideal_low=10, pe_ideal_high=30,
+        daily_change_min=-1.0, daily_change_max=4.0, max_consecutive_up_days=3,
+        require_volume_shrink=False, require_ma_bullish=True, max_retracement_pct=0.5,
+    ),
+    "offensive": PickerModeParams(
+        max_bias_pct=10.0, pe_max=100, pe_ideal_low=20, pe_ideal_high=50,
+        daily_change_min=0.0, daily_change_max=6.0, max_consecutive_up_days=4,
+        require_volume_shrink=False, require_ma_bullish=True, max_retracement_pct=0.618,
+    ),
+}
 ```
