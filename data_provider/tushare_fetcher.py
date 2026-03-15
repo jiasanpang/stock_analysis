@@ -959,12 +959,50 @@ class TushareFetcher(BaseFetcher):
                 
             return stats
 
-    def get_sector_rankings(self, n: int = 5) -> Optional[Tuple[list, list]]:
+    def get_sector_rankings(self, n: int = 5) -> Optional[Tuple[List[Dict], List[Dict]]]:
         """
-        获取板块涨跌榜 (Tushare Pro)
+        获取板块涨跌榜 (Tushare Pro sw_daily, 5000+ 积分).
+        申万一级行业日线，按涨跌幅排序。优先于东财接口（易限流）。
         """
-        # Tushare 获取板块数据较复杂，暂时返回 None，让 AkShare 处理
-        return None
+        if self._api is None:
+            return None
+        try:
+            self._check_rate_limit()
+            china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            end_date = china_now.strftime("%Y%m%d")
+            start_date = (china_now - pd.Timedelta(days=10)).strftime("%Y%m%d")
+
+            df_cal = self._api.trade_cal(exchange="SSE", start_date=start_date, end_date=end_date)
+            if df_cal is None or df_cal.empty:
+                return None
+            df_cal.columns = [c.lower() for c in df_cal.columns]
+            open_dates = df_cal[df_cal["is_open"] == 1]["cal_date"].tolist()
+            if not open_dates:
+                return None
+            trade_date = open_dates[-1]
+
+            self._check_rate_limit()
+            df_sw = self._api.sw_daily(trade_date=trade_date, fields="ts_code,name,pct_change")
+            if df_sw is None or df_sw.empty:
+                logger.debug(f"[板块排行] Tushare sw_daily 返回空 {trade_date}")
+                return None
+
+            df_sw.columns = [c.lower() for c in df_sw.columns]
+            if "pct_change" not in df_sw.columns:
+                return None
+            df_sw["pct_change"] = pd.to_numeric(df_sw["pct_change"], errors="coerce")
+            df_sw = df_sw.dropna(subset=["pct_change"])
+            name_col = "name" if "name" in df_sw.columns else df_sw.columns[1]
+
+            top = df_sw.nlargest(n, "pct_change")
+            bottom = df_sw.nsmallest(n, "pct_change")
+            top_sectors = [{"name": str(row[name_col]), "change_pct": float(row["pct_change"])} for _, row in top.iterrows()]
+            bottom_sectors = [{"name": str(row[name_col]), "change_pct": float(row["pct_change"])} for _, row in bottom.iterrows()]
+            logger.info(f"[板块排行] Tushare sw_daily 成功: 领涨/领跌各{n}个板块")
+            return top_sectors, bottom_sectors
+        except Exception as e:
+            logger.warning(f"[板块排行] Tushare 获取失败: {e}")
+            return None
 
 
 if __name__ == "__main__":
