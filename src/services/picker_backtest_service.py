@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from data_provider.base import DataFetcherManager
+from data_provider.caching_manager import CachingDataFetcherManager
 from src.config import get_config
 from src.services.stock_picker_service import (
     StockScreener,
@@ -28,6 +29,11 @@ from src.services.stock_picker_service import (
 logger = logging.getLogger(__name__)
 
 BENCHMARK_CODE = "000300.SH"  # CSI 300
+
+# Stop-loss / take-profit (买卖点规则: 跌破 MA20 或一定跌幅；目标位 前高、整数关口)
+STOP_LOSS_PCT = -8.0   # 止损：跌幅超过 8%（一定跌幅）
+TAKE_PROFIT_PCT = 15.0  # 止盈：涨幅超过 15%（兜底，主用前高/整数关口）
+GATEWAY_LEVELS = (5, 10, 20, 50, 100, 200, 500, 1000)  # 整数关口
 
 
 @dataclass
@@ -66,7 +72,12 @@ class PickerBacktestService:
     """Backtest the quantitative picker (no LLM) over historical dates."""
 
     def __init__(self, data_manager: Optional[DataFetcherManager] = None):
-        self._data_manager = data_manager or DataFetcherManager()
+        base = data_manager or DataFetcherManager()
+        self._data_manager = (
+            base
+            if isinstance(base, CachingDataFetcherManager)
+            else CachingDataFetcherManager(base)
+        )
         self._screener = create_screener_from_config(data_manager=self._data_manager)
         self._tushare_api = None
 
@@ -130,30 +141,82 @@ class PickerBacktestService:
         trade_date: str,
         exit_date: str,
         entry_price: float,
+        stop_loss_pct: float = STOP_LOSS_PCT,
+        take_profit_pct: float = TAKE_PROFIT_PCT,
     ) -> Tuple[Optional[float], Optional[float]]:
-        """Fetch exit close and compute return. Returns (exit_price, return_pct)."""
+        """Fetch daily data and compute return with stop-loss/take-profit per 买卖点规则.
+        Stop-loss: 跌破 MA20 or 一定跌幅; Take-profit: 前高, 整数关口, or fallback 15%.
+        Returns (exit_price, return_pct)."""
         try:
-            start_iso = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+            # Need ~25 trading days before entry for MA20 and 前高
+            start_dt = pd.Timestamp(trade_date) - pd.Timedelta(days=45)
+            start_iso = start_dt.strftime("%Y-%m-%d")
             end_iso = f"{exit_date[:4]}-{exit_date[4:6]}-{exit_date[6:8]}"
             df, _ = self._data_manager.get_daily_data(
-                code, start_date=start_iso, end_date=end_iso, days=30
+                code, start_date=start_iso, end_date=end_iso, days=80
             )
             if df is None or df.empty:
                 return None, None
             date_col = next((c for c in ["date", "日期"] if c in df.columns), df.columns[0])
             close_col = next((c for c in ["close", "收盘"] if c in df.columns), None)
+            high_col = next((c for c in ["high", "最高"] if c in df.columns), None)
             if close_col is None:
                 return None, None
-            df = df.sort_values(date_col)
-            # Get row for exit_date
+            df = df.sort_values(date_col).reset_index(drop=True)
             df[date_col] = pd.to_datetime(df[date_col])
-            exit_str = f"{exit_date[:4]}-{exit_date[4:6]}-{exit_date[6:8]}"
-            mask = df[date_col].dt.strftime("%Y-%m-%d") == exit_str
-            if not mask.any():
+            df["_date_str"] = df[date_col].dt.strftime("%Y-%m-%d")
+
+            # MA20 (base fetcher may add it; compute if missing)
+            if "ma20" not in df.columns:
+                df["ma20"] = df[close_col].rolling(window=20, min_periods=1).mean()
+
+            # Find entry row (trade_date) and subsequent rows
+            entry_str = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+            entry_mask = df["_date_str"] == entry_str
+            if not entry_mask.any():
                 return None, None
-            exit_price = float(df.loc[mask, close_col].iloc[-1])
+            entry_idx = int(df.index[entry_mask].min())
             if entry_price <= 0:
-                return exit_price, None
+                return None, None
+
+            # 前高: max high in 20 trading days before entry (exclusive)
+            prior_high: Optional[float] = None
+            if high_col and entry_idx >= 20:
+                prior_high = float(df.iloc[entry_idx - 20 : entry_idx][high_col].max())
+
+            # 整数关口: next level above entry
+            next_gateway: Optional[float] = None
+            for g in GATEWAY_LEVELS:
+                if g > entry_price:
+                    next_gateway = float(g)
+                    break
+
+            # Iterate days after entry: stop-loss (跌破 MA20 or 一定跌幅) / take-profit (前高, 整数关口, fallback)
+            for i in range(entry_idx + 1, len(df)):
+                close = float(df.iloc[i][close_col])
+                ret = (close - entry_price) / entry_price * 100
+
+                # Stop-loss: 跌破 MA20 or 一定跌幅
+                ma20_val = df.iloc[i].get("ma20")
+                if pd.notna(ma20_val) and close < float(ma20_val):
+                    return close, ret  # 跌破 MA20
+                if ret <= stop_loss_pct:
+                    return close, ret  # 一定跌幅
+
+                # Take-profit: 前高, 整数关口, or fallback
+                if prior_high is not None and close >= prior_high:
+                    return close, ret  # 前高
+                if next_gateway is not None and close >= next_gateway:
+                    return close, ret  # 整数关口
+                if ret >= take_profit_pct:
+                    return close, ret  # Fallback 15%
+
+            # No trigger: exit at planned exit_date
+            exit_str = f"{exit_date[:4]}-{exit_date[4:6]}-{exit_date[6:8]}"
+            exit_mask = df["_date_str"] == exit_str
+            if not exit_mask.any():
+                return None, None
+            exit_price = float(df.loc[exit_mask, close_col].iloc[-1])
             ret = (exit_price - entry_price) / entry_price * 100
             return exit_price, ret
         except Exception as e:
@@ -322,6 +385,7 @@ class PickerBacktestService:
         else:
             screener = self._screener
 
+        self._data_manager.clear_cache()
         trade_dates = self._get_trade_dates(start_date, end_date)
         if not trade_dates:
             return {
@@ -329,6 +393,11 @@ class PickerBacktestService:
                 "results": [],
                 "summary": None,
             }
+
+        logger.info(
+            "[PickerBacktest] 选股回测：纯量化筛选（无 LLM），每日取评分 top%d，持仓 %d 天，共 %d 个交易日",
+            top_n, hold_days, len(trade_dates),
+        )
 
         # Precompute exit dates and batch-fetch benchmark (saves N-1 Tushare calls)
         date_pairs: List[Tuple[str, Optional[str]]] = []
@@ -347,9 +416,13 @@ class PickerBacktestService:
                 candidates, _ = screener.screen_as_of(td)
                 picks = candidates[:top_n]
                 if not picks:
+                    logger.debug(f"[PickerBacktest] {td}: 筛选后无候选，跳过")
                     continue
                 if exit_date is None:
+                    logger.debug(f"[PickerBacktest] {td}: 持仓期不足，跳过")
                     continue
+                pick_info = ", ".join(f"{p.code}({p.score:.1f})" for p in picks)
+                logger.info(f"[PickerBacktest] {td}: 筛选 top{top_n} → {pick_info}")
 
                 bm_ret = benchmark_map.get((td, exit_date))
                 if bm_ret is not None:
@@ -357,7 +430,18 @@ class PickerBacktestService:
 
                 # Parallelize forward return fetches (5 picks per day)
                 pick_results = self._get_forward_returns_parallel(picks, td, exit_date)
+                # Log evaluation results for each pick
                 for pr in pick_results:
+                    if pr.return_pct is not None:
+                        logger.info(
+                            f"[PickerBacktest] {td} {pr.code} → "
+                            f"入场={pr.entry_price:.2f}, 出场={pr.exit_price:.2f}, "
+                            f"收益={pr.return_pct:+.2f}%, 结果={pr.outcome}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[PickerBacktest] {td} {pr.code} → 数据不足，无法评估"
+                        )
                     results.append(pr)
             except Exception as e:
                 logger.warning(f"[PickerBacktest] Date {td} failed: {e}")
@@ -409,6 +493,16 @@ class PickerBacktestService:
             profit_factor=round(profit_factor, 2) if profit_factor is not None else None,
             alpha_vs_benchmark_pct=round(alpha, 2) if alpha is not None else None,
             benchmark_avg_return_pct=round(bm_avg, 2) if bm_avg is not None else None,
+        )
+
+        # Log summary (cache stats: hits / total lookups, not network requests)
+        hits, misses = self._data_manager.cache_stats()
+        total_lookups = hits + misses
+        logger.info(
+            "[PickerBacktest] 回测完成: 总选股=%d, 胜=%d, 负=%d, 数据不足=%d, "
+            "胜率=%.2f%%, 平均收益=%.2f%%, Alpha=%.2f%%, 缓存命中=%d/总查询=%d",
+            len(results), len(wins), len(losses), len(insufficient),
+            win_rate or 0, avg_ret or 0, alpha or 0, hits, total_lookups,
         )
 
         return {

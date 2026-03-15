@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -76,12 +77,32 @@ def _resolve_fallback_trade_date(china_now: datetime) -> str:
 
 @dataclass
 class PickerModeParams:
-    """Mode-specific screening parameters (defensive/balanced/offensive)."""
+    """Mode-specific screening parameters (defensive/balanced/offensive).
+
+    Entry strategy shifted from "chase momentum" to "buy pullback":
+    - defensive: strict pullback, prefer stocks near MA5
+    - balanced: moderate pullback + small chase allowed
+    - offensive: allow stronger momentum but with limits
+
+    Healthy pullback confirmation:
+    - Volume shrink: pullback with low volume (less selling pressure)
+    - MA alignment: MA5 > MA10 > MA20 (bullish structure)
+    - Retracement limit: don't buy if retraced too much of prior rally
+    """
 
     max_bias_pct: float
     pe_max: float
     pe_ideal_low: float
     pe_ideal_high: float
+    # Entry range (pullback strategy)
+    daily_change_min: float
+    daily_change_max: float
+    # Consecutive up days limit
+    max_consecutive_up_days: int
+    # Healthy pullback confirmation
+    require_volume_shrink: bool      # Require volume_ratio < 1.0 on pullback
+    require_ma_bullish: bool         # Require MA5 > MA10 > MA20
+    max_retracement_pct: float       # Max retracement of prior 10d rally (0.5 = 50%)
 
     @classmethod
     def for_mode(cls, mode: str) -> "PickerModeParams":
@@ -91,10 +112,26 @@ class PickerModeParams:
 
 
 # Single source of truth for mode params
+# Strategy: "buy pullback" instead of "chase momentum"
 PICKER_MODE_PARAMS = {
-    "defensive": PickerModeParams(max_bias_pct=6.0, pe_max=50, pe_ideal_low=10, pe_ideal_high=25),
-    "balanced": PickerModeParams(max_bias_pct=8.0, pe_max=100, pe_ideal_low=10, pe_ideal_high=30),
-    "offensive": PickerModeParams(max_bias_pct=10.0, pe_max=100, pe_ideal_low=20, pe_ideal_high=50),
+    # defensive: strict pullback, must have volume shrink + MA bullish + limited retracement
+    "defensive": PickerModeParams(
+        max_bias_pct=6.0, pe_max=50, pe_ideal_low=10, pe_ideal_high=25,
+        daily_change_min=-2.0, daily_change_max=2.0, max_consecutive_up_days=2,
+        require_volume_shrink=True, require_ma_bullish=True, max_retracement_pct=0.382,
+    ),
+    # balanced: prefer volume shrink, require MA bullish
+    "balanced": PickerModeParams(
+        max_bias_pct=8.0, pe_max=100, pe_ideal_low=10, pe_ideal_high=30,
+        daily_change_min=-1.0, daily_change_max=4.0, max_consecutive_up_days=3,
+        require_volume_shrink=False, require_ma_bullish=True, max_retracement_pct=0.5,
+    ),
+    # offensive: only require MA bullish, allow larger retracement
+    "offensive": PickerModeParams(
+        max_bias_pct=10.0, pe_max=100, pe_ideal_low=20, pe_ideal_high=50,
+        daily_change_min=0.0, daily_change_max=6.0, max_consecutive_up_days=4,
+        require_volume_shrink=False, require_ma_bullish=True, max_retracement_pct=0.618,
+    ),
 }
 
 
@@ -404,6 +441,26 @@ class StockScreener:
             stats.final_pool = len(candidates)
             logger.info(f"[Screener] After limit-up filter: {stats.final_pool} candidates (excluded {before_limit_up - len(candidates)})")
 
+        # Layer 6b: Consecutive up days filter (avoid buying at streak end)
+        before_consecutive = len(candidates)
+        candidates = self._filter_consecutive_up_days(candidates)
+        if len(candidates) < before_consecutive:
+            stats.final_pool = len(candidates)
+            logger.info(
+                f"[Screener] After consecutive-up filter: {stats.final_pool} candidates "
+                f"(excluded {before_consecutive - len(candidates)})"
+            )
+
+        # Layer 6c: Healthy pullback confirmation (区分健康回踩 vs 趋势转弱)
+        before_pullback = len(candidates)
+        candidates = self._filter_healthy_pullback(candidates)
+        if len(candidates) < before_pullback:
+            stats.final_pool = len(candidates)
+            logger.info(
+                f"[Screener] After healthy-pullback filter: {stats.final_pool} candidates "
+                f"(excluded {before_pullback - len(candidates)})"
+            )
+
         # Layer 7: B-wave risk filter (exclude B-wave bounce before C-wave down)
         if self._enable_b_wave_filter:
             before_b_wave = len(candidates)
@@ -436,6 +493,40 @@ class StockScreener:
             return trade_date
         return f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
 
+    def _fetch_daily_batch(
+        self,
+        requests: List[Tuple[str, Optional[str], Optional[str], int]],
+        max_workers: int = 5,
+    ) -> Dict[Tuple[str, str, str, int], Tuple[pd.DataFrame, str]]:
+        """Fetch get_daily_data for multiple (code, start, end, days) in parallel.
+        Deduplicates requests by key. Returns {(code, start, end, days): (df, source)}.
+        Failed fetches are omitted."""
+        if not self._data_manager or not requests:
+            return {}
+
+        def _key(c: str, s: Optional[str], e: Optional[str], d: int) -> Tuple[str, str, str, int]:
+            return (c, s or "", e or "", d)
+
+        def _fetch(args: Tuple[str, Optional[str], Optional[str], int]):
+            code, start, end, days = args
+            try:
+                df, src = self._data_manager.get_daily_data(
+                    code, start_date=start, end_date=end, days=days
+                )
+                if df is not None:
+                    return (_key(code, start, end, days), (df, src))
+            except Exception as e:
+                logger.debug(f"[Screener] Batch fetch failed {code}: {e}")
+            return None
+
+        unique_requests = list(dict.fromkeys(requests))
+        results: Dict[Tuple[str, str, str, int], Tuple[pd.DataFrame, str]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="screener_fetch") as pool:
+            for res in pool.map(_fetch, unique_requests):
+                if res:
+                    results[res[0]] = res[1]
+        return results
+
     @staticmethod
     def _is_leader_candidate(s: ScreenedStock) -> bool:
         """Check if stock qualifies for leader bias exemption (板块龙头+量能确认)."""
@@ -456,41 +547,37 @@ class StockScreener:
         When leader_bias_exempt_pct > 0, allow bias up to that value for leader candidates."""
         if not self._data_manager or not candidates:
             return candidates
+        end_date = self._as_of_date
+        requests = [(s.code, None, end_date, 10) for s in candidates]
+        batch = self._fetch_daily_batch(requests)
         filtered = []
-        end_date = self._as_of_date  # For historical screening
         for s in candidates:
-            try:
-                df_daily, _ = self._data_manager.get_daily_data(
-                    s.code, end_date=end_date, days=10
-                )
-                if df_daily is None or len(df_daily) < 5:
-                    filtered.append(s)  # Keep if no data (don't exclude)
-                    continue
-                close_col = self._first_col(df_daily, "close", "收盘")
-                if close_col is None:
-                    filtered.append(s)
-                    continue
-                date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
-                df_daily = df_daily.sort_values(date_col).tail(5)
-                ma5 = float(df_daily[close_col].mean())
-                if ma5 <= 0:
-                    filtered.append(s)
-                    continue
-                bias_pct = (s.price - ma5) / ma5 * 100
-                if bias_pct <= max_bias_pct:
-                    filtered.append(s)
-                elif (
-                    leader_bias_exempt_pct > 0
-                    and bias_pct <= leader_bias_exempt_pct
-                    and self._is_leader_candidate(s)
-                ):
-                    filtered.append(s)
-                    logger.debug(f"[Screener] Leader exempt {s.code} bias={bias_pct:.1f}%")
-                else:
-                    logger.debug(f"[Screener] Exclude {s.code} bias={bias_pct:.1f}% > {max_bias_pct}%")
-            except Exception as e:
-                logger.debug(f"[Screener] Bias check failed for {s.code}: {e}")
-                filtered.append(s)  # Keep on error
+            df_daily, _ = batch.get((s.code, "", end_date, 10), (None, ""))
+            if df_daily is None or len(df_daily) < 5:
+                filtered.append(s)
+                continue
+            close_col = self._first_col(df_daily, "close", "收盘")
+            if close_col is None:
+                filtered.append(s)
+                continue
+            date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
+            df_daily = df_daily.sort_values(date_col).tail(5)
+            ma5 = float(df_daily[close_col].mean())
+            if ma5 <= 0:
+                filtered.append(s)
+                continue
+            bias_pct = (s.price - ma5) / ma5 * 100
+            if bias_pct <= max_bias_pct:
+                filtered.append(s)
+            elif (
+                leader_bias_exempt_pct > 0
+                and bias_pct <= leader_bias_exempt_pct
+                and self._is_leader_candidate(s)
+            ):
+                filtered.append(s)
+                logger.debug(f"[Screener] Leader exempt {s.code} bias={bias_pct:.1f}%")
+            else:
+                logger.debug(f"[Screener] Exclude {s.code} bias={bias_pct:.1f}% > {max_bias_pct}%")
         return filtered
 
     def _filter_limit_up_streak(
@@ -504,32 +591,157 @@ class StockScreener:
         """
         if not self._data_manager or not candidates:
             return candidates
+        end_date = self._as_of_date
+        requests = [(s.code, None, end_date, days + 5) for s in candidates]
+        batch = self._fetch_daily_batch(requests)
         filtered = []
-        end_date = self._as_of_date  # For historical screening
         for s in candidates:
-            try:
-                pct_threshold = LIMIT_UP_PCT_KC_CY if is_kc_cy_stock(s.code) else LIMIT_UP_PCT_MAIN
-                df_daily, _ = self._data_manager.get_daily_data(
-                    s.code, end_date=end_date, days=days + 5
-                )
-                if df_daily is None or len(df_daily) < days:
-                    filtered.append(s)
-                    continue
-                pct_col = self._first_col(df_daily, "pct_chg", "涨跌幅")
-                if pct_col is None:
-                    filtered.append(s)
-                    continue
-                date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
-                df_daily = df_daily.sort_values(date_col).tail(days)
-                pct = pd.to_numeric(df_daily[pct_col], errors="coerce").fillna(0)
-                limit_up_count = int((pct >= pct_threshold).sum())
-                if limit_up_count >= min_limit_up_days:
-                    logger.debug(f"[Screener] Exclude {s.code} limit-up streak: {limit_up_count} days in last {days}")
-                else:
-                    filtered.append(s)
-            except Exception as e:
-                logger.debug(f"[Screener] Limit-up check failed for {s.code}: {e}")
+            df_daily, _ = batch.get((s.code, "", end_date, days + 5), (None, ""))
+            if df_daily is None or len(df_daily) < days:
                 filtered.append(s)
+                continue
+            pct_col = self._first_col(df_daily, "pct_chg", "涨跌幅")
+            if pct_col is None:
+                filtered.append(s)
+                continue
+            pct_threshold = LIMIT_UP_PCT_KC_CY if is_kc_cy_stock(s.code) else LIMIT_UP_PCT_MAIN
+            date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
+            df_daily = df_daily.sort_values(date_col).tail(days)
+            pct = pd.to_numeric(df_daily[pct_col], errors="coerce").fillna(0)
+            limit_up_count = int((pct >= pct_threshold).sum())
+            if limit_up_count >= min_limit_up_days:
+                logger.debug(
+                    f"[Screener] Exclude {s.code} limit-up streak: {limit_up_count} days in last {days}"
+                )
+            else:
+                filtered.append(s)
+        return filtered
+
+    def _filter_consecutive_up_days(
+        self,
+        candidates: List[ScreenedStock],
+        days: int = 5,
+    ) -> List[ScreenedStock]:
+        """Exclude stocks with too many consecutive up days (avoid buying at streak end).
+
+        Mode-specific max_consecutive_up_days:
+        - defensive: 2 days max
+        - balanced: 3 days max
+        - offensive: 4 days max
+        """
+        if not self._data_manager or not candidates:
+            return candidates
+
+        mode_params = PickerModeParams.for_mode(self._picker_mode)
+        max_up_days = mode_params.max_consecutive_up_days
+        end_date = self._as_of_date
+        requests = [(s.code, None, end_date, days + 5) for s in candidates]
+        batch = self._fetch_daily_batch(requests)
+        filtered = []
+        for s in candidates:
+            df_daily, _ = batch.get((s.code, "", end_date, days + 5), (None, ""))
+            if df_daily is None or len(df_daily) < days:
+                filtered.append(s)
+                continue
+            pct_col = self._first_col(df_daily, "pct_chg", "涨跌幅")
+            if pct_col is None:
+                filtered.append(s)
+                continue
+            date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
+            df_daily = df_daily.sort_values(date_col).tail(days)
+            pct_series = pd.to_numeric(df_daily[pct_col], errors="coerce").fillna(0).values
+
+            consecutive_up = 0
+            for pct in reversed(pct_series):
+                if pct > 0:
+                    consecutive_up += 1
+                else:
+                    break
+
+            if consecutive_up > max_up_days:
+                logger.debug(
+                    f"[Screener] Exclude {s.code}: {consecutive_up} consecutive up days > max {max_up_days}"
+                )
+            else:
+                filtered.append(s)
+        return filtered
+
+    def _filter_healthy_pullback(
+        self,
+        candidates: List[ScreenedStock],
+        lookback_days: int = 20,
+    ) -> List[ScreenedStock]:
+        """Filter for healthy pullback confirmation to distinguish from trend reversal.
+
+        Checks (mode-specific):
+        1. Volume shrink: volume_ratio < 1.0 on pullback day (缩量回调)
+        2. MA bullish alignment: MA5 > MA10 > MA20 (均线多头排列)
+        3. Retracement limit: pullback < X% of prior 10d rally (回调幅度限制)
+        """
+        if not self._data_manager or not candidates:
+            return candidates
+
+        mode_params = PickerModeParams.for_mode(self._picker_mode)
+        end_date = self._as_of_date
+
+        # Batch fetch daily data for all candidates
+        requests = [(s.code, None, end_date, lookback_days + 5) for s in candidates]
+        batch = self._fetch_daily_batch(requests)
+
+        filtered = []
+        for s in candidates:
+            df_daily, _ = batch.get((s.code, "", end_date, lookback_days + 5), (None, ""))
+            if df_daily is None or len(df_daily) < 10:
+                filtered.append(s)  # Keep if no data
+                continue
+
+            close_col = self._first_col(df_daily, "close", "收盘", "最新价")
+            high_col = self._first_col(df_daily, "high", "最高")
+            date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
+            if close_col is None:
+                filtered.append(s)
+                continue
+
+            df_daily = df_daily.sort_values(date_col).tail(lookback_days).reset_index(drop=True)
+            close_series = pd.to_numeric(df_daily[close_col], errors="coerce").fillna(0)
+
+            # Check 1: Volume shrink (if required)
+            if mode_params.require_volume_shrink and s.volume_ratio >= 1.0:
+                # Pullback day should have volume_ratio < 1.0 (less selling pressure)
+                # Only exclude if today is actually a down/flat day
+                if s.change_pct <= 0:
+                    logger.debug(f"[Screener] Exclude {s.code}: pullback but volume_ratio={s.volume_ratio:.2f} >= 1.0")
+                    continue
+
+            # Check 2: MA bullish alignment (MA5 > MA10 > MA20)
+            if mode_params.require_ma_bullish and len(close_series) >= 20:
+                ma5 = float(close_series.tail(5).mean())
+                ma10 = float(close_series.tail(10).mean())
+                ma20 = float(close_series.tail(20).mean())
+                if not (ma5 > ma10 > ma20):
+                    logger.debug(
+                        f"[Screener] Exclude {s.code}: MA not bullish (MA5={ma5:.2f}, MA10={ma10:.2f}, MA20={ma20:.2f})"
+                    )
+                    continue
+
+            # Check 3: Retracement limit
+            if len(close_series) >= 10 and high_col:
+                high_series = pd.to_numeric(df_daily[high_col], errors="coerce").fillna(0)
+                # Prior 10d high and low
+                recent_high = float(high_series.tail(10).max())
+                recent_low = float(close_series.tail(10).min())
+                rally = recent_high - recent_low
+                if rally > 0 and recent_high > 0:
+                    current_pullback = recent_high - s.price
+                    retracement = current_pullback / rally if rally > 0 else 0
+                    if retracement > mode_params.max_retracement_pct:
+                        logger.debug(
+                            f"[Screener] Exclude {s.code}: retracement {retracement:.1%} > max {mode_params.max_retracement_pct:.1%}"
+                        )
+                        continue
+
+            filtered.append(s)
+
         return filtered
 
     def _filter_b_wave_risk(
@@ -542,61 +754,55 @@ class StockScreener:
         """
         if not self._data_manager or not candidates:
             return candidates
-        filtered = []
         end_date = self._as_of_date
+        requests = [(s.code, None, end_date, lookback_days + 5) for s in candidates]
+        batch = self._fetch_daily_batch(requests)
+        filtered = []
         for s in candidates:
-            try:
-                df_daily, _ = self._data_manager.get_daily_data(
-                    s.code, end_date=end_date, days=lookback_days + 5
+            df_daily, _ = batch.get((s.code, "", end_date, lookback_days + 5), (None, ""))
+            if df_daily is None or len(df_daily) < lookback_days:
+                filtered.append(s)
+                continue
+            close_col = self._first_col(df_daily, "close", "收盘", "最新价")
+            if close_col is None:
+                filtered.append(s)
+                continue
+            date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
+            df_daily = df_daily.sort_values(date_col).tail(lookback_days).reset_index(drop=True)
+            ser = pd.to_numeric(df_daily[close_col], errors="coerce").fillna(0)
+            if len(ser) < lookback_days:
+                filtered.append(s)
+                continue
+            idx_max = int(ser.idxmax())
+            idx_min = int(ser.idxmin())
+            high_val = float(ser.iloc[idx_max])
+            low_val = float(ser.iloc[idx_min])
+            if high_val <= 0 or low_val <= 0:
+                filtered.append(s)
+                continue
+
+            if idx_min <= idx_max:
+                filtered.append(s)
+                continue
+            drop_pct = (high_val - low_val) / high_val * 100
+            if drop_pct < B_WAVE_MIN_DROOP_PCT:
+                filtered.append(s)
+                continue
+
+            current = s.price
+            rebound_pct = (current - low_val) / low_val * 100 if low_val > 0 else 0
+            retracement = rebound_pct / drop_pct if drop_pct > 0 else 0
+            days_since_low = (len(ser) - 1) - idx_min
+
+            if (
+                B_WAVE_RETRACE_LO <= retracement <= B_WAVE_RETRACE_HI
+                and B_WAVE_LOW_DAYS_AGO_MIN <= days_since_low <= B_WAVE_LOW_DAYS_AGO_MAX
+            ):
+                logger.debug(
+                    f"[Screener] Exclude {s.code} B-wave risk: drop={drop_pct:.1f}%, "
+                    f"retrace={retracement:.0%}, low {days_since_low}d ago"
                 )
-                if df_daily is None or len(df_daily) < lookback_days:
-                    filtered.append(s)
-                    continue
-                close_col = self._first_col(df_daily, "close", "收盘", "最新价")
-                if close_col is None:
-                    filtered.append(s)
-                    continue
-                date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
-                df_daily = df_daily.sort_values(date_col).tail(lookback_days).reset_index(drop=True)
-                ser = pd.to_numeric(df_daily[close_col], errors="coerce").fillna(0)
-                if len(ser) < lookback_days:
-                    filtered.append(s)
-                    continue
-                idx_max = int(ser.idxmax())
-                idx_min = int(ser.idxmin())
-                high_val = float(ser.iloc[idx_max])
-                low_val = float(ser.iloc[idx_min])
-                if high_val <= 0 or low_val <= 0:
-                    filtered.append(s)
-                    continue
-
-                # Require drop after high (A-wave)
-                if idx_min <= idx_max:
-                    filtered.append(s)
-                    continue
-                drop_pct = (high_val - low_val) / high_val * 100
-                if drop_pct < B_WAVE_MIN_DROOP_PCT:
-                    filtered.append(s)
-                    continue
-
-                # Rebound from low (B-wave)
-                current = s.price
-                rebound_pct = (current - low_val) / low_val * 100 if low_val > 0 else 0
-                retracement = rebound_pct / drop_pct if drop_pct > 0 else 0
-                days_since_low = (len(ser) - 1) - idx_min
-
-                if (
-                    B_WAVE_RETRACE_LO <= retracement <= B_WAVE_RETRACE_HI
-                    and B_WAVE_LOW_DAYS_AGO_MIN <= days_since_low <= B_WAVE_LOW_DAYS_AGO_MAX
-                ):
-                    logger.debug(
-                        f"[Screener] Exclude {s.code} B-wave risk: drop={drop_pct:.1f}%, "
-                        f"retrace={retracement:.0%}, low {days_since_low}d ago"
-                    )
-                else:
-                    filtered.append(s)
-            except Exception as e:
-                logger.debug(f"[Screener] B-wave check failed for {s.code}: {e}")
+            else:
                 filtered.append(s)
         return filtered
 
@@ -841,14 +1047,24 @@ class StockScreener:
         return df
 
     def _filter_momentum(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Layer 2: Strong positive momentum — strict uptrend filter."""
-        # Today's change > 0% (must be positive, showing strength)
+        """Layer 2: Pullback entry filter — buy near support, not chase highs.
+
+        Strategy shift: Instead of requiring positive change (追涨), we now
+        prefer stocks that are consolidating or pulling back to support.
+        Mode-specific daily change range controls entry aggressiveness.
+        """
+        mode_params = PickerModeParams.for_mode(self._picker_mode)
+
+        # Daily change within mode-specific range (pullback strategy)
         if "涨跌幅" in df.columns:
             pct = pd.to_numeric(df["涨跌幅"], errors="coerce")
-            # Chase risk: exclude near limit-up (today > 9% = likely overextended)
-            df = df[(pct > 0) & (pct < 9.0)]
+            # Mode-specific range: defensive [-2,2], balanced [-1,4], offensive [0,6]
+            df = df[(pct >= mode_params.daily_change_min) & (pct <= mode_params.daily_change_max)]
+            logger.debug(
+                f"[Screener] Momentum filter: daily change in [{mode_params.daily_change_min}, {mode_params.daily_change_max}]%"
+            )
 
-        # 60-day change > 5% (clear medium-term uptrend)
+        # 60-day change > 5% (clear medium-term uptrend — keep this requirement)
         if "60日涨跌幅" in df.columns:
             pct60 = pd.to_numeric(df["60日涨跌幅"], errors="coerce")
             df = df[pct60 > 5]
@@ -890,9 +1106,25 @@ class StockScreener:
         return max(0.0, decay)
 
     def _score_momentum(self, change_pct: float) -> float:
-        """Score today's momentum. Cap at 8%, penalty for >7% (chase risk)."""
-        score = min(change_pct, 8.0) * 2.5
-        return score - 15 if change_pct > 7 else score
+        """Score today's momentum — pullback strategy: lower change = better entry.
+
+        New logic (回踩优先):
+        - Change near 0% (pullback/consolidation): highest score
+        - Change 0-3%: good entry, moderate score
+        - Change 3-5%: acceptable, lower score
+        - Change >5%: chase risk, penalty
+        - Change <-2%: possible breakdown, penalty
+        """
+        if change_pct < -2:
+            return -5.0  # Too weak, possible breakdown
+        if -2 <= change_pct <= 1:
+            return 20.0  # Best: pullback or slight dip, ideal entry
+        if 1 < change_pct <= 3:
+            return 15.0  # Good: small up, still reasonable entry
+        if 3 < change_pct <= 5:
+            return 8.0   # Acceptable: moderate chase
+        # change_pct > 5: chase risk
+        return max(0.0, 8.0 - (change_pct - 5) * 3)  # Penalty for chasing
 
     def _score_volume(self, vol_ratio: float) -> float:
         """Score volume confirmation. 1.0-3.0 ideal, >3.0 partial, >0.8 minimal."""
