@@ -133,25 +133,20 @@ async def recommend_stocks(body: Optional[PickerRecommendRequest] = Body(None)):
             timeout=_PICKER_TIMEOUT,
         )
         result_dict = result.to_dict()
+        picker_mode = result_dict.get("picker_mode") or "balanced"
+        picker_leader_bias_exempt_pct = result_dict.get("picker_leader_bias_exempt_pct")
 
         history_id = None
         if result_dict.get("success"):
             try:
                 history_id = _get_db().save_picker_history(
-                    result_dict,
-                    picker_mode=result_dict.get("picker_mode") or "balanced",
-                    picker_leader_bias_exempt_pct=result_dict.get("picker_leader_bias_exempt_pct"),
+                    result_dict, picker_mode=picker_mode, picker_leader_bias_exempt_pct=picker_leader_bias_exempt_pct
                 )
                 logger.info(f"[PickerAPI] Saved picker history id={history_id}")
             except Exception as exc:
                 logger.warning(f"[PickerAPI] Failed to save history: {exc}")
 
-        return PickerResponse(
-            **result_dict,
-            history_id=history_id,
-            picker_mode=result_dict.get("picker_mode") or "balanced",
-            picker_leader_bias_exempt_pct=result_dict.get("picker_leader_bias_exempt_pct"),
-        )
+        return PickerResponse(**result_dict, history_id=history_id)
 
     except asyncio.TimeoutError:
         logger.error(f"[PickerAPI] Timed out after {_PICKER_TIMEOUT}s")
