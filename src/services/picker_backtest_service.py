@@ -77,18 +77,36 @@ class PickerBacktestService:
         return self._tushare_api
 
     def _get_trade_dates(self, start_date: str, end_date: str) -> List[str]:
-        """Get list of trading dates in range (YYYYMMDD)."""
+        """Get list of trading dates in range (YYYYMMDD). Tushare first, fallback to exchange_calendars."""
+        start = start_date.replace("-", "").replace("/", "")[:8]
+        end = end_date.replace("-", "").replace("/", "")[:8]
+        start_iso = f"{start[:4]}-{start[4:6]}-{start[6:8]}"
+        end_iso = f"{end[:4]}-{end[4:6]}-{end[6:8]}"
+
+        # Try Tushare first
         api = self._get_tushare_api()
-        if api is None:
-            raise RuntimeError("Tushare API required for picker backtest")
-        start = start_date.replace("-", "")[:8]
-        end = end_date.replace("-", "")[:8]
-        df = api.trade_cal(exchange="SSE", start_date=start, end_date=end)
-        if df is None or df.empty:
+        if api is not None:
+            try:
+                df = api.trade_cal(exchange="SSE", start_date=start, end_date=end)
+                if df is not None and not df.empty:
+                    df.columns = [c.lower() for c in df.columns]
+                    df = df[df["is_open"] == 1].sort_values("cal_date")
+                    return df["cal_date"].astype(str).tolist()
+            except Exception as e:
+                logger.debug("Tushare trade_cal failed, trying exchange_calendars: %s", e)
+
+        # Fallback: exchange_calendars (supports wider date range)
+        try:
+            import exchange_calendars as xcals
+            cal = xcals.get_calendar("XSHG")
+            sessions = cal.sessions_in_range(start_iso, end_iso)
+            return [s.strftime("%Y%m%d") for s in sessions]
+        except ImportError:
+            logger.warning("exchange_calendars not installed; cannot fallback for trade dates")
             return []
-        df.columns = [c.lower() for c in df.columns]
-        df = df[df["is_open"] == 1].sort_values("cal_date")
-        return df["cal_date"].astype(str).tolist()
+        except Exception as e:
+            logger.warning("exchange_calendars sessions_in_range failed: %s", e)
+            return []
 
     def _get_exit_date(self, trade_date: str, hold_days: int) -> Optional[str]:
         """Get exit date (hold_days trading days after trade_date)."""
@@ -307,7 +325,7 @@ class PickerBacktestService:
         trade_dates = self._get_trade_dates(start_date, end_date)
         if not trade_dates:
             return {
-                "error": "No trading dates in range",
+                "error": "所选日期范围内无交易日，请检查日期格式或扩大范围",
                 "results": [],
                 "summary": None,
             }

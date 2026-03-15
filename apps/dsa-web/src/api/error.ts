@@ -389,12 +389,14 @@ export function parseApiError(error: unknown): ParsedApiError {
     });
   }
 
+  // Only treat as LLM error when error clearly references an LLM provider/API (not generic "bad request")
   const hasLlmProviderHint = includesAny(matchText, [
-    'bad request',
     'chat/completions',
     'generativelanguage',
     'openai',
     'gemini',
+    'dashscope',
+    'anthropic',
   ]);
   if ((status === 400 || includesAny(matchText, ['bad request'])) && hasLlmProviderHint) {
     return createParsedApiError({
