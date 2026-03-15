@@ -430,9 +430,9 @@ const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({
 
 /* ── Main page ───────────────────────────────────────────────── */
 const MODE_OPTIONS: { value: PickerMode; label: string }[] = [
-  { value: 'defensive', label: '严进 (PE≤50, 乖离率6%, 龙头不豁免)' },
+  { value: 'defensive', label: '严进 (偏稳健/蓝筹, PE≤50, 乖离率6%)' },
   { value: 'balanced', label: '平衡 (PE≤100, 乖离率8%, 龙头可放宽至12%)' },
-  { value: 'offensive', label: '进攻 (PE放宽, 乖离率10%, 龙头可放宽至12%)' },
+  { value: 'offensive', label: '进攻 (偏动量/龙头, PE放宽, 乖离率10%)' },
 ];
 
 // 各模式默认龙头豁免%：严进不豁免，平衡/进攻允许板块龙头放宽
@@ -543,48 +543,49 @@ const PickerPage: React.FC = () => {
           </p>
         </div>
 
-        {/* ─── Mode selector ─── */}
-        <div className="flex justify-center mb-8">
-          <div className="flex items-center gap-2">
-            <label className="text-sm font-medium text-secondary">选股模式</label>
-            <select
-              value={pickerMode}
-              onChange={(e) => setPickerMode(e.target.value as PickerMode)}
+        {/* ─── Mode selector + Action button (same row) ─── */}
+        <div className="flex flex-col items-center gap-2 mb-14">
+          <div className="flex flex-wrap justify-center gap-3 [&>*]:h-11 [&>*]:flex [&>*]:items-center">
+            <div className="gap-2 shrink-0">
+              <label className="text-sm font-medium text-secondary shrink-0">选股模式</label>
+              <select
+                value={pickerMode}
+                onChange={(e) => setPickerMode(e.target.value as PickerMode)}
+                disabled={loading}
+                className="h-11 px-4 rounded-xl border border-border bg-card text-primary text-sm min-w-[280px]
+                           focus:ring-2 focus:ring-cyan/30 focus:border-cyan disabled:opacity-60"
+              >
+                {MODE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
+            <button
+              onClick={handleRun}
               disabled={loading}
-              className="px-4 py-2.5 rounded-xl border border-border bg-card text-primary text-sm min-w-[280px]
-                         focus:ring-2 focus:ring-cyan/30 focus:border-cyan disabled:opacity-60"
+              className="shrink-0 group relative px-10 bg-cyan text-white text-base font-semibold rounded-2xl
+                         hover:bg-cyan/90 disabled:opacity-60 disabled:cursor-not-allowed
+                         transition-all shadow-glow-cyan hover:shadow-[0_8px_30px_rgba(37,99,235,0.25)]
+                         justify-center gap-3"
             >
-              {MODE_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
+              {loading ? (
+                <>
+                  <Spinner size="sm" className="border-white/30 border-t-white" />
+                  <span>正在分析市场...</span>
+                </>
+              ) : (
+                <>
+                  <svg className="w-5 h-5 transition-transform group-hover:rotate-12 group-hover:scale-110" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                  </svg>
+                  <span>开始选股</span>
+                </>
+              )}
+            </button>
           </div>
-        </div>
-
-        {/* ─── Action button ─── */}
-        <div className="flex justify-center mb-14">
-          <button
-            onClick={handleRun}
-            disabled={loading}
-            className="group relative px-10 py-4 bg-cyan text-white text-base font-semibold rounded-2xl
-                       hover:bg-cyan/90 disabled:opacity-60 disabled:cursor-not-allowed
-                       transition-all shadow-glow-cyan hover:shadow-[0_8px_30px_rgba(37,99,235,0.25)]
-                       flex items-center gap-3"
-          >
-            {loading ? (
-              <>
-                <Spinner size="sm" className="border-white/30 border-t-white" />
-                <span>正在分析市场...</span>
-              </>
-            ) : (
-              <>
-                <svg className="w-5 h-5 transition-transform group-hover:rotate-12 group-hover:scale-110" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                </svg>
-                <span>开始选股</span>
-              </>
-            )}
-          </button>
+          <p className="text-xs text-muted">
+            严进偏稳健蓝筹 · 平衡兼顾趋势与估值 · 进攻偏动量龙头
+          </p>
         </div>
 
         {/* ─── Loading ─── */}
