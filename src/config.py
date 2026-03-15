@@ -250,7 +250,13 @@ class Config:
     backtest_min_age_days: int = 14
     backtest_engine_version: str = "v1"
     backtest_neutral_band_pct: float = 2.0
-    
+
+    # === 选股配置 ===
+    # PICKER_MODE: defensive(严进) / offensive(进攻) / balanced(平衡)
+    picker_mode: str = "balanced"
+    # 板块龙头乖离率豁免(%)，0=不豁免，12=龙头可放宽至12%
+    picker_leader_bias_exempt_pct: float = 0.0
+
     # === 日志配置 ===
     log_dir: str = "./logs"  # 日志文件目录
     log_level: str = "INFO"  # 日志级别
@@ -691,6 +697,8 @@ class Config:
             backtest_min_age_days=int(os.getenv('BACKTEST_MIN_AGE_DAYS', '14')),
             backtest_engine_version=os.getenv('BACKTEST_ENGINE_VERSION', 'v1'),
             backtest_neutral_band_pct=float(os.getenv('BACKTEST_NEUTRAL_BAND_PCT', '2.0')),
+            picker_mode=cls._parse_picker_mode(os.getenv('PICKER_MODE', 'balanced')),
+            picker_leader_bias_exempt_pct=float(os.getenv('PICKER_LEADER_BIAS_EXEMPT_PCT', '0')),
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             max_workers=int(os.getenv('MAX_WORKERS', '3')),
@@ -1027,6 +1035,20 @@ class Config:
                 "(valid: wkhtmltoimage | markdown-to-file)"
             )
         return 'wkhtmltoimage'
+
+    @classmethod
+    def _parse_picker_mode(cls, value: str) -> str:
+        """Parse PICKER_MODE, fallback to balanced for invalid values."""
+        v = (value or 'balanced').strip().lower()
+        if v in ('defensive', 'offensive', 'balanced'):
+            return v
+        if v:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"PICKER_MODE '{value}' invalid, fallback to 'balanced' "
+                "(valid: defensive | offensive | balanced)"
+            )
+        return 'balanced'
 
     @classmethod
     def _resolve_realtime_source_priority(cls) -> str:

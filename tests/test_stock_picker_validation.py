@@ -64,13 +64,17 @@ def _get_picker_module():
     return mod
 
 
-def _screener():
-    """Get StockScreener instance."""
+def _screener(mode: str = "balanced", leader_bias_exempt_pct: float = 0.0):
+    """Get StockScreener instance. Optional mode: defensive/balanced/offensive."""
     try:
         from src.services.stock_picker_service import StockScreener
     except ImportError:
         StockScreener = _get_picker_module().StockScreener
-    return StockScreener(data_manager=None)
+    return StockScreener(
+        data_manager=None,
+        picker_mode=mode,
+        picker_leader_bias_exempt_pct=leader_bias_exempt_pct,
+    )
 
 
 def _row(**kwargs):
@@ -117,13 +121,13 @@ def test_volume_ratio_min_constant():
 
 
 def test_pe_max_constant():
-    """Verify PE filter uses PE_MAX=100."""
+    """Verify balanced mode PE max is 100."""
     try:
-        from src.services.stock_picker_service import PE_MAX
+        from src.services.stock_picker_service import PickerModeParams
     except ImportError:
-        PE_MAX = _get_picker_module().PE_MAX
+        PickerModeParams = _get_picker_module().PickerModeParams
 
-    assert PE_MAX == 100
+    assert PickerModeParams.for_mode("balanced").pe_max == 100
 
 
 def test_limit_up_thresholds():
@@ -139,9 +143,42 @@ def test_limit_up_thresholds():
     assert LIMIT_UP_PCT_KC_CY == 19.0
 
 
-def test_pe_filter_excludes_above_100():
-    """PE > 100 should be excluded by basic filter."""
-    screener = _screener()
+def test_mode_params_all_modes():
+    """Verify PickerModeParams for defensive, balanced, offensive."""
+    try:
+        from src.services.stock_picker_service import PickerModeParams
+    except ImportError:
+        PickerModeParams = _get_picker_module().PickerModeParams
+
+    d = PickerModeParams.for_mode("defensive")
+    assert d.max_bias_pct == 6.0 and d.pe_max == 50 and d.pe_ideal_low == 10 and d.pe_ideal_high == 25
+
+    b = PickerModeParams.for_mode("balanced")
+    assert b.max_bias_pct == 8.0 and b.pe_max == 100 and b.pe_ideal_low == 10 and b.pe_ideal_high == 30
+
+    o = PickerModeParams.for_mode("offensive")
+    assert o.max_bias_pct == 10.0 and o.pe_max == 100 and o.pe_ideal_low == 20 and o.pe_ideal_high == 50
+
+    # Unknown mode falls back to balanced
+    x = PickerModeParams.for_mode("invalid")
+    assert x.max_bias_pct == 8.0
+
+
+def test_pe_filter_defensive_excludes_above_50():
+    """Defensive mode: PE > 50 excluded."""
+    screener = _screener(mode="defensive")
+    df = pd.DataFrame([
+        _row(**{"市盈率-动态": 30}),
+        _row(代码="B", 名称="B", **{"市盈率-动态": 60}),
+    ])
+    filtered = screener._filter_basic(df)
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["代码"] == "600519"
+
+
+def test_pe_filter_balanced_excludes_above_100():
+    """Balanced mode: PE > 100 excluded."""
+    screener = _screener(mode="balanced")
     df = pd.DataFrame([
         _row(**{"市盈率-动态": 50}),
         _row(代码="B", 名称="B", **{"市盈率-动态": 150}),
@@ -149,6 +186,62 @@ def test_pe_filter_excludes_above_100():
     filtered = screener._filter_basic(df)
     assert len(filtered) == 1
     assert filtered.iloc[0]["代码"] == "600519"
+
+
+def test_pe_filter_offensive_allows_high_pe():
+    """Offensive mode: PE 80 allowed (pe_max 100)."""
+    screener = _screener(mode="offensive")
+    df = pd.DataFrame([
+        _row(**{"市盈率-动态": 80}),
+    ])
+    filtered = screener._filter_basic(df)
+    assert len(filtered) == 1
+
+
+def test_pe_scoring_defensive_ideal_range():
+    """Defensive: PE 15 in ideal 10-25 gets full score."""
+    screener = _screener(mode="defensive")
+    df = pd.DataFrame([
+        _row(代码="A", 名称="A", **{"市盈率-动态": 15}),
+        _row(代码="B", 名称="B", **{"市盈率-动态": 40}),
+    ])
+    recs = screener._score_and_rank(df, top_n=5)
+    assert len(recs) == 2
+    scores = {r.code: r.score for r in recs}
+    assert scores["A"] > scores["B"]
+
+
+def test_pe_scoring_offensive_ideal_range():
+    """Offensive: PE 35 in ideal 20-50 gets full score, PE 15 gets partial."""
+    screener = _screener(mode="offensive")
+    df = pd.DataFrame([
+        _row(代码="A", 名称="A", **{"市盈率-动态": 35}),
+        _row(代码="B", 名称="B", **{"市盈率-动态": 15}),
+    ])
+    recs = screener._score_and_rank(df, top_n=5)
+    assert len(recs) == 2
+    scores = {r.code: r.score for r in recs}
+    assert scores["A"] > scores["B"]
+
+
+def test_leader_exemption_candidate():
+    """Verify _is_leader_candidate: 60d>15%, change 2-7%, vol_ratio>1.5, turnover 2-8%."""
+    screener = _screener()
+    try:
+        from src.services.stock_picker_service import ScreenedStock
+    except ImportError:
+        ScreenedStock = _get_picker_module().ScreenedStock
+
+    leader = ScreenedStock(
+        code="001", name="L", price=10, change_pct=5, volume_ratio=2, turnover_rate=5,
+        pe=20, pb=2, market_cap=100, amount=1, change_pct_60d=20, score=50,
+    )
+    non_leader = ScreenedStock(
+        code="002", name="N", price=10, change_pct=1, volume_ratio=1, turnover_rate=1,
+        pe=20, pb=2, market_cap=100, amount=1, change_pct_60d=10, score=50,
+    )
+    assert screener._is_leader_candidate(leader) is True
+    assert screener._is_leader_candidate(non_leader) is False
 
 
 def test_60d_decay_scoring():
@@ -197,7 +290,13 @@ if __name__ == "__main__":
         test_volume_ratio_min_constant,
         test_pe_max_constant,
         test_limit_up_thresholds,
-        test_pe_filter_excludes_above_100,
+        test_mode_params_all_modes,
+        test_pe_filter_defensive_excludes_above_50,
+        test_pe_filter_balanced_excludes_above_100,
+        test_pe_filter_offensive_allows_high_pe,
+        test_pe_scoring_defensive_ideal_range,
+        test_pe_scoring_offensive_ideal_range,
+        test_leader_exemption_candidate,
         test_60d_decay_scoring,
         test_60d_25_vs_40_ordering,
         test_volume_filter_excludes_below_1_0,

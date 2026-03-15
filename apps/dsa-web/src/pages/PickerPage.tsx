@@ -4,6 +4,7 @@ import {
   fetchPickerHistory,
   fetchPickerDetail,
   type PickerResponse,
+  type PickerMode,
   type StockPick,
   type ScreenStats,
   type ScreenedStock,
@@ -412,10 +413,24 @@ const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({
 };
 
 /* ── Main page ───────────────────────────────────────────────── */
+const MODE_OPTIONS: { value: PickerMode; label: string }[] = [
+  { value: 'defensive', label: '严进 (PE≤50, 乖离率6%, 龙头不豁免)' },
+  { value: 'balanced', label: '平衡 (PE≤100, 乖离率8%, 龙头可放宽至12%)' },
+  { value: 'offensive', label: '进攻 (PE放宽, 乖离率10%, 龙头可放宽至12%)' },
+];
+
+// 各模式默认龙头豁免%：严进不豁免，平衡/进攻允许板块龙头放宽
+const MODE_LEADER_EXEMPT: Record<PickerMode, number> = {
+  defensive: 0,
+  balanced: 12,
+  offensive: 12,
+};
+
 const PickerPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<PickerResponse | null>(null);
   const [error, setError] = useState('');
+  const [pickerMode, setPickerMode] = useState<PickerMode>('balanced');
 
   const [history, setHistory] = useState<PickerHistoryItem[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
@@ -444,7 +459,11 @@ const PickerPage: React.FC = () => {
     setResult(null);
     setViewingHistoryId(null);
     try {
-      const data = await fetchRecommendations();
+      const params = {
+        picker_mode: pickerMode,
+        picker_leader_bias_exempt_pct: MODE_LEADER_EXEMPT[pickerMode],
+      };
+      const data = await fetchRecommendations(params);
       if (data.success) {
         setResult(data);
         loadHistory();
@@ -506,6 +525,24 @@ const PickerPage: React.FC = () => {
             从全市场 5000+ 只 A 股中，经过多层量化筛选缩小范围，再结合板块轮动与新闻热点，<br className="hidden sm:block"/>
             由 AI 从候选池中精选最值得关注的标的
           </p>
+        </div>
+
+        {/* ─── Mode selector ─── */}
+        <div className="flex justify-center mb-8">
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium text-secondary">选股模式</label>
+            <select
+              value={pickerMode}
+              onChange={(e) => setPickerMode(e.target.value as PickerMode)}
+              disabled={loading}
+              className="px-4 py-2.5 rounded-xl border border-border bg-card text-primary text-sm min-w-[280px]
+                         focus:ring-2 focus:ring-cyan/30 focus:border-cyan disabled:opacity-60"
+            >
+              {MODE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
         </div>
 
         {/* ─── Action button ─── */}

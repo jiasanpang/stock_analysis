@@ -14,7 +14,7 @@ import logging
 import os
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,12 @@ class PickRecommendation(BaseModel):
     catalyst: str = ""
     attention: str = "medium"
     risk_note: str = ""
+
+
+class PickerRecommendRequest(BaseModel):
+    """Optional overrides for picker run. Omit to use .env config."""
+    picker_mode: Optional[str] = Field(None, description="defensive | balanced | offensive")
+    picker_leader_bias_exempt_pct: Optional[float] = Field(None, ge=0, le=20, description="Leader bias exemption %")
 
 
 class PickerResponse(BaseModel):
@@ -101,16 +107,22 @@ def _get_db():
 
 
 @router.post("/recommend", response_model=PickerResponse)
-async def recommend_stocks():
+async def recommend_stocks(body: Optional[PickerRecommendRequest] = Body(None)):
     """
     Two-stage stock recommendation:
     Stage 1 — Quantitative screening from full A-share market
     Stage 2 — AI selection combining quant pool + market intelligence
+
+    Optional body: picker_mode (defensive|balanced|offensive), picker_leader_bias_exempt_pct (0-20).
     """
     try:
         from src.services.stock_picker_service import StockPickerService
 
-        service = StockPickerService()
+        req = body or PickerRecommendRequest()
+        service = StockPickerService(
+            picker_mode_override=req.picker_mode,
+            picker_leader_bias_exempt_override=req.picker_leader_bias_exempt_pct,
+        )
         loop = asyncio.get_event_loop()
         result = await asyncio.wait_for(
             loop.run_in_executor(None, service.run),

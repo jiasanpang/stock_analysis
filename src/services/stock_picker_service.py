@@ -27,6 +27,7 @@ from data_provider.base import DataFetcherManager, is_kc_cy_stock
 logger = logging.getLogger(__name__)
 
 # Bias filter threshold (严进策略): exclude stocks with MA5 bias > this %
+# Mode overrides: defensive=6%, balanced=8%, offensive=10%
 PICKER_MAX_BIAS_PCT = 8.0
 
 # Volume filter: require volume ratio > this to exclude cold stocks
@@ -40,8 +41,39 @@ LIMIT_UP_DAYS_THRESHOLD = 2
 LIMIT_UP_PCT_MAIN = 9.5   # main board (60/00/002) ~10%
 LIMIT_UP_PCT_KC_CY = 19.0  # ChiNext/STAR (30/688) ~20%
 
-# PE filter: exclude stocks with PE > this (obvious bubble)
-PE_MAX = 100
+# Leader bias exemption: 60d change > this % to qualify
+LEADER_CHANGE_60D_MIN = 15.0
+# Leader: today change 2-7%, volume_ratio > 1.5, turnover 2-8%
+LEADER_CHANGE_PCT_LO, LEADER_CHANGE_PCT_HI = 2.0, 7.0
+LEADER_VOLUME_RATIO_MIN = 1.5
+LEADER_TURNOVER_LO, LEADER_TURNOVER_HI = 2.0, 8.0
+# PE scoring: partial score upper bound (outside ideal but not bubble)
+PE_SCORE_PARTIAL_MAX = 80
+
+
+@dataclass
+class PickerModeParams:
+    """Mode-specific screening parameters (defensive/balanced/offensive)."""
+
+    max_bias_pct: float
+    pe_max: float
+    pe_ideal_low: float
+    pe_ideal_high: float
+
+    @classmethod
+    def for_mode(cls, mode: str) -> "PickerModeParams":
+        """Get params for given mode. Falls back to balanced for unknown mode."""
+        params = PICKER_MODE_PARAMS.get((mode or "balanced").lower())
+        return params or PICKER_MODE_PARAMS["balanced"]
+
+
+# Single source of truth for mode params
+PICKER_MODE_PARAMS = {
+    "defensive": PickerModeParams(max_bias_pct=6.0, pe_max=50, pe_ideal_low=10, pe_ideal_high=25),
+    "balanced": PickerModeParams(max_bias_pct=8.0, pe_max=100, pe_ideal_low=10, pe_ideal_high=30),
+    "offensive": PickerModeParams(max_bias_pct=10.0, pe_max=100, pe_ideal_low=20, pe_ideal_high=50),
+}
+
 
 # ── System prompt ────────────────────────────────────────────────
 
@@ -57,8 +89,8 @@ PICK_SYSTEM_PROMPT = """你是一位专业的 A 股市场分析师，负责从�
 ## 核心选股原则（严格遵循）
 
 ### 1. 严进策略（不追高）
-- **量化层**：筛选池已排除乖离率 > 8% 的标的（硬过滤）
-- **推荐优先级**：乖离率 < 3% 最佳买点；3-5% 可关注；5-8% 降级为观望
+- **量化层**：筛选池已根据模式排除乖离率过高的标的（defensive 6%/balanced 8%/offensive 10%）；若启用龙头豁免，板块龙头可放宽至配置值（需满足 60日涨幅>15%、今日涨幅 2-7%、量比>1.5、换手 2-8%）
+- **推荐优先级**：乖离率 < 3% 最佳买点；3-5% 可关注；接近阈值时降级为观望
 - **公式**：乖离率 = (现价 - MA5) / MA5 × 100%
 
 ### 2. 趋势质量优先
@@ -67,10 +99,11 @@ PICK_SYSTEM_PROMPT = """你是一位专业的 A 股市场分析师，负责从�
 - 60日涨幅 5-10%：弱势趋势，需更强催化剂才考虑
 - **今日涨幅**：2-6% 为健康上涨，>7% 需警惕追高风险
 
-### 3. 估值安全边际
-- PE 10-30 倍：理想区间，优先推荐
-- PE 30-50 倍：需有业绩成长性支撑
-- PE > 50 倍：谨慎，除非有强催化剂
+### 3. 估值安全边际（按模式）
+- **defensive**：PE 10-25 倍理想，>50 排除
+- **balanced**：PE 10-30 倍理想，30-50 需业绩支撑
+- **offensive**：PE 20-50 倍可接受（动量股），>50 谨慎
+- 具体区间见下方「当前配置」
 
 ### 4. 量能健康度
 - 量比 1.0-2.5：健康放量，加分
@@ -220,6 +253,16 @@ class PickerResult:
         }
 
 
+def create_screener_from_config(data_manager=None) -> "StockScreener":
+    """Create StockScreener with config from environment. Use for picker and backtest."""
+    cfg = get_config()
+    return StockScreener(
+        data_manager=data_manager,
+        picker_mode=cfg.picker_mode,
+        picker_leader_bias_exempt_pct=cfg.picker_leader_bias_exempt_pct,
+    )
+
+
 # ── Quantitative Screener ───────────────────────────────────────
 
 class StockScreener:
@@ -228,14 +271,24 @@ class StockScreener:
     _EXCLUDE_NAME_KEYWORDS = ("ST", "*ST", "退市", "N ", "C ")
     _ETF_PREFIXES = ("51", "52", "56", "58", "15", "16", "18")
 
-    def __init__(self, data_manager=None):
+    def __init__(
+        self,
+        data_manager=None,
+        picker_mode: str = "balanced",
+        picker_leader_bias_exempt_pct: float = 0.0,
+    ):
         self._data_manager = data_manager
+        self._as_of_date: Optional[str] = None  # YYYY-MM-DD for historical screening
+        self._picker_mode = (picker_mode or "balanced").lower()
+        self._leader_bias_exempt_pct = max(0.0, float(picker_leader_bias_exempt_pct))
 
-    def screen(self) -> Tuple[List[ScreenedStock], ScreenStats]:
-        """Run the full screening pipeline. Returns (candidates, stats)."""
+    def screen(self, trade_date: Optional[str] = None) -> Tuple[List[ScreenedStock], ScreenStats]:
+        """Run the full screening pipeline. Returns (candidates, stats).
+        When trade_date is provided (YYYYMMDD), run historical screening (Tushare only)."""
         stats = ScreenStats()
+        self._as_of_date = self._trade_date_to_iso(trade_date) if trade_date else None
 
-        df = self._fetch_spot_data()
+        df = self._fetch_spot_data(trade_date)
         if df is None or df.empty:
             logger.warning("[Screener] No spot data available")
             return [], stats
@@ -263,9 +316,14 @@ class StockScreener:
         stats.final_pool = len(candidates)
         logger.info(f"[Screener] Final pool: {len(candidates)} candidates")
 
-        # Layer 5: Bias filter (严进策略 — exclude MA5 bias > PICKER_MAX_BIAS_PCT)
+        # Layer 5: Bias filter (严进策略 — exclude MA5 bias > mode threshold)
         before_bias = len(candidates)
-        candidates = self._filter_by_bias(candidates, max_bias_pct=PICKER_MAX_BIAS_PCT)
+        mode_params = PickerModeParams.for_mode(self._picker_mode)
+        candidates = self._filter_by_bias(
+            candidates,
+            max_bias_pct=mode_params.max_bias_pct,
+            leader_bias_exempt_pct=self._leader_bias_exempt_pct,
+        )
         stats.final_pool = len(candidates)
         if len(candidates) < before_bias:
             logger.info(f"[Screener] After bias filter: {stats.final_pool} candidates (excluded {before_bias - len(candidates)})")
@@ -279,22 +337,60 @@ class StockScreener:
 
         return candidates, stats
 
-    def _filter_by_bias(self, candidates: List[ScreenedStock], max_bias_pct: float = PICKER_MAX_BIAS_PCT) -> List[ScreenedStock]:
-        """Filter out stocks with MA5 bias > max_bias_pct (严进策略)."""
+    def screen_as_of(self, trade_date: str) -> Tuple[List[ScreenedStock], ScreenStats]:
+        """Run screening as of a specific trade date (YYYYMMDD). For backtest use."""
+        return self.screen(trade_date=trade_date)
+
+    @staticmethod
+    def _first_col(df: pd.DataFrame, *names: str):
+        """Return first column name that exists in df, or None."""
+        for n in names:
+            if n in df.columns:
+                return n
+        return None
+
+    @staticmethod
+    def _trade_date_to_iso(trade_date: str) -> str:
+        """Convert YYYYMMDD to YYYY-MM-DD."""
+        if not trade_date or len(trade_date) != 8:
+            return trade_date
+        return f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+
+    @staticmethod
+    def _is_leader_candidate(s: ScreenedStock) -> bool:
+        """Check if stock qualifies for leader bias exemption (板块龙头+量能确认)."""
+        return (
+            s.change_pct_60d > LEADER_CHANGE_60D_MIN
+            and LEADER_CHANGE_PCT_LO <= s.change_pct <= LEADER_CHANGE_PCT_HI
+            and s.volume_ratio > LEADER_VOLUME_RATIO_MIN
+            and LEADER_TURNOVER_LO <= s.turnover_rate <= LEADER_TURNOVER_HI
+        )
+
+    def _filter_by_bias(
+        self,
+        candidates: List[ScreenedStock],
+        max_bias_pct: float = PICKER_MAX_BIAS_PCT,
+        leader_bias_exempt_pct: float = 0.0,
+    ) -> List[ScreenedStock]:
+        """Filter out stocks with MA5 bias > max_bias_pct (严进策略).
+        When leader_bias_exempt_pct > 0, allow bias up to that value for leader candidates."""
         if not self._data_manager or not candidates:
             return candidates
         filtered = []
+        end_date = self._as_of_date  # For historical screening
         for s in candidates:
             try:
-                df_daily, _ = self._data_manager.get_daily_data(s.code, days=10)
+                df_daily, _ = self._data_manager.get_daily_data(
+                    s.code, end_date=end_date, days=10
+                )
                 if df_daily is None or len(df_daily) < 5:
                     filtered.append(s)  # Keep if no data (don't exclude)
                     continue
-                close_col = next((c for c in ["close", "收盘"] if c in df_daily.columns), None)
+                close_col = self._first_col(df_daily, "close", "收盘")
                 if close_col is None:
                     filtered.append(s)
                     continue
-                date_col = next((c for c in ["date", "日期"] if c in df_daily.columns), df_daily.columns[0])
+                date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
                 df_daily = df_daily.sort_values(date_col).tail(5)
                 ma5 = float(df_daily[close_col].mean())
                 if ma5 <= 0:
@@ -303,6 +399,13 @@ class StockScreener:
                 bias_pct = (s.price - ma5) / ma5 * 100
                 if bias_pct <= max_bias_pct:
                     filtered.append(s)
+                elif (
+                    leader_bias_exempt_pct > 0
+                    and bias_pct <= leader_bias_exempt_pct
+                    and self._is_leader_candidate(s)
+                ):
+                    filtered.append(s)
+                    logger.debug(f"[Screener] Leader exempt {s.code} bias={bias_pct:.1f}%")
                 else:
                     logger.debug(f"[Screener] Exclude {s.code} bias={bias_pct:.1f}% > {max_bias_pct}%")
             except Exception as e:
@@ -322,18 +425,21 @@ class StockScreener:
         if not self._data_manager or not candidates:
             return candidates
         filtered = []
+        end_date = self._as_of_date  # For historical screening
         for s in candidates:
             try:
                 pct_threshold = LIMIT_UP_PCT_KC_CY if is_kc_cy_stock(s.code) else LIMIT_UP_PCT_MAIN
-                df_daily, _ = self._data_manager.get_daily_data(s.code, days=days + 5)
+                df_daily, _ = self._data_manager.get_daily_data(
+                    s.code, end_date=end_date, days=days + 5
+                )
                 if df_daily is None or len(df_daily) < days:
                     filtered.append(s)
                     continue
-                pct_col = next((c for c in ["pct_chg", "涨跌幅"] if c in df_daily.columns), None)
+                pct_col = self._first_col(df_daily, "pct_chg", "涨跌幅")
                 if pct_col is None:
                     filtered.append(s)
                     continue
-                date_col = next((c for c in ["date", "日期"] if c in df_daily.columns), df_daily.columns[0])
+                date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
                 df_daily = df_daily.sort_values(date_col).tail(days)
                 pct = pd.to_numeric(df_daily[pct_col], errors="coerce").fillna(0)
                 limit_up_count = int((pct >= pct_threshold).sum())
@@ -354,14 +460,19 @@ class StockScreener:
 
     _SPOT_WALL_TIMEOUT = 10  # hard wall-clock timeout per provider
 
-    def _fetch_spot_data(self) -> Optional[pd.DataFrame]:
-        """Fetch full A-share data. Priority: Tushare → AkShare → efinance."""
+    def _fetch_spot_data(self, trade_date: Optional[str] = None) -> Optional[pd.DataFrame]:
+        """Fetch full A-share data. Priority: Tushare → AkShare → efinance.
+        When trade_date (YYYYMMDD) is provided, only Tushare is used (historical mode)."""
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
         # --- 1. Tushare (most stable, no eastmoney dependency) ---
-        df = self._try_tushare()
+        df = self._try_tushare(trade_date=trade_date)
         if df is not None and not df.empty:
             return df
+
+        if trade_date:
+            # Historical mode: only Tushare supported
+            return None
 
         # --- 2. AkShare with hard wall-clock timeout ---
         def _try_akshare() -> pd.DataFrame:
@@ -411,8 +522,9 @@ class StockScreener:
 
         return None
 
-    def _try_tushare(self) -> Optional[pd.DataFrame]:
-        """Fetch full-market daily data via Tushare Pro (daily + daily_basic + stock_basic)."""
+    def _try_tushare(self, trade_date: Optional[str] = None) -> Optional[pd.DataFrame]:
+        """Fetch full-market daily data via Tushare Pro (daily + daily_basic + stock_basic).
+        When trade_date (YYYYMMDD) is provided, use it for historical screening."""
         tushare_api = self._get_tushare_api()
         if tushare_api is None:
             return None
@@ -420,14 +532,16 @@ class StockScreener:
         try:
             from zoneinfo import ZoneInfo
             china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
-            trade_date = china_now.strftime("%Y%m%d")
+            is_historical = trade_date is not None
+            if trade_date is None:
+                trade_date = china_now.strftime("%Y%m%d")
 
             logger.info(f"[Screener] Fetching via Tushare (trade_date={trade_date})...")
             t0 = time.time()
 
             df_daily = tushare_api.daily(trade_date=trade_date)
-            if df_daily is None or df_daily.empty:
-                # Maybe market hasn't opened yet or not a trading day; try yesterday
+            if (df_daily is None or df_daily.empty) and not is_historical:
+                # Live mode: maybe market hasn't opened yet; try yesterday
                 yesterday = (china_now - pd.Timedelta(days=1)).strftime("%Y%m%d")
                 logger.info(f"[Screener] No data for {trade_date}, trying {yesterday}...")
                 df_daily = tushare_api.daily(trade_date=yesterday)
@@ -442,7 +556,7 @@ class StockScreener:
             # Fetch valuation metrics
             df_basic = tushare_api.daily_basic(
                 trade_date=trade_date,
-                fields="ts_code,pe,pe_ttm,pb,turnover_rate,volume_ratio,total_mv,circ_mv",
+                fields="ts_code,pe,pb,turnover_rate,volume_ratio,total_mv",
             )
             if df_basic is not None and not df_basic.empty:
                 df_basic.columns = [c.lower() for c in df_basic.columns]
@@ -583,10 +697,11 @@ class StockScreener:
         if "最新价" in df.columns:
             df = df[pd.to_numeric(df["最新价"], errors="coerce") > 3]
 
-        # PE > 0 (profitable) and PE < PE_MAX (exclude obvious bubble)
+        # PE > 0 (profitable) and PE < mode max (defensive stricter, offensive allows high PE)
         if "市盈率-动态" in df.columns:
             pe = pd.to_numeric(df["市盈率-动态"], errors="coerce")
-            df = df[(pe > 0) & (pe < PE_MAX)]
+            pe_max = PickerModeParams.for_mode(self._picker_mode).pe_max
+            df = df[(pe > 0) & (pe < pe_max)]
 
         return df
 
@@ -624,6 +739,45 @@ class StockScreener:
 
         return df
 
+    def _score_trend(self, pct_60d: float) -> float:
+        """Score trend strength. 5-30% linear; >30% decay to avoid end-of-trend buys."""
+        if pct_60d <= 0:
+            return 0.0
+        if pct_60d <= TREND_DECAY_THRESHOLD_PCT:
+            return min(pct_60d, 25.0)
+        decay = 30 - (pct_60d - TREND_DECAY_THRESHOLD_PCT) * 0.5
+        return max(0.0, decay)
+
+    def _score_momentum(self, change_pct: float) -> float:
+        """Score today's momentum. Cap at 8%, penalty for >7% (chase risk)."""
+        score = min(change_pct, 8.0) * 2.5
+        return score - 15 if change_pct > 7 else score
+
+    def _score_volume(self, vol_ratio: float) -> float:
+        """Score volume confirmation. 1.0-3.0 ideal, >3.0 partial, >0.8 minimal."""
+        if 1.0 <= vol_ratio <= 3.0:
+            return 20.0
+        if vol_ratio > 3.0:
+            return 15.0
+        return 10.0 if vol_ratio > 0.8 else 0.0
+
+    def _score_turnover(self, turnover: float) -> float:
+        """Score turnover health. 2-8% ideal, 1-2% or 8-12% partial."""
+        if 2 <= turnover <= 8:
+            return 10.0
+        if 1 <= turnover < 2:
+            return 5.0
+        return 3.0 if 8 < turnover <= 12 else 0.0
+
+    def _score_pe(self, pe: float) -> float:
+        """Score valuation. Mode-specific PE ideal range."""
+        p = PickerModeParams.for_mode(self._picker_mode)
+        if p.pe_ideal_low < pe < p.pe_ideal_high:
+            return 10.0
+        if 5 < pe <= p.pe_ideal_low or p.pe_ideal_high <= pe < PE_SCORE_PARTIAL_MAX:
+            return 5.0
+        return 0.0
+
     def _score_and_rank(self, df: pd.DataFrame, top_n: int = 30) -> List[ScreenedStock]:
         """Score remaining stocks and return top N.
 
@@ -646,55 +800,14 @@ class StockScreener:
                 amount = float(pd.to_numeric(row.get("成交额", 0), errors="coerce") or 0)
                 pct_60d = float(pd.to_numeric(row.get("60日涨跌幅", 0), errors="coerce") or 0)
 
-                # Composite score: Trend-focused, quality-first approach
-                score = 0.0
-
-                # 1. Trend strength (highest weight) - with decay for end-of-trend
-                # 5-30%: linear score; >30%: decay to avoid buying at trend end
-                if pct_60d <= 0:
-                    pass
-                elif pct_60d <= TREND_DECAY_THRESHOLD_PCT:
-                    score += min(pct_60d, 25)
-                else:
-                    decay_score = 30 - (pct_60d - TREND_DECAY_THRESHOLD_PCT) * 0.5
-                    score += max(0, decay_score)
-
-                # 2. Today's momentum - max 20 points
-                # Positive daily change, but cap to avoid over-weighting single day
-                score += min(change_pct, 8) * 2.5
-                # Chase risk penalty (align with 严进策略: 乖离率 > 5% 不追高)
-                if change_pct > 7:
-                    score -= 15
-
-                # 3. Volume confirmation - max 20 points
-                # Healthy volume (1.0-3.0 is ideal), not excessive
-                if 1.0 <= vol_ratio <= 3.0:
-                    score += 20
-                elif vol_ratio > 3.0:
-                    score += 15  # High volume but could be speculative
-                elif vol_ratio > 0.8:
-                    score += 10
-
-                # 4. Turnover health - max 10 points
-                # 2-8% is the sweet spot for liquidity without speculation
-                if 2 <= turnover <= 8:
-                    score += 10
-                elif 1 <= turnover < 2:
-                    score += 5
-                elif 8 < turnover <= 12:
-                    score += 3
-
-                # 5. Valuation quality - max 10 points
-                # Reasonable PE indicates fundamental support
-                if 10 < pe < 30:
-                    score += 10
-                elif 5 < pe <= 10 or 30 <= pe < 50:
-                    score += 5
-
-                # 6. Market cap stability - bonus 5 points
-                # Mid-cap stocks often have better growth potential
-                if 50e8 < total_mv < 500e8:
-                    score += 5
+                score = (
+                    self._score_trend(pct_60d)
+                    + self._score_momentum(change_pct)
+                    + self._score_volume(vol_ratio)
+                    + self._score_turnover(turnover)
+                    + self._score_pe(pe)
+                    + (5.0 if 50e8 < total_mv < 500e8 else 0.0)  # Mid-cap bonus
+                )
 
                 records.append(ScreenedStock(
                     code=code, name=name, price=price,
@@ -722,10 +835,24 @@ class StockPickerService:
         "A股利好消息 政策催化",
     ]
 
-    def __init__(self):
+    def __init__(
+        self,
+        picker_mode_override: Optional[str] = None,
+        picker_leader_bias_exempt_override: Optional[float] = None,
+    ):
         self.config = get_config()
         self._data_manager = DataFetcherManager()
-        self._screener = StockScreener(data_manager=self._data_manager)
+        mode = picker_mode_override or self.config.picker_mode
+        exempt = (
+            picker_leader_bias_exempt_override
+            if picker_leader_bias_exempt_override is not None
+            else self.config.picker_leader_bias_exempt_pct
+        )
+        self._screener = StockScreener(
+            data_manager=self._data_manager,
+            picker_mode=mode,
+            picker_leader_bias_exempt_pct=exempt,
+        )
         self._search_service: Optional[SearchService] = None
         self._analyzer = None
         self._init_services()
@@ -889,7 +1016,14 @@ class StockPickerService:
         """Build the prompt with quant pool, chip data (if any), and market intel."""
         chip_map = chip_map or {}
         today = datetime.now().strftime("%Y-%m-%d")
-        parts = [f"# 今日选股分析 ({today})\n"]
+        mode = self.config.picker_mode
+        p = PickerModeParams.for_mode(mode)
+        exempt = self.config.picker_leader_bias_exempt_pct
+        parts = [
+            f"# 今日选股分析 ({today})\n",
+            f"**当前配置**：模式={mode}，乖离率阈值={p.max_bias_pct}%，龙头豁免={exempt}%，"
+            f"PE理想区间={p.pe_ideal_low}-{p.pe_ideal_high}倍\n",
+        ]
 
         # ── Quant pool ──
         if candidates:

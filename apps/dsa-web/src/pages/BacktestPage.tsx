@@ -1,6 +1,7 @@
 import type React from 'react';
 import { useState, useEffect, useCallback } from 'react';
 import { backtestApi } from '../api/backtest';
+import { pickerBacktestApi } from '../api/pickerBacktest';
 import type { ParsedApiError } from '../api/error';
 import { getParsedApiError } from '../api/error';
 import { ApiErrorAlert, Badge, Pagination, Spinner } from '../components/common';
@@ -9,6 +10,17 @@ import type {
   BacktestRunResponse,
   PerformanceMetrics,
 } from '../types/backtest';
+import type {
+  PickerBacktestResultItem,
+  PickerBacktestSummary,
+  PickerMode,
+} from '../types/pickerBacktest';
+
+const PICKER_LEADER_EXEMPT: Record<PickerMode, number> = {
+  defensive: 0,
+  balanced: 12,
+  offensive: 12,
+};
 
 function pct(value?: number | null): string {
   if (value == null) return '--';
@@ -24,6 +36,8 @@ function outcomeBadge(outcome?: string) {
       return <Badge variant="danger" glow>负</Badge>;
     case 'neutral':
       return <Badge variant="warning">平</Badge>;
+    case 'insufficient':
+      return <Badge variant="warning">数据不足</Badge>;
     default:
       return <Badge variant="default">{outcome}</Badge>;
   }
@@ -102,8 +116,36 @@ const RunSummary: React.FC<{ data: BacktestRunResponse }> = ({ data }) => (
   </div>
 );
 
+/* ── Picker Backtest Panel ───────────────────────────────────── */
+const PickerBacktestPanel: React.FC<{ summary: PickerBacktestSummary }> = ({ summary }) => (
+  <div className="bg-card border border-border rounded-2xl p-6">
+    <div className="flex items-center gap-2 mb-5">
+      <div className="w-8 h-8 rounded-lg bg-cyan/10 flex items-center justify-center">
+        <svg className="w-4 h-4 text-cyan" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
+        </svg>
+      </div>
+      <h2 className="text-sm font-semibold text-primary">选股回测表现</h2>
+      <span className="ml-auto text-xs text-muted font-mono">
+        {summary.winCount}胜 / {summary.lossCount}负 / {summary.insufficientCount}数据不足
+      </span>
+    </div>
+    <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-1 divide-x divide-border/40">
+      <StatCell label="胜率" value={summary.winRatePct != null ? `${summary.winRatePct.toFixed(1)}%` : '--'} accent />
+      <StatCell label="平均收益" value={summary.avgReturnPct != null ? `${summary.avgReturnPct.toFixed(1)}%` : '--'} accent />
+      <StatCell label="最大回撤" value={summary.maxDrawdownPct != null ? `${summary.maxDrawdownPct.toFixed(1)}%` : '--'} />
+      <StatCell label="盈亏比" value={summary.profitFactor != null ? summary.profitFactor.toFixed(2) : '--'} />
+      <StatCell label="超额收益" value={summary.alphaVsBenchmarkPct != null ? `${summary.alphaVsBenchmarkPct.toFixed(1)}%` : '--'} />
+      <StatCell label="基准收益" value={summary.benchmarkAvgReturnPct != null ? `${summary.benchmarkAvgReturnPct.toFixed(1)}%` : '--'} />
+    </div>
+  </div>
+);
+
 /* ── Main page ───────────────────────────────────────────────── */
+type BacktestTab = 'analysis' | 'picker';
+
 const BacktestPage: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<BacktestTab>('analysis');
   const [codeFilter, setCodeFilter] = useState('');
   const [evalDays, setEvalDays] = useState('');
   const [forceRerun, setForceRerun] = useState(false);
@@ -121,6 +163,20 @@ const BacktestPage: React.FC = () => {
   const [overallPerf, setOverallPerf] = useState<PerformanceMetrics | null>(null);
   const [stockPerf, setStockPerf] = useState<PerformanceMetrics | null>(null);
   const [isLoadingPerf, setIsLoadingPerf] = useState(false);
+
+  // Picker backtest state (default: last 3 months)
+  const [pickerStartDate, setPickerStartDate] = useState(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() - 3);
+    return d.toISOString().slice(0, 10);
+  });
+  const [pickerEndDate, setPickerEndDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [pickerHoldDays, setPickerHoldDays] = useState(10);
+  const [pickerTopN, setPickerTopN] = useState(5);
+  const [pickerRunning, setPickerRunning] = useState(false);
+  const [pickerResult, setPickerResult] = useState<{ results: PickerBacktestResultItem[]; summary: PickerBacktestSummary | null } | null>(null);
+  const [pickerError, setPickerError] = useState<ParsedApiError | null>(null);
+  const [pickerMode, setPickerMode] = useState<PickerMode>('balanced');
 
   const fetchResults = useCallback(async (page = 1, code?: string, windowDays?: number) => {
     setIsLoadingResults(true);
@@ -202,6 +258,30 @@ const BacktestPage: React.FC = () => {
     fetchPerformance(code, windowDays);
   };
 
+  const handleRunPicker = async () => {
+    setPickerRunning(true);
+    setPickerResult(null);
+    setPickerError(null);
+    try {
+      const response = await pickerBacktestApi.run({
+        startDate: pickerStartDate,
+        endDate: pickerEndDate,
+        holdDays: pickerHoldDays,
+        topN: pickerTopN,
+        pickerMode,
+        pickerLeaderBiasExemptPct: PICKER_LEADER_EXEMPT[pickerMode],
+      });
+      setPickerResult({
+        results: response.results,
+        summary: response.summary,
+      });
+    } catch (err) {
+      setPickerError(getParsedApiError(err));
+    } finally {
+      setPickerRunning(false);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') handleFilter();
   };
@@ -213,25 +293,54 @@ const BacktestPage: React.FC = () => {
   };
 
   return (
-    <div className="h-full overflow-y-auto">
+    <div className="h-full overflow-y-auto bg-[#f1f5f9]">
       <div className="max-w-6xl mx-auto px-6 py-12">
+        <div className="bg-card rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.04),0_4px_12px_rgba(0,0,0,0.06)] border border-border p-8 md:p-10">
 
         {/* ─── Hero ─── */}
         <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-3xl
-                          bg-gradient-to-br from-emerald-500/15 to-cyan/10 mb-6
-                          shadow-[0_0_40px_rgba(16,185,129,0.08)]">
-            <svg className="w-10 h-10 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl
+                          bg-emerald-500/10 mb-5">
+            <svg className="w-8 h-8 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
                     d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
             </svg>
           </div>
-          <h1 className="text-3xl font-bold text-primary mb-3 tracking-tight">分析回测</h1>
-          <p className="text-base text-secondary max-w-2xl mx-auto leading-relaxed">
-            验证历史 AI 分析的准确性：对比预测方向与实际走势，评估止损止盈触发情况
+          <h1 className="text-2xl font-bold text-primary mb-2 tracking-tight">回测</h1>
+          <p className="text-sm text-muted max-w-2xl mx-auto leading-relaxed">
+            {activeTab === 'analysis'
+              ? '验证历史 AI 分析的准确性：对比预测方向与实际走势，评估止损止盈触发情况'
+              : '验证量化选股策略：按历史日期运行筛选器，统计持仓收益与超额收益'}
           </p>
         </div>
 
+        {/* ─── Tabs ─── */}
+        <div className="flex justify-center gap-2 mb-8">
+          <button
+            type="button"
+            onClick={() => setActiveTab('analysis')}
+            className={`px-5 py-2.5 rounded-xl text-sm font-medium transition-all border
+              ${activeTab === 'analysis'
+                ? 'bg-cyan text-white border-cyan shadow-sm'
+                : 'bg-elevated text-secondary hover:text-primary border-border'}`}
+          >
+            分析回测
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('picker')}
+            className={`px-5 py-2.5 rounded-xl text-sm font-medium transition-all border
+              ${activeTab === 'picker'
+                ? 'bg-cyan text-white border-cyan shadow-sm'
+                : 'bg-elevated text-secondary hover:text-primary border-border'}`}
+          >
+            选股回测
+          </button>
+        </div>
+
+        {/* ─── Analysis Backtest ─── */}
+        {activeTab === 'analysis' && (
+        <>
         {/* ─── Controls ─── */}
         <div className="bg-card border border-border rounded-2xl p-6 mb-8">
           <div className="flex flex-wrap items-center gap-3">
@@ -419,7 +528,165 @@ const BacktestPage: React.FC = () => {
             </div>
           </div>
         )}
+        </>
+        )}
 
+        {/* ─── Picker Backtest ─── */}
+        {activeTab === 'picker' && (
+          <>
+        {/* ─── Controls (same layout as Analysis) ─── */}
+        <div className="bg-card border border-border rounded-2xl p-6 mb-8">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-secondary">开始</span>
+              <input
+                type="date"
+                value={pickerStartDate}
+                onChange={(e) => setPickerStartDate(e.target.value)}
+                disabled={pickerRunning}
+                className="min-w-[140px] px-4 py-2.5 rounded-xl bg-elevated border border-border
+                           text-sm text-primary
+                           focus:outline-none focus:border-cyan/40 focus:ring-1 focus:ring-cyan/20 transition-all"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-secondary">结束</span>
+              <input
+                type="date"
+                value={pickerEndDate}
+                onChange={(e) => setPickerEndDate(e.target.value)}
+                disabled={pickerRunning}
+                className="min-w-[140px] px-4 py-2.5 rounded-xl bg-elevated border border-border
+                           text-sm text-primary
+                           focus:outline-none focus:border-cyan/40 focus:ring-1 focus:ring-cyan/20 transition-all"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-secondary">持仓</span>
+              <input
+                type="number"
+                min={1}
+                max={60}
+                value={pickerHoldDays}
+                onChange={(e) => setPickerHoldDays(parseInt(e.target.value, 10) || 10)}
+                disabled={pickerRunning}
+                className="w-16 px-3 py-2.5 rounded-xl bg-elevated border border-border
+                           text-sm text-primary text-center
+                           focus:outline-none focus:border-cyan/40 focus:ring-1 focus:ring-cyan/20 transition-all"
+              />
+              <span className="text-xs text-muted">天</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-secondary">每日</span>
+              <input
+                type="number"
+                min={1}
+                max={20}
+                value={pickerTopN}
+                onChange={(e) => setPickerTopN(parseInt(e.target.value, 10) || 5)}
+                disabled={pickerRunning}
+                className="w-16 px-3 py-2.5 rounded-xl bg-elevated border border-border
+                           text-sm text-primary text-center
+                           focus:outline-none focus:border-cyan/40 focus:ring-1 focus:ring-cyan/20 transition-all"
+              />
+              <span className="text-xs text-muted">只</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-secondary">模式</span>
+              <select
+                value={pickerMode}
+                onChange={(e) => setPickerMode(e.target.value as PickerMode)}
+                disabled={pickerRunning}
+                className="px-3 py-2.5 rounded-xl bg-elevated border border-border text-sm text-primary
+                           focus:outline-none focus:border-cyan/40 focus:ring-1 focus:ring-cyan/20"
+              >
+                <option value="defensive">严进 (龙头不豁免)</option>
+                <option value="balanced">平衡 (龙头可放宽12%)</option>
+                <option value="offensive">进攻 (龙头可放宽12%)</option>
+              </select>
+            </div>
+            <button
+              type="button"
+              onClick={handleRunPicker}
+              disabled={pickerRunning}
+              className="px-6 py-2.5 bg-cyan text-white text-sm font-semibold rounded-xl
+                         hover:bg-cyan/90 disabled:opacity-60 disabled:cursor-not-allowed
+                         transition-all shadow-glow-cyan flex items-center gap-2"
+            >
+                  {pickerRunning ? (
+                    <>
+                      <Spinner size="sm" className="border-white/30 border-t-white" />
+                      <span>回测中...</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                      </svg>
+                      <span>运行选股回测</span>
+                    </>
+                  )}
+                </button>
+          </div>
+          {pickerError && <ApiErrorAlert error={pickerError} className="mt-4" />}
+        </div>
+
+        {/* ─── Performance (same pattern as Analysis) ─── */}
+        {pickerResult?.summary && (
+          <div className="mb-8">
+            <PickerBacktestPanel summary={pickerResult.summary} />
+          </div>
+        )}
+
+        {/* ─── Results Table ─── */}
+        {pickerResult?.results && pickerResult.results.length > 0 && (
+          <div className="space-y-4 animate-fade-in">
+              <div className="bg-card border border-border rounded-2xl overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border bg-elevated/50">
+                        <th className="px-4 py-3 text-left text-xs text-muted font-medium">日期</th>
+                        <th className="px-4 py-3 text-left text-xs text-muted font-medium">代码</th>
+                        <th className="px-4 py-3 text-left text-xs text-muted font-medium">名称</th>
+                        <th className="px-4 py-3 text-right text-xs text-muted font-medium">买入价</th>
+                        <th className="px-4 py-3 text-right text-xs text-muted font-medium">收益率</th>
+                        <th className="px-4 py-3 text-left text-xs text-muted font-medium">结果</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pickerResult.results.map((row, idx) => (
+                        <tr
+                          key={`${row.tradeDate}-${row.code}-${idx}`}
+                          className="border-t border-border/50 hover:bg-surface-hover/50 transition-colors"
+                        >
+                          <td className="px-4 py-2.5 text-xs text-secondary">{row.tradeDate}</td>
+                          <td className="px-4 py-2.5 font-mono text-cyan text-xs">{row.code}</td>
+                          <td className="px-4 py-2.5 text-sm text-primary truncate max-w-[120px]" title={row.name || ''}>{row.name || '--'}</td>
+                          <td className="px-4 py-2.5 text-sm font-mono text-right">{row.entryPrice?.toFixed(2) ?? '--'}</td>
+                          <td className="px-4 py-2.5 text-sm font-mono text-right">
+                            <span className={
+                              row.returnPct != null
+                                ? row.returnPct > 0 ? 'text-red-600' : row.returnPct < 0 ? 'text-emerald-600' : 'text-secondary'
+                                : 'text-muted'
+                            }>
+                              {row.returnPct != null ? `${row.returnPct.toFixed(1)}%` : '--'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2.5">{outcomeBadge(row.outcome)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+          </div>
+        )}
+        </>
+        )}
+
+        </div>
       </div>
     </div>
   );
