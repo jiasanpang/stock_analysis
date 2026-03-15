@@ -110,6 +110,11 @@ class TestTushareConvertStockCode(unittest.TestCase):
         self.assertEqual(fetcher._convert_stock_code("838163"), "838163.BJ")
         self.assertEqual(fetcher._convert_stock_code("430047"), "430047.BJ")
 
+    def test_chinext_extended_301_sz(self):
+        """ChiNext extended (301xxx) should map to .SZ."""
+        fetcher = TushareFetcher()
+        self.assertEqual(fetcher._convert_stock_code("301571"), "301571.SZ")
+
 
 @unittest.skipIf(not _AKSHARE_IMPORTS_OK, f"akshare fetcher imports failed: {_AKSHARE_IMPORT_ERROR}")
 class TestAkshareToSinaTxSymbol(unittest.TestCase):
@@ -130,6 +135,7 @@ class TestAkshareToSinaTxSymbol(unittest.TestCase):
         self.assertEqual(_to_sina_tx_symbol("600519"), "sh600519")
         self.assertEqual(_to_sina_tx_symbol("000001"), "sz000001")
         self.assertEqual(_to_sina_tx_symbol("512400"), "sh512400")
+        self.assertEqual(_to_sina_tx_symbol("301571"), "sz301571")  # ChiNext extended (301xxx)
 
     def test_with_suffix_strips_correctly(self):
         """Code with .BJ suffix should produce bj + base, not bj + full."""
