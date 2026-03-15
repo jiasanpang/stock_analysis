@@ -17,7 +17,12 @@ import pandas as pd
 
 from data_provider.base import DataFetcherManager
 from src.config import get_config
-from src.services.stock_picker_service import StockScreener, create_screener_from_config, ScreenedStock
+from src.services.stock_picker_service import (
+    StockScreener,
+    create_screener_from_config,
+    get_tushare_api,
+    ScreenedStock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,22 +70,9 @@ class PickerBacktestService:
         self._tushare_api = None
 
     def _get_tushare_api(self):
-        """Get Tushare API for trade_cal and benchmark."""
-        if self._tushare_api is not None:
-            return self._tushare_api
-        for fetcher in self._data_manager._fetchers:
-            if fetcher.__class__.__name__ == "TushareFetcher" and hasattr(fetcher, "_api") and fetcher._api:
-                self._tushare_api = fetcher._api
-                return self._tushare_api
-        try:
-            from src.config import get_config
-            config = get_config()
-            if config.tushare_token:
-                import tushare as ts
-                ts.set_token(config.tushare_token)
-                self._tushare_api = ts.pro_api()
-        except Exception as e:
-            logger.warning(f"[PickerBacktest] Cannot init Tushare: {e}")
+        """Get Tushare API for trade_cal and benchmark (cached)."""
+        if self._tushare_api is None:
+            self._tushare_api = get_tushare_api(self._data_manager)
         return self._tushare_api
 
     def _get_trade_dates(self, start_date: str, end_date: str) -> List[str]:
@@ -208,6 +200,10 @@ class PickerBacktestService:
                     if picker_leader_bias_exempt_pct is not None
                     else cfg.picker_leader_bias_exempt_pct
                 ),
+                turnover_min=cfg.picker_turnover_min,
+                turnover_max=cfg.picker_turnover_max,
+                enable_b_wave_filter=getattr(cfg, "picker_enable_b_wave_filter", True),
+                allow_loss=getattr(cfg, "picker_allow_loss", False),
             )
         else:
             screener = self._screener

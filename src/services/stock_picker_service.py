@@ -32,6 +32,13 @@ PICKER_MAX_BIAS_PCT = 8.0
 
 # Volume filter: require volume ratio > this to exclude cold stocks
 VOLUME_RATIO_MIN = 1.0
+# Turnover: 1-15% (plan: 0.5→1 filter cold, 20→15 reduce speculation)
+TURNOVER_MIN_PCT = 1.0
+TURNOVER_MAX_PCT = 15.0
+# Amount by market cap: <100e8 use 30M, >=100e8 use 100M (plan: 5000W ineffective for large caps)
+AMOUNT_MIN_SMALL_CAP = 3e7   # 3000万 for cap < 100亿
+AMOUNT_MIN_LARGE_CAP = 1e8   # 1亿 for cap >= 100亿
+MARKET_CAP_TIER_YI = 100.0   # 100亿 threshold
 
 # 60-day trend decay: gains above this % get score decay (avoid end-of-trend buys)
 TREND_DECAY_THRESHOLD_PCT = 30.0
@@ -49,6 +56,14 @@ LEADER_VOLUME_RATIO_MIN = 1.5
 LEADER_TURNOVER_LO, LEADER_TURNOVER_HI = 2.0, 8.0
 # PE scoring: partial score upper bound (outside ideal but not bubble)
 PE_SCORE_PARTIAL_MAX = 80
+
+# B-wave risk (波浪 ABC): exclude stocks likely in B-wave bounce (fake recovery before C-wave down)
+B_WAVE_LOOKBACK_DAYS = 20
+B_WAVE_MIN_DROOP_PCT = 5.0  # A-wave drop must be at least 5%
+B_WAVE_RETRACE_LO = 0.35    # Fibonacci B-wave zone: 38.2% retracement
+B_WAVE_RETRACE_HI = 0.65    # 61.8% retracement
+B_WAVE_LOW_DAYS_AGO_MIN = 2  # Low must be at least 2 days ago (we've bounced)
+B_WAVE_LOW_DAYS_AGO_MAX = 14  # Low not more than 14 days ago (recent drop)
 
 
 @dataclass
@@ -90,7 +105,7 @@ PICK_SYSTEM_PROMPT = """你是一位专业的 A 股市场分析师，负责从�
 
 ### 1. 严进策略（不追高）
 - **量化层**：筛选池已根据模式排除乖离率过高的标的（defensive 6%/balanced 8%/offensive 10%）；若启用龙头豁免，板块龙头可放宽至配置值（需满足 60日涨幅>15%、今日涨幅 2-7%、量比>1.5、换手 2-8%）
-- **推荐优先级**：乖离率 < 3% 最佳买点；3-5% 可关注；接近阈值时降级为观望
+- **推荐优先级**：乖离率 < 2% 最佳买点；2-5% 可关注；接近阈值时降级为观望
 - **公式**：乖离率 = (现价 - MA5) / MA5 × 100%
 
 ### 2. 趋势质量优先
@@ -108,7 +123,11 @@ PICK_SYSTEM_PROMPT = """你是一位专业的 A 股市场分析师，负责从�
 ### 4. 量能健康度
 - 量比 1.0-2.5：健康放量，加分
 - 量比 > 3.0：需警惕过度投机
-- 换手率 2-8%：理想区间
+- 换手率 2-8%：理想区间（筛选层已收紧为 1-15%）
+
+### 4b. 买点与支撑规则
+- **均线拟合**：均线缠绕（MA5、MA10、MA20 距离 <1%）时，不能把均线当支撑位，此时均线无参考价值
+- **买点偏好**：量能配合（量比 1-2.5）的回踩 MA5/MA10 是较好买点；无 ABC 调整时警惕买到 B 浪反弹
 
 ### 5. 板块与市场共振
 - 个股所在板块与今日领涨板块重合时，提升优先级
@@ -148,7 +167,7 @@ PICK_SYSTEM_PROMPT = """你是一位专业的 A 股市场分析师，负责从�
 
 ## 注意事项
 - code 和 name 必须使用筛选池中提供的真实数据
-- attention: high（强烈关注，乖离率<3%且趋势强）、medium（适度关注）、low（跟踪观察，乖离率接近5%）
+- attention: high（强烈关注，乖离率<2%且趋势强）、medium（适度关注）、low（跟踪观察，乖离率接近5%）
 - **宁缺毋滥**：池子质量不佳时宁可推荐 0-2 只或空仓观望，绝不硬凑数量
 - reason 中**必须引用乖离率**，这是与后续分析保持一致的关键
 """
@@ -237,9 +256,11 @@ class PickerResult:
     generated_at: str = ""
     error: str = ""
     elapsed_seconds: float = 0.0
+    picker_mode: str = "balanced"
+    picker_leader_bias_exempt_pct: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "success": self.success,
             "market_summary": self.market_summary,
             "picks": [p.to_dict() for p in self.picks],
@@ -251,6 +272,28 @@ class PickerResult:
             "elapsed_seconds": round(self.elapsed_seconds, 1),
             "error": self.error,
         }
+        d["picker_mode"] = self.picker_mode
+        d["picker_leader_bias_exempt_pct"] = self.picker_leader_bias_exempt_pct
+        return d
+
+
+def get_tushare_api(data_manager=None):
+    """Get Tushare Pro API from data_manager's TushareFetcher or create standalone instance."""
+    if data_manager:
+        for fetcher in data_manager._fetchers:
+            if fetcher.__class__.__name__ == "TushareFetcher" and hasattr(fetcher, "_api") and fetcher._api:
+                return fetcher._api
+    try:
+        cfg = get_config()
+        if not cfg.tushare_token:
+            return None
+        import tushare as ts
+        ts.set_token(cfg.tushare_token)
+        logger.info("[Picker] Created standalone Tushare API instance")
+        return ts.pro_api()
+    except Exception as e:
+        logger.warning(f"[Picker] Cannot init Tushare: {e}")
+        return None
 
 
 def create_screener_from_config(data_manager=None) -> "StockScreener":
@@ -260,6 +303,10 @@ def create_screener_from_config(data_manager=None) -> "StockScreener":
         data_manager=data_manager,
         picker_mode=cfg.picker_mode,
         picker_leader_bias_exempt_pct=cfg.picker_leader_bias_exempt_pct,
+        turnover_min=cfg.picker_turnover_min,
+        turnover_max=cfg.picker_turnover_max,
+        enable_b_wave_filter=getattr(cfg, "picker_enable_b_wave_filter", True),
+        allow_loss=getattr(cfg, "picker_allow_loss", False),
     )
 
 
@@ -276,11 +323,19 @@ class StockScreener:
         data_manager=None,
         picker_mode: str = "balanced",
         picker_leader_bias_exempt_pct: float = 0.0,
+        turnover_min: Optional[float] = None,
+        turnover_max: Optional[float] = None,
+        enable_b_wave_filter: bool = True,
+        allow_loss: bool = False,
     ):
         self._data_manager = data_manager
         self._as_of_date: Optional[str] = None  # YYYY-MM-DD for historical screening
         self._picker_mode = (picker_mode or "balanced").lower()
         self._leader_bias_exempt_pct = max(0.0, float(picker_leader_bias_exempt_pct))
+        self._turnover_min = turnover_min if turnover_min is not None else TURNOVER_MIN_PCT
+        self._turnover_max = turnover_max if turnover_max is not None else TURNOVER_MAX_PCT
+        self._enable_b_wave_filter = enable_b_wave_filter
+        self._allow_loss = allow_loss
 
     def screen(self, trade_date: Optional[str] = None) -> Tuple[List[ScreenedStock], ScreenStats]:
         """Run the full screening pipeline. Returns (candidates, stats).
@@ -334,6 +389,17 @@ class StockScreener:
         if len(candidates) < before_limit_up:
             stats.final_pool = len(candidates)
             logger.info(f"[Screener] After limit-up filter: {stats.final_pool} candidates (excluded {before_limit_up - len(candidates)})")
+
+        # Layer 7: B-wave risk filter (exclude B-wave bounce before C-wave down)
+        if self._enable_b_wave_filter:
+            before_b_wave = len(candidates)
+            candidates = self._filter_b_wave_risk(candidates)
+            if len(candidates) < before_b_wave:
+                stats.final_pool = len(candidates)
+                logger.info(
+                    f"[Screener] After B-wave filter: {stats.final_pool} candidates "
+                    f"(excluded {before_b_wave - len(candidates)})"
+                )
 
         return candidates, stats
 
@@ -449,6 +515,74 @@ class StockScreener:
                     filtered.append(s)
             except Exception as e:
                 logger.debug(f"[Screener] Limit-up check failed for {s.code}: {e}")
+                filtered.append(s)
+        return filtered
+
+    def _filter_b_wave_risk(
+        self,
+        candidates: List[ScreenedStock],
+        lookback_days: int = B_WAVE_LOOKBACK_DAYS,
+    ) -> List[ScreenedStock]:
+        """Exclude stocks likely in B-wave bounce (fake recovery before C-wave down).
+        Pattern: A-wave drop >= 5%, then bounce 35-65% of the drop, low 2-14 days ago.
+        """
+        if not self._data_manager or not candidates:
+            return candidates
+        filtered = []
+        end_date = self._as_of_date
+        for s in candidates:
+            try:
+                df_daily, _ = self._data_manager.get_daily_data(
+                    s.code, end_date=end_date, days=lookback_days + 5
+                )
+                if df_daily is None or len(df_daily) < lookback_days:
+                    filtered.append(s)
+                    continue
+                close_col = self._first_col(df_daily, "close", "收盘", "最新价")
+                if close_col is None:
+                    filtered.append(s)
+                    continue
+                date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
+                df_daily = df_daily.sort_values(date_col).tail(lookback_days).reset_index(drop=True)
+                ser = pd.to_numeric(df_daily[close_col], errors="coerce").fillna(0)
+                if len(ser) < lookback_days:
+                    filtered.append(s)
+                    continue
+                idx_max = int(ser.idxmax())
+                idx_min = int(ser.idxmin())
+                high_val = float(ser.iloc[idx_max])
+                low_val = float(ser.iloc[idx_min])
+                if high_val <= 0 or low_val <= 0:
+                    filtered.append(s)
+                    continue
+
+                # Require drop after high (A-wave)
+                if idx_min <= idx_max:
+                    filtered.append(s)
+                    continue
+                drop_pct = (high_val - low_val) / high_val * 100
+                if drop_pct < B_WAVE_MIN_DROOP_PCT:
+                    filtered.append(s)
+                    continue
+
+                # Rebound from low (B-wave)
+                current = s.price
+                rebound_pct = (current - low_val) / low_val * 100 if low_val > 0 else 0
+                retracement = rebound_pct / drop_pct if drop_pct > 0 else 0
+                days_since_low = (len(ser) - 1) - idx_min
+
+                if (
+                    B_WAVE_RETRACE_LO <= retracement <= B_WAVE_RETRACE_HI
+                    and B_WAVE_LOW_DAYS_AGO_MIN <= days_since_low <= B_WAVE_LOW_DAYS_AGO_MAX
+                ):
+                    logger.debug(
+                        f"[Screener] Exclude {s.code} B-wave risk: drop={drop_pct:.1f}%, "
+                        f"retrace={retracement:.0%}, low {days_since_low}d ago"
+                    )
+                else:
+                    filtered.append(s)
+            except Exception as e:
+                logger.debug(f"[Screener] B-wave check failed for {s.code}: {e}")
                 filtered.append(s)
         return filtered
 
@@ -641,25 +775,7 @@ class StockScreener:
 
     def _get_tushare_api(self):
         """Get Tushare API instance from data_manager or create one."""
-        # Try to reuse from data_manager's TushareFetcher
-        if self._data_manager:
-            for fetcher in self._data_manager._fetchers:
-                if fetcher.__class__.__name__ == "TushareFetcher" and hasattr(fetcher, "_api") and fetcher._api:
-                    return fetcher._api
-
-        # Fallback: create fresh instance
-        try:
-            config = get_config()
-            if not config.tushare_token:
-                return None
-            import tushare as ts
-            ts.set_token(config.tushare_token)
-            api = ts.pro_api()
-            logger.info("[Screener] Created standalone Tushare API instance")
-            return api
-        except Exception as e:
-            logger.warning(f"[Screener] Cannot init Tushare: {e}")
-            return None
+        return get_tushare_api(self._data_manager)
 
     @staticmethod
     def _normalize_efinance_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -697,11 +813,14 @@ class StockScreener:
         if "最新价" in df.columns:
             df = df[pd.to_numeric(df["最新价"], errors="coerce") > 3]
 
-        # PE > 0 (profitable) and PE < mode max (defensive stricter, offensive allows high PE)
+        # PE filter: exclude PE >= pe_max; when allow_loss=False, also exclude PE<=0 (unprofitable)
         if "市盈率-动态" in df.columns:
             pe = pd.to_numeric(df["市盈率-动态"], errors="coerce")
             pe_max = PickerModeParams.for_mode(self._picker_mode).pe_max
-            df = df[(pe > 0) & (pe < pe_max)]
+            if self._allow_loss:
+                df = df[pe < pe_max]
+            else:
+                df = df[(pe > 0) & (pe < pe_max)]
 
         return df
 
@@ -727,15 +846,21 @@ class StockScreener:
             vr = pd.to_numeric(df["量比"], errors="coerce")
             df = df[vr > VOLUME_RATIO_MIN]
 
-        # Turnover rate 0.5% - 20% (active but not too speculative)
+        # Turnover rate 1-15% (filter cold, reduce speculation)
         if "换手率" in df.columns:
             tr = pd.to_numeric(df["换手率"], errors="coerce")
-            df = df[(tr > 0.5) & (tr < 20)]
+            df = df[(tr > self._turnover_min) & (tr < self._turnover_max)]
 
-        # Amount > 5000万 (sufficient liquidity)
-        if "成交额" in df.columns:
+        # Amount by market cap: <100亿 use 3000万, >=100亿 use 1亿
+        if "成交额" in df.columns and "总市值" in df.columns:
             amt = pd.to_numeric(df["成交额"], errors="coerce")
-            df = df[amt > 5e7]
+            cap_yi = pd.to_numeric(df["总市值"], errors="coerce") / 1e8
+            ok_small = (cap_yi < MARKET_CAP_TIER_YI) & (amt > AMOUNT_MIN_SMALL_CAP)
+            ok_large = (cap_yi >= MARKET_CAP_TIER_YI) & (amt > AMOUNT_MIN_LARGE_CAP)
+            df = df[ok_small | ok_large]
+        elif "成交额" in df.columns:
+            amt = pd.to_numeric(df["成交额"], errors="coerce")
+            df = df[amt > AMOUNT_MIN_SMALL_CAP]
 
         return df
 
@@ -762,12 +887,12 @@ class StockScreener:
         return 10.0 if vol_ratio > 0.8 else 0.0
 
     def _score_turnover(self, turnover: float) -> float:
-        """Score turnover health. 2-8% ideal, 1-2% or 8-12% partial."""
+        """Score turnover health. 2-8% ideal, 1-2% or 8-15% partial."""
         if 2 <= turnover <= 8:
             return 10.0
         if 1 <= turnover < 2:
             return 5.0
-        return 3.0 if 8 < turnover <= 12 else 0.0
+        return 3.0 if 8 < turnover <= self._turnover_max else 0.0
 
     def _score_pe(self, pe: float) -> float:
         """Score valuation. Mode-specific PE ideal range."""
@@ -852,6 +977,7 @@ class StockPickerService:
             data_manager=self._data_manager,
             picker_mode=mode,
             picker_leader_bias_exempt_pct=exempt,
+            enable_b_wave_filter=getattr(self.config, "picker_enable_b_wave_filter", True),
         )
         self._search_service: Optional[SearchService] = None
         self._analyzer = None
@@ -874,7 +1000,11 @@ class StockPickerService:
     def run(self) -> PickerResult:
         """Execute the full two-stage stock picking pipeline."""
         start = time.time()
-        result = PickerResult(generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"))
+        result = PickerResult(
+            generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
+            picker_mode=self._screener._picker_mode,
+            picker_leader_bias_exempt_pct=self._screener._leader_bias_exempt_pct or None,
+        )
 
         try:
             # ── Stage 1: Quantitative screening ──
@@ -907,7 +1037,7 @@ class StockPickerService:
         result.elapsed_seconds = time.time() - start
         return result
 
-    _INTEL_ITEM_TIMEOUT = 8  # wall-clock timeout per market intel fetch
+    _INTEL_ITEM_TIMEOUT = 15  # wall-clock timeout per market intel fetch (efinance may retry ~5s before fail, then akshare needs time)
 
     def _gather_market_intel(self) -> Dict[str, Any]:
         """Gather macro market data from multiple sources with per-call timeouts."""
@@ -1016,9 +1146,9 @@ class StockPickerService:
         """Build the prompt with quant pool, chip data (if any), and market intel."""
         chip_map = chip_map or {}
         today = datetime.now().strftime("%Y-%m-%d")
-        mode = self.config.picker_mode
+        mode = self._screener._picker_mode
         p = PickerModeParams.for_mode(mode)
-        exempt = self.config.picker_leader_bias_exempt_pct
+        exempt = self._screener._leader_bias_exempt_pct
         parts = [
             f"# 今日选股分析 ({today})\n",
             f"**当前配置**：模式={mode}，乖离率阈值={p.max_bias_pct}%，龙头豁免={exempt}%，"

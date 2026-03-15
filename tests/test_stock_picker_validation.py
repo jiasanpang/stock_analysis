@@ -276,11 +276,134 @@ def test_volume_filter_excludes_below_1_0():
 
 
 def test_volume_filter_passes_above_1_0():
-    """Volume ratio 1.1 should pass (成交额 > 5e7)."""
+    """Volume ratio 1.1 should pass (成交额 > 1e8 for cap>=100亿)."""
     screener = _screener()
-    df = pd.DataFrame([_row(量比=1.1, 成交额=1e8)])
+    df = pd.DataFrame([_row(量比=1.1, 成交额=1.5e8)])  # cap 100e8 needs amt > 1e8
     filtered = screener._filter_volume(df)
     assert len(filtered) == 1
+
+
+def test_turnover_filter_1_15():
+    """Turnover 0.8 excluded (min 1%), 18 excluded (max 15%)."""
+    screener = _screener()
+    df = pd.DataFrame([
+        _row(代码="A", 名称="A", 换手率=0.8, 成交额=1.5e8),
+        _row(代码="B", 名称="B", 换手率=18, 成交额=1.5e8),
+        _row(代码="C", 名称="C", 换手率=5, 成交额=1.5e8),
+    ])
+    filtered = screener._filter_volume(df)
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["代码"] == "C"
+
+
+def test_amount_by_market_cap():
+    """Small cap (<100亿) needs 3000万, large cap >= 1亿."""
+    screener = _screener()
+    # 50亿 cap: 5000万 passes (3000万 min)
+    df1 = pd.DataFrame([_row(代码="A", 名称="A", 总市值=50e8, 成交额=5e7)])
+    f1 = screener._filter_volume(df1)
+    assert len(f1) == 1
+    # 100亿 cap: 5000万 fails (1亿 min)
+    df2 = pd.DataFrame([_row(代码="B", 名称="B", 总市值=100e8, 成交额=5e7)])
+    f2 = screener._filter_volume(df2)
+    assert len(f2) == 0
+
+
+def _make_daily_df(closes, dates=None):
+    """Build daily DataFrame with close column. dates: list of YYYY-MM-DD strings."""
+    n = len(closes)
+    if dates is None:
+        base = pd.Timestamp("2025-01-01")
+        dates = [(base + pd.Timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n)]
+    return pd.DataFrame({"close": closes, "date": dates})
+
+
+def test_b_wave_filter_excludes_b_wave_bounce():
+    """B-wave risk: high then low, bounce 50%, low 9 days ago -> excluded."""
+    try:
+        from src.services.stock_picker_service import StockScreener, ScreenedStock
+    except ImportError:
+        mod = _get_picker_module()
+        StockScreener = mod.StockScreener
+        ScreenedStock = mod.ScreenedStock
+
+    # 20 days: high 100 at day 0-4, drop to 90 at day 9 (idx 9), bounce to 95 (current)
+    # drop=10%, retrace=5/10=50%, days_since_low=10
+    closes = [100] * 5 + [98, 96, 94, 92, 90] + [91, 92, 93, 94, 95] + [95] * 5  # low at idx 9
+    df_daily = _make_daily_df(closes)
+
+    class MockDM:
+        def get_daily_data(self, code, end_date=None, days=25):
+            return df_daily, "mock"
+
+    screener = StockScreener(
+        data_manager=MockDM(),
+        picker_mode="balanced",
+        enable_b_wave_filter=True,
+    )
+    cand = [ScreenedStock(code="001", name="X", price=95, change_pct=2, volume_ratio=1.2,
+                          turnover_rate=4, pe=20, pb=2, market_cap=100, amount=1,
+                          change_pct_60d=15, score=50)]
+    out = screener._filter_b_wave_risk(cand)
+    assert len(out) == 0, "B-wave bounce should be excluded"
+
+
+def test_b_wave_filter_keeps_uptrend():
+    """Uptrend: low first, high later -> no B-wave, keep."""
+    try:
+        from src.services.stock_picker_service import StockScreener, ScreenedStock
+    except ImportError:
+        mod = _get_picker_module()
+        StockScreener = mod.StockScreener
+        ScreenedStock = mod.ScreenedStock
+
+    # 20 days: low 90 at start, rise to 100 at end
+    closes = [90 + i * 0.5 for i in range(20)]
+    df_daily = _make_daily_df(closes)
+
+    class MockDM:
+        def get_daily_data(self, code, end_date=None, days=25):
+            return df_daily, "mock"
+
+    screener = StockScreener(
+        data_manager=MockDM(),
+        picker_mode="balanced",
+        enable_b_wave_filter=True,
+    )
+    cand = [ScreenedStock(code="002", name="Y", price=99.5, change_pct=2, volume_ratio=1.2,
+                         turnover_rate=4, pe=20, pb=2, market_cap=100, amount=1,
+                         change_pct_60d=15, score=50)]
+    out = screener._filter_b_wave_risk(cand)
+    assert len(out) == 1, "Uptrend should be kept"
+
+
+def test_b_wave_filter_keeps_at_bottom():
+    """At C bottom: low at most recent day -> keep (days_since_low=0)."""
+    try:
+        from src.services.stock_picker_service import StockScreener, ScreenedStock
+    except ImportError:
+        mod = _get_picker_module()
+        StockScreener = mod.StockScreener
+        ScreenedStock = mod.ScreenedStock
+
+    # 20 days: high 100 at start, drop to 90 at end (idx 19)
+    closes = [100 - i * 0.5 for i in range(20)]
+    df_daily = _make_daily_df(closes)
+
+    class MockDM:
+        def get_daily_data(self, code, end_date=None, days=25):
+            return df_daily, "mock"
+
+    screener = StockScreener(
+        data_manager=MockDM(),
+        picker_mode="balanced",
+        enable_b_wave_filter=True,
+    )
+    cand = [ScreenedStock(code="003", name="Z", price=90, change_pct=-1, volume_ratio=1.2,
+                         turnover_rate=4, pe=20, pb=2, market_cap=100, amount=1,
+                         change_pct_60d=5, score=40)]
+    out = screener._filter_b_wave_risk(cand)
+    assert len(out) == 1, "At bottom (no bounce yet) should be kept"
 
 
 if __name__ == "__main__":
@@ -301,6 +424,11 @@ if __name__ == "__main__":
         test_60d_25_vs_40_ordering,
         test_volume_filter_excludes_below_1_0,
         test_volume_filter_passes_above_1_0,
+        test_turnover_filter_1_15,
+        test_amount_by_market_cap,
+        test_b_wave_filter_excludes_b_wave_bounce,
+        test_b_wave_filter_keeps_uptrend,
+        test_b_wave_filter_keeps_at_bottom,
     ]
     failed = 0
     for t in tests:

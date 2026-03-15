@@ -76,6 +76,8 @@ class PickerResponse(BaseModel):
     elapsed_seconds: float = 0.0
     error: str = ""
     history_id: Optional[int] = None
+    picker_mode: str = "balanced"
+    picker_leader_bias_exempt_pct: Optional[float] = None
 
 
 # ── History response models ──────────────────────────────────────
@@ -94,6 +96,8 @@ class PickerHistoryItem(BaseModel):
     sectors_to_watch: List[str] = Field(default_factory=list)
     elapsed_seconds: float = 0
     created_at: Optional[str] = None
+    picker_mode: str = "balanced"
+    picker_leader_bias_exempt_pct: Optional[float] = None
 
 
 class PickerHistoryListResponse(BaseModel):
@@ -133,12 +137,21 @@ async def recommend_stocks(body: Optional[PickerRecommendRequest] = Body(None)):
         history_id = None
         if result_dict.get("success"):
             try:
-                history_id = _get_db().save_picker_history(result_dict)
+                history_id = _get_db().save_picker_history(
+                    result_dict,
+                    picker_mode=result_dict.get("picker_mode") or "balanced",
+                    picker_leader_bias_exempt_pct=result_dict.get("picker_leader_bias_exempt_pct"),
+                )
                 logger.info(f"[PickerAPI] Saved picker history id={history_id}")
             except Exception as exc:
                 logger.warning(f"[PickerAPI] Failed to save history: {exc}")
 
-        return PickerResponse(**result_dict, history_id=history_id)
+        return PickerResponse(
+            **result_dict,
+            history_id=history_id,
+            picker_mode=result_dict.get("picker_mode") or "balanced",
+            picker_leader_bias_exempt_pct=result_dict.get("picker_leader_bias_exempt_pct"),
+        )
 
     except asyncio.TimeoutError:
         logger.error(f"[PickerAPI] Timed out after {_PICKER_TIMEOUT}s")

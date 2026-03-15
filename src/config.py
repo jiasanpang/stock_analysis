@@ -256,6 +256,13 @@ class Config:
     picker_mode: str = "balanced"
     # 板块龙头乖离率豁免(%)，0=不豁免，12=龙头可放宽至12%
     picker_leader_bias_exempt_pct: float = 0.0
+    # 换手率范围(%)：下限过滤冷门股，上限降低过度投机
+    picker_turnover_min: float = 1.0
+    picker_turnover_max: float = 15.0
+    # B 浪风险过滤：排除疑似 B 浪反弹（反弹 35-65% 且低点 2-14 日前）
+    picker_enable_b_wave_filter: bool = True
+    # 是否允许亏损股进入选股池（PE<=0）；默认 false 排除亏损股
+    picker_allow_loss: bool = False
 
     # === 日志配置 ===
     log_dir: str = "./logs"  # 日志文件目录
@@ -639,7 +646,7 @@ class Config:
             serpapi_keys=serpapi_keys,
             searxng_base_urls=searxng_base_urls,
             news_max_age_days=max(1, int(os.getenv('NEWS_MAX_AGE_DAYS', '3'))),
-            bias_threshold=max(1.0, float(os.getenv('BIAS_THRESHOLD', '5.0'))),
+            bias_threshold=cls._resolve_bias_threshold(),
             agent_mode=os.getenv('AGENT_MODE', 'false').lower() == 'true',
             agent_max_steps=int(os.getenv('AGENT_MAX_STEPS', '10')),
             agent_skills=[s.strip() for s in os.getenv('AGENT_SKILLS', '').split(',') if s.strip()],
@@ -699,6 +706,10 @@ class Config:
             backtest_neutral_band_pct=float(os.getenv('BACKTEST_NEUTRAL_BAND_PCT', '2.0')),
             picker_mode=cls._parse_picker_mode(os.getenv('PICKER_MODE', 'balanced')),
             picker_leader_bias_exempt_pct=float(os.getenv('PICKER_LEADER_BIAS_EXEMPT_PCT', '0')),
+            picker_turnover_min=float(os.getenv('PICKER_TURNOVER_MIN', '1.0')),
+            picker_turnover_max=float(os.getenv('PICKER_TURNOVER_MAX', '15.0')),
+            picker_enable_b_wave_filter=os.getenv('PICKER_ENABLE_B_WAVE_FILTER', 'true').lower() == 'true',
+            picker_allow_loss=os.getenv('PICKER_ALLOW_LOSS', 'false').lower() == 'true',
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             max_workers=int(os.getenv('MAX_WORKERS', '3')),
@@ -1035,6 +1046,16 @@ class Config:
                 "(valid: wkhtmltoimage | markdown-to-file)"
             )
         return 'wkhtmltoimage'
+
+    @classmethod
+    def _resolve_bias_threshold(cls) -> float:
+        """Resolve BIAS_THRESHOLD: use env if set, else derive from PICKER_MODE (6/8/10)."""
+        explicit = os.getenv('BIAS_THRESHOLD')
+        if explicit:
+            return max(1.0, float(explicit))
+        picker = cls._parse_picker_mode(os.getenv('PICKER_MODE', 'balanced'))
+        default = {'defensive': 6.0, 'balanced': 8.0, 'offensive': 10.0}.get(picker, 8.0)
+        return max(1.0, default)
 
     @classmethod
     def _parse_picker_mode(cls, value: str) -> str:

@@ -45,6 +45,8 @@ export interface PickerResponse {
   elapsed_seconds: number;
   error: string;
   history_id?: number | null;
+  picker_mode?: string;
+  picker_leader_bias_exempt_pct?: number | null;
 }
 
 export interface PickPreview {
@@ -61,6 +63,8 @@ export interface PickerHistoryItem {
   sectors_to_watch: string[];
   elapsed_seconds: number;
   created_at: string | null;
+  picker_mode?: string;
+  picker_leader_bias_exempt_pct?: number | null;
 }
 
 export interface PickerHistoryListResponse {

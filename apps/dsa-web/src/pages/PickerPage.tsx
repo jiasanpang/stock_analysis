@@ -12,6 +12,12 @@ import {
 } from '../api/picker';
 import { Spinner } from '../components/common';
 
+const PICKER_MODE_LABELS: Record<string, string> = {
+  defensive: '严进',
+  balanced: '平衡',
+  offensive: '进攻',
+};
+
 const ATTENTION_CFG: Record<string, { dot: string; badge: string; label: string }> = {
   high:   { dot: 'bg-red-500',    badge: 'bg-red-50 text-red-700 ring-red-200',       label: '强烈关注' },
   medium: { dot: 'bg-amber-500',  badge: 'bg-amber-50 text-amber-700 ring-amber-200', label: '适度关注' },
@@ -231,11 +237,14 @@ const HistoryRow: React.FC<{ item: PickerHistoryItem; onSelect: (id: number) => 
             </svg>
           </div>
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-sm font-semibold text-primary">{dateStr}</span>
               <span className="text-xs text-muted">{timeStr}</span>
               <span className="text-xs bg-cyan/10 text-cyan px-2 py-0.5 rounded font-medium">
                 {item.pick_count} 只推荐
+              </span>
+              <span className="text-xs text-muted border border-border px-2 py-0.5 rounded">
+                {PICKER_MODE_LABELS[item.picker_mode ?? 'balanced'] ?? '平衡'}
               </span>
             </div>
             <p className="text-sm text-secondary truncate mt-0.5">{item.market_summary || '—'}</p>
@@ -328,9 +337,16 @@ const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({
               </div>
               <p className="text-base text-secondary leading-relaxed">{result.market_summary}</p>
             </div>
-            <span className="text-sm text-muted whitespace-nowrap shrink-0 bg-elevated px-3 py-1 rounded-lg">
-              {result.generated_at}
-            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              {result.picker_mode && (
+                <span className="text-xs font-medium text-muted border border-border px-2 py-1 rounded-lg">
+                  {PICKER_MODE_LABELS[result.picker_mode] ?? result.picker_mode}
+                </span>
+              )}
+              <span className="text-sm text-muted whitespace-nowrap bg-elevated px-3 py-1 rounded-lg">
+                {result.generated_at}
+              </span>
+            </div>
           </div>
         </div>
       )}

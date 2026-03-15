@@ -258,6 +258,8 @@ class PickerHistory(Base):
     pick_count = Column(Integer, default=0)
     elapsed_seconds = Column(Float, default=0.0)
     created_at = Column(DateTime, default=datetime.now, index=True)
+    picker_mode = Column(String(20), default=None)  # defensive | balanced | offensive
+    picker_leader_bias_exempt_pct = Column(Float, default=None)
 
     def to_summary_dict(self) -> Dict[str, Any]:
         picks = json.loads(self.picks_json) if self.picks_json else []
@@ -270,6 +272,8 @@ class PickerHistory(Base):
             "sectors_to_watch": sectors,
             "elapsed_seconds": self.elapsed_seconds or 0,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+            "picker_mode": self.picker_mode or "balanced",
+            "picker_leader_bias_exempt_pct": self.picker_leader_bias_exempt_pct,
         }
 
     def to_full_dict(self) -> Dict[str, Any]:
@@ -285,6 +289,8 @@ class PickerHistory(Base):
             "generated_at": self.created_at.strftime("%Y-%m-%d %H:%M") if self.created_at else "",
             "elapsed_seconds": self.elapsed_seconds or 0,
             "error": "",
+            "picker_mode": self.picker_mode or "balanced",
+            "picker_leader_bias_exempt_pct": self.picker_leader_bias_exempt_pct,
         }
 
 
@@ -490,6 +496,22 @@ class DatabaseManager:
         
         # 创建所有表
         Base.metadata.create_all(self._engine)
+
+        # Migration: add picker_mode, picker_leader_bias_exempt_pct to picker_history
+        try:
+            from sqlalchemy import text
+            with self._engine.connect() as conn:
+                for sql in [
+                    "ALTER TABLE picker_history ADD COLUMN picker_mode VARCHAR(20)",
+                    "ALTER TABLE picker_history ADD COLUMN picker_leader_bias_exempt_pct FLOAT",
+                ]:
+                    try:
+                        conn.execute(text(sql))
+                        conn.commit()
+                    except Exception:
+                        pass  # Column may already exist
+        except Exception:
+            pass
 
         self._initialized = True
         logger.info(f"数据库初始化完成: {db_url}")
@@ -983,7 +1005,9 @@ class DatabaseManager:
 
     # ── Picker History ──────────────────────────────────────────
 
-    def save_picker_history(self, result_dict: Dict[str, Any]) -> int:
+    def save_picker_history(
+        self, result_dict: Dict[str, Any], picker_mode: Optional[str] = None, picker_leader_bias_exempt_pct: Optional[float] = None
+    ) -> int:
         """Persist a successful picker run. Returns the new row id, or 0 on failure."""
         record = PickerHistory(
             market_summary=result_dict.get("market_summary", ""),
@@ -997,6 +1021,8 @@ class DatabaseManager:
             pick_count=len(result_dict.get("picks", [])),
             elapsed_seconds=result_dict.get("elapsed_seconds", 0),
             created_at=datetime.now(),
+            picker_mode=picker_mode,
+            picker_leader_bias_exempt_pct=picker_leader_bias_exempt_pct,
         )
         with self.get_session() as session:
             try:
