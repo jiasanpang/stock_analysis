@@ -229,6 +229,15 @@ const BacktestPage: React.FC = () => {
     init();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const refreshPickerHistory = useCallback(async () => {
+    try {
+      const hist = await pickerBacktestApi.getHistory({ limit: 10 });
+      setPickerHistory(hist.items);
+    } catch {
+      // Non-critical; ignore
+    }
+  }, []);
+
   // Load last picker backtest from DB when picker tab is active (survives refresh)
   useEffect(() => {
     if (activeTab !== 'picker') return;
@@ -278,15 +287,6 @@ const BacktestPage: React.FC = () => {
     fetchResults(1, code, windowDays);
     fetchPerformance(code, windowDays);
   };
-
-  const refreshPickerHistory = useCallback(async () => {
-    try {
-      const hist = await pickerBacktestApi.getHistory({ limit: 10 });
-      setPickerHistory(hist.items);
-    } catch {
-      // Non-critical; ignore
-    }
-  }, []);
 
   const handleRunPicker = async () => {
     setPickerRunning(true);
@@ -644,18 +644,19 @@ const BacktestPage: React.FC = () => {
                 <span className="text-xs text-muted shrink-0">只</span>
               </div>
             </div>
-            <div className="flex flex-col gap-1.5">
+            <div className="flex flex-col gap-1.5 min-w-0">
               <label className="text-xs font-medium text-muted">模式</label>
               <select
                 value={pickerMode}
                 onChange={(e) => setPickerMode(e.target.value as PickerMode)}
                 disabled={pickerRunning}
-                className="w-full px-3 py-2.5 rounded-lg bg-card border border-border text-sm text-primary
+                title={pickerMode === 'defensive' ? '严进 (龙头不豁免)' : pickerMode === 'balanced' ? '平衡 (龙头可放宽12%)' : '进攻 (龙头可放宽12%)'}
+                className="w-full min-w-0 px-3 py-2.5 rounded-lg bg-card border border-border text-sm text-primary
                            focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
               >
-                <option value="defensive">严进 (龙头不豁免)</option>
-                <option value="balanced">平衡 (龙头可放宽12%)</option>
-                <option value="offensive">进攻 (龙头可放宽12%)</option>
+                <option value="defensive">严进</option>
+                <option value="balanced">平衡</option>
+                <option value="offensive">进攻</option>
               </select>
             </div>
             <div className="flex flex-col gap-1.5">
@@ -664,14 +665,14 @@ const BacktestPage: React.FC = () => {
                 type="button"
                 onClick={handleRunPicker}
                 disabled={pickerRunning}
-                className="w-full px-5 py-2.5 bg-cyan text-white text-sm font-semibold rounded-lg
+                className="w-full min-h-[42px] px-5 py-2.5 bg-cyan text-white text-sm font-semibold rounded-lg
                            hover:opacity-95 disabled:opacity-60 disabled:cursor-not-allowed
-                           transition-all shadow-glow-cyan flex items-center justify-center gap-2"
+                           transition-all shadow-glow-cyan flex items-center justify-center gap-2 whitespace-nowrap"
               >
                 {pickerRunning ? (
                   <>
-                    <Spinner size="sm" className="border-white/30 border-t-white" />
-                    <span>回测中（约 5–15 分钟）...</span>
+                    <Spinner size="sm" className="border-white/30 border-t-white shrink-0" />
+                    <span title="约 5–15 分钟">回测中…</span>
                   </>
                 ) : (
                   <>

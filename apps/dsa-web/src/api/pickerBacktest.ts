@@ -73,8 +73,9 @@ export const pickerBacktestApi = {
       `/api/v1/picker-backtest/history/${id}`,
     );
     const data = toCamelCase<Record<string, unknown>>(response.data);
+    const rawResults = Array.isArray(data.results) ? data.results : [];
     return {
-      results: (data.results || []).map((r) => toCamelCase<PickerBacktestResultItem>(r)),
+      results: rawResults.map((r: Record<string, unknown>) => toCamelCase<PickerBacktestResultItem>(r)),
       summary: data.summary ? toCamelCase<PickerBacktestSummary>(data.summary) : null,
     };
   },
