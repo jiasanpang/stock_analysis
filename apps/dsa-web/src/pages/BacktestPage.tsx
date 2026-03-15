@@ -293,56 +293,61 @@ const BacktestPage: React.FC = () => {
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-[#f1f5f9]">
+    <div className="h-full overflow-y-auto bg-gradient-to-b from-slate-50 to-slate-100/80">
       <div className="max-w-6xl mx-auto px-6 py-12">
-        <div className="bg-card rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.04),0_4px_12px_rgba(0,0,0,0.06)] border border-border p-8 md:p-10">
+        <div className="bg-card rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.04),0_8px_24px_rgba(0,0,0,0.06)] border border-border/80 overflow-hidden">
 
         {/* ─── Hero ─── */}
-        <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl
-                          bg-emerald-500/10 mb-5">
-            <svg className="w-8 h-8 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                    d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-            </svg>
+        <div className="relative px-8 pt-10 pb-8 md:px-10 md:pt-12 md:pb-10 bg-gradient-to-br from-cyan/5 via-transparent to-purple/5">
+          <div className="text-center">
+            <div className="inline-flex items-center justify-center w-14 h-14 rounded-xl
+                            bg-gradient-to-br from-cyan/15 to-cyan/5 border border-cyan/20 mb-5">
+              <svg className="w-7 h-7 text-cyan" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round"
+                      d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z"/>
+              </svg>
+            </div>
+            <h1 className="text-2xl md:text-3xl font-bold text-primary mb-2 tracking-tight">回测</h1>
+            <p className="text-sm text-secondary max-w-2xl mx-auto leading-relaxed">
+              {activeTab === 'analysis'
+                ? '验证历史 AI 分析的准确性：对比预测方向与实际走势，评估止损止盈触发情况'
+                : '验证量化选股策略：按历史日期运行筛选器，统计持仓收益与超额收益'}
+            </p>
           </div>
-          <h1 className="text-2xl font-bold text-primary mb-2 tracking-tight">回测</h1>
-          <p className="text-sm text-muted max-w-2xl mx-auto leading-relaxed">
-            {activeTab === 'analysis'
-              ? '验证历史 AI 分析的准确性：对比预测方向与实际走势，评估止损止盈触发情况'
-              : '验证量化选股策略：按历史日期运行筛选器，统计持仓收益与超额收益'}
-          </p>
         </div>
 
         {/* ─── Tabs ─── */}
-        <div className="flex justify-center gap-2 mb-8">
-          <button
-            type="button"
-            onClick={() => setActiveTab('analysis')}
-            className={`px-5 py-2.5 rounded-xl text-sm font-medium transition-all border
-              ${activeTab === 'analysis'
-                ? 'bg-cyan text-white border-cyan shadow-sm'
-                : 'bg-elevated text-secondary hover:text-primary border-border'}`}
-          >
-            分析回测
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('picker')}
-            className={`px-5 py-2.5 rounded-xl text-sm font-medium transition-all border
-              ${activeTab === 'picker'
-                ? 'bg-cyan text-white border-cyan shadow-sm'
-                : 'bg-elevated text-secondary hover:text-primary border-border'}`}
-          >
-            选股回测
-          </button>
+        <div className="flex justify-center px-6 pt-2 pb-4">
+          <div className="inline-flex p-1 rounded-xl bg-elevated border border-border">
+            <button
+              type="button"
+              onClick={() => setActiveTab('analysis')}
+              className={`px-5 py-2.5 rounded-lg text-sm font-medium transition-all
+                ${activeTab === 'analysis'
+                  ? 'bg-cyan text-white shadow-sm'
+                  : 'text-secondary hover:text-primary hover:bg-white/60'}`}
+            >
+              分析回测
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('picker')}
+              className={`px-5 py-2.5 rounded-lg text-sm font-medium transition-all
+                ${activeTab === 'picker'
+                  ? 'bg-cyan text-white shadow-sm'
+                  : 'text-secondary hover:text-primary hover:bg-white/60'}`}
+            >
+              选股回测
+            </button>
+          </div>
         </div>
 
-        {/* ─── Analysis Backtest ─── */}
+        {/* ─── Content area ─── */}
+        <div className="px-6 pb-8 md:px-10 md:pb-10">
         {activeTab === 'analysis' && (
         <>
         {/* ─── Controls ─── */}
-        <div className="bg-card border border-border rounded-2xl p-6 mb-8">
+        <div className="bg-elevated/60 border border-border rounded-2xl p-6 mb-8">
           <div className="flex flex-wrap items-center gap-3">
             <input
               type="text"
@@ -534,100 +539,107 @@ const BacktestPage: React.FC = () => {
         {/* ─── Picker Backtest ─── */}
         {activeTab === 'picker' && (
           <>
-        {/* ─── Controls (same layout as Analysis) ─── */}
-        <div className="bg-card border border-border rounded-2xl p-6 mb-8">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-secondary">开始</span>
+        {/* ─── Controls ─── */}
+        <div className="bg-elevated/60 border border-border rounded-2xl p-6 mb-8">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 items-end">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium text-muted">开始</label>
               <input
                 type="date"
                 value={pickerStartDate}
                 onChange={(e) => setPickerStartDate(e.target.value)}
                 disabled={pickerRunning}
-                className="min-w-[140px] px-4 py-2.5 rounded-xl bg-elevated border border-border
+                className="w-full px-3 py-2.5 rounded-lg bg-card border border-border
                            text-sm text-primary
-                           focus:outline-none focus:border-cyan/40 focus:ring-1 focus:ring-cyan/20 transition-all"
+                           focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
               />
             </div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-secondary">结束</span>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium text-muted">结束</label>
               <input
                 type="date"
                 value={pickerEndDate}
                 onChange={(e) => setPickerEndDate(e.target.value)}
                 disabled={pickerRunning}
-                className="min-w-[140px] px-4 py-2.5 rounded-xl bg-elevated border border-border
+                className="w-full px-3 py-2.5 rounded-lg bg-card border border-border
                            text-sm text-primary
-                           focus:outline-none focus:border-cyan/40 focus:ring-1 focus:ring-cyan/20 transition-all"
+                           focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
               />
             </div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-secondary">持仓</span>
-              <input
-                type="number"
-                min={1}
-                max={60}
-                value={pickerHoldDays}
-                onChange={(e) => setPickerHoldDays(parseInt(e.target.value, 10) || 10)}
-                disabled={pickerRunning}
-                className="w-16 px-3 py-2.5 rounded-xl bg-elevated border border-border
-                           text-sm text-primary text-center
-                           focus:outline-none focus:border-cyan/40 focus:ring-1 focus:ring-cyan/20 transition-all"
-              />
-              <span className="text-xs text-muted">天</span>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium text-muted">持仓天数</label>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="number"
+                  min={1}
+                  max={60}
+                  value={pickerHoldDays}
+                  onChange={(e) => setPickerHoldDays(parseInt(e.target.value, 10) || 10)}
+                  disabled={pickerRunning}
+                  className="flex-1 px-3 py-2.5 rounded-lg bg-card border border-border
+                             text-sm text-primary text-center
+                             focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
+                />
+                <span className="text-xs text-muted shrink-0">天</span>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-secondary">每日</span>
-              <input
-                type="number"
-                min={1}
-                max={20}
-                value={pickerTopN}
-                onChange={(e) => setPickerTopN(parseInt(e.target.value, 10) || 5)}
-                disabled={pickerRunning}
-                className="w-16 px-3 py-2.5 rounded-xl bg-elevated border border-border
-                           text-sm text-primary text-center
-                           focus:outline-none focus:border-cyan/40 focus:ring-1 focus:ring-cyan/20 transition-all"
-              />
-              <span className="text-xs text-muted">只</span>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium text-muted">每日只数</label>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={pickerTopN}
+                  onChange={(e) => setPickerTopN(parseInt(e.target.value, 10) || 5)}
+                  disabled={pickerRunning}
+                  className="flex-1 px-3 py-2.5 rounded-lg bg-card border border-border
+                             text-sm text-primary text-center
+                             focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
+                />
+                <span className="text-xs text-muted shrink-0">只</span>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-secondary">模式</span>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium text-muted">模式</label>
               <select
                 value={pickerMode}
                 onChange={(e) => setPickerMode(e.target.value as PickerMode)}
                 disabled={pickerRunning}
-                className="px-3 py-2.5 rounded-xl bg-elevated border border-border text-sm text-primary
-                           focus:outline-none focus:border-cyan/40 focus:ring-1 focus:ring-cyan/20"
+                className="w-full px-3 py-2.5 rounded-lg bg-card border border-border text-sm text-primary
+                           focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
               >
                 <option value="defensive">严进 (龙头不豁免)</option>
                 <option value="balanced">平衡 (龙头可放宽12%)</option>
                 <option value="offensive">进攻 (龙头可放宽12%)</option>
               </select>
             </div>
-            <button
-              type="button"
-              onClick={handleRunPicker}
-              disabled={pickerRunning}
-              className="px-6 py-2.5 bg-cyan text-white text-sm font-semibold rounded-xl
-                         hover:bg-cyan/90 disabled:opacity-60 disabled:cursor-not-allowed
-                         transition-all shadow-glow-cyan flex items-center gap-2"
-            >
-                  {pickerRunning ? (
-                    <>
-                      <Spinner size="sm" className="border-white/30 border-t-white" />
-                      <span>回测中...</span>
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                      </svg>
-                      <span>运行选股回测</span>
-                    </>
-                  )}
-                </button>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium text-muted invisible">操作</label>
+              <button
+                type="button"
+                onClick={handleRunPicker}
+                disabled={pickerRunning}
+                className="w-full px-5 py-2.5 bg-cyan text-white text-sm font-semibold rounded-lg
+                           hover:opacity-95 disabled:opacity-60 disabled:cursor-not-allowed
+                           transition-all shadow-glow-cyan flex items-center justify-center gap-2"
+              >
+                {pickerRunning ? (
+                  <>
+                    <Spinner size="sm" className="border-white/30 border-t-white" />
+                    <span>回测中...</span>
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    <span>运行选股回测</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
           {pickerError && <ApiErrorAlert error={pickerError} className="mt-4" />}
         </div>
@@ -686,6 +698,7 @@ const BacktestPage: React.FC = () => {
         </>
         )}
 
+        </div>
         </div>
       </div>
     </div>
