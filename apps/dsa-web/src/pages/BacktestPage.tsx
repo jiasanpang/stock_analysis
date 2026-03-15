@@ -13,6 +13,7 @@ import type {
 import type {
   PickerBacktestResultItem,
   PickerBacktestSummary,
+  PickerBacktestHistoryItem,
   PickerMode,
 } from '../types/pickerBacktest';
 
@@ -177,6 +178,7 @@ const BacktestPage: React.FC = () => {
   const [pickerResult, setPickerResult] = useState<{ results: PickerBacktestResultItem[]; summary: PickerBacktestSummary | null } | null>(null);
   const [pickerError, setPickerError] = useState<ParsedApiError | null>(null);
   const [pickerMode, setPickerMode] = useState<PickerMode>('balanced');
+  const [pickerHistory, setPickerHistory] = useState<PickerBacktestHistoryItem[]>([]);
 
   const fetchResults = useCallback(async (page = 1, code?: string, windowDays?: number) => {
     setIsLoadingResults(true);
@@ -227,6 +229,25 @@ const BacktestPage: React.FC = () => {
     init();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Load last picker backtest from DB when picker tab is active (survives refresh)
+  useEffect(() => {
+    if (activeTab !== 'picker') return;
+    const load = async () => {
+      try {
+        if (pickerResult == null) {
+          const data = await pickerBacktestApi.getResults();
+          if (data.results.length > 0 || data.summary) {
+            setPickerResult({ results: data.results, summary: data.summary });
+          }
+        }
+        await refreshPickerHistory();
+      } catch {
+        // Non-critical; ignore
+      }
+    };
+    load();
+  }, [activeTab, refreshPickerHistory]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleRun = async () => {
     setIsRunning(true);
     setRunResult(null);
@@ -258,6 +279,15 @@ const BacktestPage: React.FC = () => {
     fetchPerformance(code, windowDays);
   };
 
+  const refreshPickerHistory = useCallback(async () => {
+    try {
+      const hist = await pickerBacktestApi.getHistory({ limit: 10 });
+      setPickerHistory(hist.items);
+    } catch {
+      // Non-critical; ignore
+    }
+  }, []);
+
   const handleRunPicker = async () => {
     setPickerRunning(true);
     setPickerResult(null);
@@ -275,10 +305,21 @@ const BacktestPage: React.FC = () => {
         results: response.results,
         summary: response.summary,
       });
+      await refreshPickerHistory();
     } catch (err) {
       setPickerError(getParsedApiError(err));
     } finally {
       setPickerRunning(false);
+    }
+  };
+
+  const handleLoadHistoryDetail = async (id: number) => {
+    try {
+      const data = await pickerBacktestApi.getHistoryDetail(id);
+      setPickerResult({ results: data.results, summary: data.summary });
+      setPickerError(null);
+    } catch (err) {
+      setPickerError(getParsedApiError(err));
     }
   };
 
@@ -541,6 +582,9 @@ const BacktestPage: React.FC = () => {
           <>
         {/* ─── Controls ─── */}
         <div className="bg-elevated/60 border border-border rounded-2xl p-6 mb-8">
+          <p className="text-xs text-muted mb-4">
+            选股回测需逐日调用 Tushare 等数据源，日期较多时可能需 5–15 分钟，请耐心等待。
+          </p>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 items-end">
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-medium text-muted">开始</label>
@@ -627,7 +671,7 @@ const BacktestPage: React.FC = () => {
                 {pickerRunning ? (
                   <>
                     <Spinner size="sm" className="border-white/30 border-t-white" />
-                    <span>回测中...</span>
+                    <span>回测中（约 5–15 分钟）...</span>
                   </>
                 ) : (
                   <>
@@ -643,6 +687,31 @@ const BacktestPage: React.FC = () => {
           </div>
           {pickerError && <ApiErrorAlert error={pickerError} className="mt-4" />}
         </div>
+
+        {/* ─── History ─── */}
+        {pickerHistory.length > 0 && (
+          <div className="mb-8">
+            <h3 className="text-sm font-medium text-muted mb-3">历史记录</h3>
+            <div className="flex flex-wrap gap-2">
+              {pickerHistory.map((h) => (
+                <button
+                  key={h.id}
+                  type="button"
+                  onClick={() => handleLoadHistoryDetail(h.id)}
+                  className="px-3 py-2 rounded-lg bg-elevated border border-border text-xs text-secondary
+                             hover:border-cyan/40 hover:text-primary transition-all text-left"
+                >
+                  <span className="font-mono">{h.startDate}–{h.endDate}</span>
+                  <span className="mx-1.5 text-muted">|</span>
+                  <span>{h.holdDays}d×{h.topN}</span>
+                  {h.winRatePct != null && (
+                    <span className="ml-1.5 text-cyan">{h.winRatePct.toFixed(1)}%</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* ─── Performance (same pattern as Analysis) ─── */}
         {pickerResult?.summary && (

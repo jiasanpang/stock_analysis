@@ -294,6 +294,54 @@ class PickerHistory(Base):
         }
 
 
+class PickerBacktestHistory(Base):
+    """Picker backtest run history — stores full result JSON per run."""
+
+    __tablename__ = "picker_backtest_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    start_date = Column(String(10), nullable=False)
+    end_date = Column(String(10), nullable=False)
+    hold_days = Column(Integer, nullable=False, default=10)
+    top_n = Column(Integer, nullable=False, default=5)
+    picker_mode = Column(String(20), default="balanced")
+    picker_leader_bias_exempt_pct = Column(Float, default=None)
+    trade_dates_count = Column(Integer, default=0)
+    results_json = Column(Text, default="[]")
+    summary_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    def to_summary_dict(self) -> Dict[str, Any]:
+        summary = json.loads(self.summary_json) if self.summary_json else {}
+        return {
+            "id": self.id,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "hold_days": self.hold_days,
+            "top_n": self.top_n,
+            "picker_mode": self.picker_mode or "balanced",
+            "trade_dates_count": self.trade_dates_count or 0,
+            "win_rate_pct": summary.get("win_rate_pct"),
+            "avg_return_pct": summary.get("avg_return_pct"),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+    def to_full_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "hold_days": self.hold_days,
+            "top_n": self.top_n,
+            "picker_mode": self.picker_mode or "balanced",
+            "picker_leader_bias_exempt_pct": self.picker_leader_bias_exempt_pct,
+            "trade_dates_count": self.trade_dates_count or 0,
+            "results": json.loads(self.results_json) if self.results_json else [],
+            "summary": json.loads(self.summary_json) if self.summary_json else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class BacktestResult(Base):
     """单条分析记录的回测结果。"""
 
@@ -1061,6 +1109,91 @@ class DatabaseManager:
             result = session.execute(delete(PickerHistory))
             session.commit()
             return result.rowcount or 0
+
+    # ── Picker Backtest History ────────────────────────────────────
+
+    def save_picker_backtest_history(
+        self,
+        result: Dict[str, Any],
+        *,
+        start_date: str = "",
+        end_date: str = "",
+        hold_days: int = 10,
+        top_n: int = 5,
+        picker_mode: Optional[str] = None,
+        picker_leader_bias_exempt_pct: Optional[float] = None,
+    ) -> int:
+        """Persist a picker backtest run. Returns the new row id, or 0 on failure."""
+        summary = result.get("summary") or {}
+        record = PickerBacktestHistory(
+            start_date=start_date or summary.get("start_date", ""),
+            end_date=end_date or summary.get("end_date", ""),
+            hold_days=hold_days or summary.get("hold_days", 10),
+            top_n=top_n or summary.get("top_n", 5),
+            picker_mode=picker_mode or summary.get("picker_mode", "balanced"),
+            picker_leader_bias_exempt_pct=picker_leader_bias_exempt_pct
+            if picker_leader_bias_exempt_pct is not None
+            else summary.get("picker_leader_bias_exempt_pct"),
+            trade_dates_count=result.get("trade_dates_count", 0),
+            results_json=json.dumps(result.get("results", []), ensure_ascii=False),
+            summary_json=json.dumps(summary, ensure_ascii=False),
+            created_at=datetime.now(),
+        )
+        with self.get_session() as session:
+            try:
+                session.add(record)
+                session.commit()
+                session.refresh(record)
+                return record.id
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Failed to save picker backtest history: {e}")
+                return 0
+
+    def get_picker_backtest_history_list(
+        self, limit: int = 20, offset: int = 0
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Return (items, total_count) for picker backtest history list."""
+        with self.get_session() as session:
+            total = (
+                session.execute(select(func.count(PickerBacktestHistory.id))).scalar() or 0
+            )
+            rows = (
+                session.execute(
+                    select(PickerBacktestHistory)
+                    .order_by(desc(PickerBacktestHistory.created_at))
+                    .offset(offset)
+                    .limit(limit)
+                )
+                .scalars().all()
+            )
+            return [r.to_summary_dict() for r in rows], total
+
+    def get_picker_backtest_history_detail(
+        self, record_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Return full picker backtest result by id, or None."""
+        with self.get_session() as session:
+            row = (
+                session.execute(
+                    select(PickerBacktestHistory).where(PickerBacktestHistory.id == record_id)
+                )
+                .scalars().first()
+            )
+            return row.to_full_dict() if row else None
+
+    def get_latest_picker_backtest(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent picker backtest run, or None."""
+        with self.get_session() as session:
+            row = (
+                session.execute(
+                    select(PickerBacktestHistory).order_by(
+                        desc(PickerBacktestHistory.created_at)
+                    ).limit(1)
+                )
+                .scalars().first()
+            )
+            return row.to_full_dict() if row else None
 
     def get_data_range(
         self, 

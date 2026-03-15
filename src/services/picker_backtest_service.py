@@ -9,6 +9,7 @@ Uses top N by score (no LLM) for each trade date.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -167,6 +168,101 @@ class PickerBacktestService:
             logger.debug(f"[PickerBacktest] Benchmark return failed: {e}")
             return None
 
+    def _get_benchmark_returns_batch(
+        self, date_pairs: List[Tuple[str, Optional[str]]]
+    ) -> Dict[Tuple[str, str], float]:
+        """Fetch benchmark once for full range, compute per-period returns. Saves N-1 Tushare calls."""
+        valid_pairs = [(td, ed) for td, ed in date_pairs if ed is not None]
+        if not valid_pairs:
+            return {}
+        api = self._get_tushare_api()
+        if api is None:
+            return {}
+        try:
+            all_dates = set()
+            for td, ed in valid_pairs:
+                all_dates.add(td)
+                all_dates.add(ed)
+            start = min(all_dates)
+            end = max(all_dates)
+            df = api.index_daily(ts_code=BENCHMARK_CODE, start_date=start, end_date=end)
+            if df is None or df.empty:
+                return {}
+            df.columns = [c.lower() for c in df.columns]
+            df = df.sort_values("trade_date")
+            close_map = df.set_index("trade_date")["close"].to_dict()
+            result: Dict[Tuple[str, str], float] = {}
+            for td, ed in valid_pairs:
+                p0 = close_map.get(td)
+                p1 = close_map.get(ed)
+                if p0 is None or p1 is None or float(p0) <= 0:
+                    continue
+                result[(td, ed)] = (float(p1) - float(p0)) / float(p0) * 100
+            return result
+        except Exception as e:
+            logger.debug(f"[PickerBacktest] Batch benchmark failed: {e}")
+            return {}
+
+    def _get_forward_returns_parallel(
+        self, picks: List[ScreenedStock], trade_date: str, exit_date: str
+    ) -> List[PickResult]:
+        """Fetch forward returns for picks in parallel (max 5 workers to respect rate limits)."""
+        results: List[PickResult] = []
+        with ThreadPoolExecutor(max_workers=5, thread_name_prefix="fwd") as pool:
+            futures = {
+                pool.submit(
+                    self._get_forward_return, s.code, trade_date, exit_date, s.price
+                ): s
+                for s in picks
+            }
+            for fut in as_completed(futures):
+                s = futures[fut]
+                try:
+                    exit_price, ret = fut.result()
+                except Exception as e:
+                    logger.debug(f"[PickerBacktest] Forward return failed {s.code}: {e}")
+                    results.append(
+                        PickResult(
+                            trade_date=trade_date,
+                            code=s.code,
+                            name=s.name,
+                            entry_price=s.price,
+                            exit_price=None,
+                            return_pct=None,
+                            outcome="insufficient",
+                            score=s.score,
+                        )
+                    )
+                    continue
+                if ret is None:
+                    results.append(
+                        PickResult(
+                            trade_date=trade_date,
+                            code=s.code,
+                            name=s.name,
+                            entry_price=s.price,
+                            exit_price=exit_price,
+                            return_pct=None,
+                            outcome="insufficient",
+                            score=s.score,
+                        )
+                    )
+                else:
+                    outcome = "win" if ret > 0 else "loss"
+                    results.append(
+                        PickResult(
+                            trade_date=trade_date,
+                            code=s.code,
+                            name=s.name,
+                            entry_price=s.price,
+                            exit_price=exit_price,
+                            return_pct=ret,
+                            outcome=outcome,
+                            score=s.score,
+                        )
+                    )
+        return results
+
     def run(
         self,
         start_date: str,
@@ -216,10 +312,17 @@ class PickerBacktestService:
                 "summary": None,
             }
 
-        results: List[PickResult] = []
+        # Precompute exit dates and batch-fetch benchmark (saves N-1 Tushare calls)
+        date_pairs: List[Tuple[str, Optional[str]]] = []
+        for td in trade_dates:
+            exit_d = self._get_exit_date(td, hold_days)
+            date_pairs.append((td, exit_d))
+
+        benchmark_map = self._get_benchmark_returns_batch(date_pairs)
         benchmark_returns: List[float] = []
 
-        for i, td in enumerate(trade_dates):
+        results: List[PickResult] = []
+        for i, (td, exit_date) in enumerate(date_pairs):
             if (i + 1) % 20 == 0:
                 logger.info(f"[PickerBacktest] Progress {i + 1}/{len(trade_dates)} dates")
             try:
@@ -227,42 +330,17 @@ class PickerBacktestService:
                 picks = candidates[:top_n]
                 if not picks:
                     continue
-
-                exit_date = self._get_exit_date(td, hold_days)
                 if exit_date is None:
                     continue
 
-                bm_ret = self._get_benchmark_return(td, exit_date)
+                bm_ret = benchmark_map.get((td, exit_date))
                 if bm_ret is not None:
                     benchmark_returns.append(bm_ret)
 
-                for s in picks:
-                    exit_price, ret = self._get_forward_return(
-                        s.code, td, exit_date, s.price
-                    )
-                    if ret is None:
-                        results.append(PickResult(
-                            trade_date=td,
-                            code=s.code,
-                            name=s.name,
-                            entry_price=s.price,
-                            exit_price=exit_price,
-                            return_pct=None,
-                            outcome="insufficient",
-                            score=s.score,
-                        ))
-                    else:
-                        outcome = "win" if ret > 0 else "loss"
-                        results.append(PickResult(
-                            trade_date=td,
-                            code=s.code,
-                            name=s.name,
-                            entry_price=s.price,
-                            exit_price=exit_price,
-                            return_pct=ret,
-                            outcome=outcome,
-                            score=s.score,
-                        ))
+                # Parallelize forward return fetches (5 picks per day)
+                pick_results = self._get_forward_returns_parallel(picks, td, exit_date)
+                for pr in pick_results:
+                    results.append(pr)
             except Exception as e:
                 logger.warning(f"[PickerBacktest] Date {td} failed: {e}")
                 continue

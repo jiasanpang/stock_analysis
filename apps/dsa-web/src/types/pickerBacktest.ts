@@ -48,3 +48,16 @@ export interface PickerBacktestRunResponse {
   summary: PickerBacktestSummary | null;
   tradeDatesCount: number;
 }
+
+export interface PickerBacktestHistoryItem {
+  id: number;
+  startDate: string;
+  endDate: string;
+  holdDays: number;
+  topN: number;
+  pickerMode: string;
+  tradeDatesCount: number;
+  winRatePct?: number;
+  avgReturnPct?: number;
+  createdAt?: string;
+}

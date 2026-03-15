@@ -349,6 +349,7 @@ class StockScreener:
         self._turnover_max = turnover_max if turnover_max is not None else TURNOVER_MAX_PCT
         self._enable_b_wave_filter = enable_b_wave_filter
         self._allow_loss = allow_loss
+        self._stock_basic_cache: Optional[pd.DataFrame] = None  # Reuse across days in backtest
 
     def screen(self, trade_date: Optional[str] = None) -> Tuple[List[ScreenedStock], ScreenStats]:
         """Run the full screening pipeline. Returns (candidates, stats).
@@ -706,10 +707,15 @@ class StockScreener:
                 df_basic.columns = [c.lower() for c in df_basic.columns]
                 df_daily = df_daily.merge(df_basic, on="ts_code", how="left")
 
-            # Fetch stock names
-            df_names = tushare_api.stock_basic(fields="ts_code,symbol,name")
+            # Fetch stock names (cache for backtest: same for all days)
+            if self._stock_basic_cache is not None:
+                df_names = self._stock_basic_cache
+            else:
+                df_names = tushare_api.stock_basic(fields="ts_code,symbol,name")
+                if df_names is not None and not df_names.empty:
+                    df_names.columns = [c.lower() for c in df_names.columns]
+                    self._stock_basic_cache = df_names
             if df_names is not None and not df_names.empty:
-                df_names.columns = [c.lower() for c in df_names.columns]
                 df_daily = df_daily.merge(df_names, on="ts_code", how="left")
 
             # Normalize columns to match AkShare convention used by filters
