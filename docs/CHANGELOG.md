@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - Picker API: Fix `PickerResponse() got multiple values for keyword argument 'picker_mode'` — remove redundant kwargs since `result_dict` already includes them.
+- Chip distribution (AkShare): Add retry (3 attempts, exponential backoff) and 0.5–1.2s delay per request to reduce Eastmoney `RemoteDisconnected` failures. Picker chip fetch: max_workers 5→2, timeout 2s→8s.
 
 ### Added
 - `PICKER_SPOT_TIMEOUT`: Timeout (seconds) for full-market spot data fetch (AkShare/efinance). Default 30. Increase when Eastmoney API is slow.

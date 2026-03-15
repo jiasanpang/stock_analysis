@@ -1110,7 +1110,7 @@ class StockPickerService:
         return intel
 
     def _fetch_chip_for_candidates(
-        self, candidates: List[ScreenedStock], max_stocks: int = 25, timeout_per_stock: float = 2.0
+        self, candidates: List[ScreenedStock], max_stocks: int = 25, timeout_per_stock: float = 8.0
     ) -> Dict[str, Dict[str, Any]]:
         """Fetch chip distribution for candidates. Returns {code: {concentration_90, profit_ratio}}."""
         chip_map: Dict[str, Dict[str, Any]] = {}
@@ -1133,7 +1133,8 @@ class StockPickerService:
             return None
 
         to_fetch = [s.code for s in candidates[:max_stocks]]
-        with ThreadPoolExecutor(max_workers=5, thread_name_prefix="chip") as pool:
+        # max_workers=2 to avoid Eastmoney rate limit; timeout 8s for retries
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="chip") as pool:
             futures = {pool.submit(_fetch_one, code): code for code in to_fetch}
             for fut in futures:
                 code = futures[fut]

@@ -1417,30 +1417,25 @@ class AkshareFetcher(BaseFetcher):
             logger.debug(f"[API跳过] {stock_code} 是 ETF/指数，无筹码分布数据")
             return None
         
-        try:
-            # 防封禁策略
+        def _do_fetch() -> Optional[ChipDistribution]:
             self._set_random_user_agent()
             self._enforce_rate_limit()
-            
+            # Extra delay for chip API (Eastmoney rate-limits aggressively)
+            time.sleep(random.uniform(0.5, 1.2))
+
             logger.info(f"[API调用] ak.stock_cyq_em(symbol={stock_code}) 获取筹码分布...")
-            import time as _time
-            api_start = _time.time()
-            
+            api_start = time.time()
             df = ak.stock_cyq_em(symbol=stock_code)
-            
-            api_elapsed = _time.time() - api_start
-            
+            api_elapsed = time.time() - api_start
+
             if df.empty:
                 logger.warning(f"[API返回] ak.stock_cyq_em 返回空数据, 耗时 {api_elapsed:.2f}s")
                 return None
-            
+
             logger.info(f"[API返回] ak.stock_cyq_em 成功: 返回 {len(df)} 天数据, 耗时 {api_elapsed:.2f}s")
             logger.debug(f"[API返回] 筹码数据列名: {list(df.columns)}")
-            
-            # 取最新一天的数据
+
             latest = df.iloc[-1]
-            
-            # 使用 realtime_types.py 中的统一转换函数
             chip = ChipDistribution(
                 code=stock_code,
                 date=str(latest.get('日期', '')),
@@ -1453,15 +1448,33 @@ class AkshareFetcher(BaseFetcher):
                 cost_70_high=safe_float(latest.get('70成本-高')),
                 concentration_70=safe_float(latest.get('70集中度')),
             )
-            
-            logger.info(f"[筹码分布] {stock_code} 日期={chip.date}: 获利比例={chip.profit_ratio:.1%}, "
-                       f"平均成本={chip.avg_cost}, 90%集中度={chip.concentration_90:.2%}, "
-                       f"70%集中度={chip.concentration_70:.2%}")
+            logger.info(
+                f"[筹码分布] {stock_code} 日期={chip.date}: 获利比例={chip.profit_ratio:.1%}, "
+                f"平均成本={chip.avg_cost}, 90%集中度={chip.concentration_90:.2%}, "
+                f"70%集中度={chip.concentration_70:.2%}"
+            )
             return chip
-            
-        except Exception as e:
-            logger.error(f"[API错误] 获取 {stock_code} 筹码分布失败: {e}")
-            return None
+
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                chip = _do_fetch()
+                if chip is not None:
+                    return chip
+                break  # empty data, no retry
+            except Exception as e:
+                err_msg = str(e).lower()
+                is_retryable = any(
+                    k in err_msg for k in ("remote", "connection", "disconnected", "aborted", "timeout")
+                )
+                if attempt < max_retries and is_retryable:
+                    backoff = min(2 ** attempt, 10)
+                    logger.warning(f"[API错误] 获取 {stock_code} 筹码失败 (attempt {attempt}/{max_retries}), {backoff}s 后重试: {e}")
+                    time.sleep(backoff)
+                else:
+                    logger.error(f"[API错误] 获取 {stock_code} 筹码分布失败: {e}")
+                    return None
+        return None
     
     def get_enhanced_data(self, stock_code: str, days: int = 60) -> Dict[str, Any]:
         """
