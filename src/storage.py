@@ -1055,6 +1055,13 @@ class DatabaseManager:
             ).scalars().first()
             return row.to_full_dict() if row else None
 
+    def clear_picker_history(self) -> int:
+        """Delete all picker history records. Returns deleted count."""
+        with self.get_session() as session:
+            result = session.execute(delete(PickerHistory))
+            session.commit()
+            return result.rowcount or 0
+
     def get_data_range(
         self, 
         code: str, 
