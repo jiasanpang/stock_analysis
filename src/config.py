@@ -263,6 +263,8 @@ class Config:
     picker_enable_b_wave_filter: bool = True
     # 是否允许亏损股进入选股池（PE<=0）；默认 false 排除亏损股
     picker_allow_loss: bool = False
+    # 选股全市场行情拉取超时(秒)，AkShare/efinance 东财接口较慢时可适当增大
+    picker_spot_timeout: int = 30
 
     # === 日志配置 ===
     log_dir: str = "./logs"  # 日志文件目录
@@ -710,6 +712,7 @@ class Config:
             picker_turnover_max=float(os.getenv('PICKER_TURNOVER_MAX', '15.0')),
             picker_enable_b_wave_filter=os.getenv('PICKER_ENABLE_B_WAVE_FILTER', 'true').lower() == 'true',
             picker_allow_loss=os.getenv('PICKER_ALLOW_LOSS', 'false').lower() == 'true',
+            picker_spot_timeout=int(os.getenv('PICKER_SPOT_TIMEOUT', '30')),
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             max_workers=int(os.getenv('MAX_WORKERS', '3')),

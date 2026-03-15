@@ -49,6 +49,7 @@
 | `AGENT_MODE` | 启用 Agent 问股 | `false` |
 | `TRADING_DAY_CHECK_ENABLED` | 交易日检查 | `true` |
 | `SCHEDULE_TIME` | 定时执行时间 | `18:00` |
+| `PICKER_SPOT_TIMEOUT` | 选股全市场行情拉取超时(秒)，东财接口慢时可增大 | `30` |
 
 ## GitHub Actions
 

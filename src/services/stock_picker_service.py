@@ -12,6 +12,7 @@ Two-stage pipeline:
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -288,9 +289,9 @@ def get_tushare_api(data_manager=None):
         if not cfg.tushare_token:
             return None
         import tushare as ts
-        ts.set_token(cfg.tushare_token)
+        # Pass token directly to avoid writing ~/tk.csv (fixes Operation not permitted)
         logger.info("[Picker] Created standalone Tushare API instance")
-        return ts.pro_api()
+        return ts.pro_api(token=cfg.tushare_token)
     except Exception as e:
         logger.warning(f"[Picker] Cannot init Tushare: {e}")
         return None
@@ -307,6 +308,7 @@ def create_screener_from_config(data_manager=None) -> "StockScreener":
         turnover_max=cfg.picker_turnover_max,
         enable_b_wave_filter=getattr(cfg, "picker_enable_b_wave_filter", True),
         allow_loss=getattr(cfg, "picker_allow_loss", False),
+        spot_timeout=getattr(cfg, "picker_spot_timeout", 30),
     )
 
 
@@ -327,8 +329,12 @@ class StockScreener:
         turnover_max: Optional[float] = None,
         enable_b_wave_filter: bool = True,
         allow_loss: bool = False,
+        spot_timeout: Optional[int] = None,
     ):
         self._data_manager = data_manager
+        self._spot_timeout = spot_timeout if spot_timeout is not None else int(
+            os.getenv("PICKER_SPOT_TIMEOUT", "30")
+        )
         self._as_of_date: Optional[str] = None  # YYYY-MM-DD for historical screening
         self._picker_mode = (picker_mode or "balanced").lower()
         self._leader_bias_exempt_pct = max(0.0, float(picker_leader_bias_exempt_pct))
@@ -592,8 +598,6 @@ class StockScreener:
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
     ]
 
-    _SPOT_WALL_TIMEOUT = 10  # hard wall-clock timeout per provider
-
     def _fetch_spot_data(self, trade_date: Optional[str] = None) -> Optional[pd.DataFrame]:
         """Fetch full A-share data. Priority: Tushare → AkShare → efinance.
         When trade_date (YYYYMMDD) is provided, only Tushare is used (historical mode)."""
@@ -622,15 +626,15 @@ class StockScreener:
                 _req.utils.default_headers = orig
 
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="screener") as pool:
-            logger.info(f"[Screener] Trying AkShare (wall timeout={self._SPOT_WALL_TIMEOUT}s)...")
+            logger.info(f"[Screener] Trying AkShare (wall timeout={self._spot_timeout}s)...")
             t0 = time.time()
             try:
                 fut = pool.submit(_try_akshare)
-                df = fut.result(timeout=self._SPOT_WALL_TIMEOUT)
+                df = fut.result(timeout=self._spot_timeout)
                 logger.info(f"[Screener] AkShare returned {len(df)} stocks in {time.time()-t0:.1f}s")
                 return df
             except FuturesTimeout:
-                logger.warning(f"[Screener] AkShare hard-timeout after {self._SPOT_WALL_TIMEOUT}s")
+                logger.warning(f"[Screener] AkShare hard-timeout after {self._spot_timeout}s")
                 fut.cancel()
             except Exception as e:
                 logger.warning(f"[Screener] AkShare failed: {e}")
@@ -641,15 +645,15 @@ class StockScreener:
             return ef.stock.get_realtime_quotes()
 
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="screener") as pool:
-            logger.info(f"[Screener] Trying efinance (wall timeout={self._SPOT_WALL_TIMEOUT}s)...")
+            logger.info(f"[Screener] Trying efinance (wall timeout={self._spot_timeout}s)...")
             t0 = time.time()
             try:
                 fut = pool.submit(_try_efinance)
-                df = fut.result(timeout=self._SPOT_WALL_TIMEOUT)
+                df = fut.result(timeout=self._spot_timeout)
                 logger.info(f"[Screener] efinance returned {len(df)} stocks in {time.time()-t0:.1f}s")
                 return self._normalize_efinance_df(df)
             except FuturesTimeout:
-                logger.warning(f"[Screener] efinance hard-timeout after {self._SPOT_WALL_TIMEOUT}s")
+                logger.warning(f"[Screener] efinance hard-timeout after {self._spot_timeout}s")
                 fut.cancel()
             except Exception as e:
                 logger.warning(f"[Screener] efinance failed: {e}")

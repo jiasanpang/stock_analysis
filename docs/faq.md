@@ -6,7 +6,7 @@
 
 **量比显示为空？** 配置 `REALTIME_SOURCE_PRIORITY=tencent,akshare_sina,efinance,akshare_em`。
 
-**Tushare Token 错误？** 可不配置，系统自动使用 AkShare 等免费源。有账号则在 Tushare 个人中心确认 Token。
+**Tushare Token 错误？** 可不配置，系统自动使用 AkShare 等免费源。有账号则在 Tushare 个人中心确认 Token。若遇 `Operation not permitted: tk.csv`，已修复：现直接传入 token，不再写入 `~/tk.csv`。
 
 **数据限流/熔断？** 减少自选股数量、增加请求间隔。东财频繁失败可设 `ENABLE_EASTMONEY_PATCH=true`。
 

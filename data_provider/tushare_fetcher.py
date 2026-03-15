@@ -124,12 +124,10 @@ class TushareFetcher(BaseFetcher):
         
         try:
             import tushare as ts
-            
-            # Set Token
-            ts.set_token(config.tushare_token)
-            
-            # Get API instance
-            self._api = ts.pro_api()
+
+            # Pass token directly to pro_api() to avoid writing ~/tk.csv (fixes
+            # Operation not permitted in sandbox/restricted envs)
+            self._api = ts.pro_api(token=config.tushare_token)
             
             # Fix: tushare SDK 1.4.x hardcodes api.waditu.com/dataapi which may
             # be unavailable (503). Monkey-patch the query method to use the
