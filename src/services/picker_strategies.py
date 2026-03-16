@@ -2,7 +2,7 @@
 """
 Picker strategies: each strategy has its own screening logic and fixed params.
 
-Strategies: buy_pullback, breakout, bottom_reversal
+Strategies: buy_pullback, breakout, bottom_reversal, macd_golden_cross
 No intensity modes (defensive/balanced/offensive) — each strategy has one set of params.
 """
 
@@ -27,17 +27,23 @@ from src.services.stock_picker_service import (
 BUY_PULLBACK = "buy_pullback"
 BREAKOUT = "breakout"
 BOTTOM_REVERSAL = "bottom_reversal"
+MACD_GOLDEN_CROSS = "macd_golden_cross"
 
 # Default strategy when PICKER_STRATEGIES not set
 DEFAULT_STRATEGIES = [BUY_PULLBACK]
 
 # All available strategies
-ALL_STRATEGIES = [BUY_PULLBACK, BREAKOUT, BOTTOM_REVERSAL]
+ALL_STRATEGIES = [BUY_PULLBACK, BREAKOUT, BOTTOM_REVERSAL, MACD_GOLDEN_CROSS]
+
+# Mid-cap bonus: 50-500 yi (亿) market cap
+_MID_CAP_MIN = 50e8
+_MID_CAP_MAX = 500e8
 
 STRATEGY_DISPLAY_NAMES: Dict[str, str] = {
     BUY_PULLBACK: "买回踩",
     BREAKOUT: "突破",
     BOTTOM_REVERSAL: "底部反转",
+    MACD_GOLDEN_CROSS: "MACD金叉",
 }
 
 
@@ -65,14 +71,14 @@ class StrategyParams:
     volume_ratio_min: float = VOLUME_RATIO_MIN
 
 
-# Buy pullback: 60d > 5%, MA bullish, pullback entry (balanced params)
+# Buy pullback: 60d > 5%, MA bullish, pullback entry (expert-tuned params)
 BUY_PULLBACK_PARAMS = StrategyParams(
     max_bias_pct=8.0,
     pe_max=100,
     pe_ideal_low=10,
-    pe_ideal_high=30,
-    daily_change_min=-1.0,
-    daily_change_max=4.0,
+    pe_ideal_high=35,
+    daily_change_min=-2.5,
+    daily_change_max=3.0,
     max_consecutive_up_days=3,
     require_volume_shrink=False,
     require_ma_bullish=True,
@@ -99,10 +105,10 @@ BREAKOUT_PARAMS = StrategyParams(
     volume_ratio_min=1.5,  # Stronger volume for breakout
 )
 
-# Bottom reversal: 60d -20% ~ 10%, stabilizing
+# Bottom reversal: 60d -25% ~ 10%, stabilizing (expert-tuned: retracement relaxed)
 BOTTOM_REVERSAL_PARAMS = StrategyParams(
     max_bias_pct=6.0,  # Stricter (near support)
-    pe_max=80,
+    pe_max=100,
     pe_ideal_low=8,
     pe_ideal_high=35,
     daily_change_min=0.0,  # Stabilizing or slight up
@@ -110,21 +116,65 @@ BOTTOM_REVERSAL_PARAMS = StrategyParams(
     max_consecutive_up_days=3,
     require_volume_shrink=False,
     require_ma_bullish=False,  # Bottom stocks often not MA bullish
-    max_retracement_pct=0.618,
+    max_retracement_pct=1.0,  # Effectively skip: at bottom retracement often 100%
     change_60d_min=-25.0,
     change_60d_max=10.0,
     volume_ratio_min=1.2,  # Some volume for confirmation
 )
 
+# MACD golden cross: 60d -15% ~ 50%, daily 0% ~ 6%, volume confirmation
+MACD_GOLDEN_CROSS_PARAMS = StrategyParams(
+    max_bias_pct=8.0,
+    pe_max=100,
+    pe_ideal_low=10,
+    pe_ideal_high=35,
+    daily_change_min=0.0,
+    daily_change_max=6.0,
+    max_consecutive_up_days=3,
+    require_volume_shrink=False,
+    require_ma_bullish=False,  # MACD captures trend
+    max_retracement_pct=0.8,  # Relaxed: golden cross often at inflection
+    change_60d_min=-15.0,
+    change_60d_max=50.0,
+    volume_ratio_min=1.0,
+)
+
+
+# Registry for get_strategy_params (single source of truth)
+_STRATEGY_PARAMS: Dict[str, StrategyParams] = {
+    BUY_PULLBACK: BUY_PULLBACK_PARAMS,
+    BREAKOUT: BREAKOUT_PARAMS,
+    BOTTOM_REVERSAL: BOTTOM_REVERSAL_PARAMS,
+    MACD_GOLDEN_CROSS: MACD_GOLDEN_CROSS_PARAMS,
+}
+
 
 def get_strategy_params(strategy_id: str) -> StrategyParams:
     """Get params for strategy. Falls back to buy_pullback for unknown."""
-    m = {
-        BUY_PULLBACK: BUY_PULLBACK_PARAMS,
-        BREAKOUT: BREAKOUT_PARAMS,
-        BOTTOM_REVERSAL: BOTTOM_REVERSAL_PARAMS,
-    }
-    return m.get(strategy_id, BUY_PULLBACK_PARAMS)
+    return _STRATEGY_PARAMS.get(strategy_id, BUY_PULLBACK_PARAMS)
+
+
+# Scorer functions by strategy (used in score_and_rank)
+_SCORERS: Dict[str, Any] = {}
+
+
+def _score_pe(pe: float, params: StrategyParams) -> float:
+    """PE score: ideal 10, partial range 5, else 0 (for pullback/MACD)."""
+    if params.pe_ideal_low < pe < params.pe_ideal_high:
+        return 10.0
+    if 5 < pe <= params.pe_ideal_low or params.pe_ideal_high <= pe < PE_SCORE_PARTIAL_MAX:
+        return 5.0
+    return 0.0
+
+
+def _score_pe_simple(pe: float, params: StrategyParams) -> float:
+    """PE score: ideal 10, else 5 (for breakout/bottom_reversal)."""
+    return 10.0 if params.pe_ideal_low < pe < params.pe_ideal_high else 5.0
+
+
+def _score_mid_cap(total_mv: float) -> float:
+    """Mid-cap bonus: 50-500 yi."""
+    return 5.0 if _MID_CAP_MIN < total_mv < _MID_CAP_MAX else 0.0
 
 
 def parse_picker_strategies(value: Optional[str]) -> List[str]:
@@ -213,11 +263,8 @@ def score_buy_pullback(row: Dict[str, Any], params: StrategyParams) -> float:
     vol = 20.0 if 1.0 <= vol_ratio <= 3.0 else (15.0 if vol_ratio > 3.0 else (10.0 if vol_ratio > 0.8 else 0.0))
     # Turnover
     to = 10.0 if 2 <= turnover <= 8 else (5.0 if 1 <= turnover < 2 else (3.0 if 8 < turnover <= 15 else 0.0))
-    # PE
-    pe_s = 10.0 if params.pe_ideal_low < pe < params.pe_ideal_high else (
-        5.0 if 5 < pe <= params.pe_ideal_low or params.pe_ideal_high <= pe < PE_SCORE_PARTIAL_MAX else 0.0
-    )
-    mid = 5.0 if 50e8 < total_mv < 500e8 else 0.0
+    pe_s = _score_pe(pe, params)
+    mid = _score_mid_cap(total_mv)
     return trend + mom + vol + to + pe_s + mid
 
 
@@ -237,8 +284,8 @@ def score_breakout(row: Dict[str, Any], params: StrategyParams) -> float:
     # Trend: moderate positive preferred
     trend = min(15.0, max(0, pct_60d)) if 0 <= pct_60d <= 50 else 5.0
     to = 10.0 if 2 <= turnover <= 10 else 5.0
-    pe_s = 10.0 if params.pe_ideal_low < pe < params.pe_ideal_high else 5.0
-    mid = 5.0 if 50e8 < total_mv < 500e8 else 0.0
+    pe_s = _score_pe_simple(pe, params)
+    mid = _score_mid_cap(total_mv)
     return trend + mom + vol + to + pe_s + mid
 
 
@@ -262,9 +309,35 @@ def score_bottom_reversal(row: Dict[str, Any], params: StrategyParams) -> float:
     mom = 20.0 if 0 <= change_pct <= 3 else (15.0 if 3 < change_pct <= 5 else 10.0)
     vol = 20.0 if vol_ratio >= 1.5 else (10.0 if vol_ratio >= 1.2 else 0.0)
     to = 10.0 if 1 <= turnover <= 10 else 5.0
-    pe_s = 10.0 if params.pe_ideal_low < pe < params.pe_ideal_high else 5.0
-    mid = 5.0 if 50e8 < total_mv < 500e8 else 0.0
+    pe_s = _score_pe_simple(pe, params)
+    mid = _score_mid_cap(total_mv)
     return trend + mom + vol + to + pe_s + mid
+
+
+def score_macd_golden_cross(row: Dict[str, Any], params: StrategyParams) -> float:
+    """Score for MACD golden cross: volume + momentum + PE; trend neutral (MACD captures it)."""
+    change_pct = float(row.get("涨跌幅", 0) or 0)
+    vol_ratio = float(row.get("量比", 0) or 0)
+    turnover = float(row.get("换手率", 0) or 0)
+    pe = float(row.get("市盈率-动态", 0) or 0)
+    total_mv = float(row.get("总市值", 0) or 0)
+
+    # Moderate momentum preferred (0-6% daily)
+    mom = 20.0 if 0 <= change_pct <= 3 else (15.0 if 3 < change_pct <= 5 else 10.0)
+    vol = 20.0 if vol_ratio >= 1.5 else (10.0 if vol_ratio >= 1.0 else 0.0)
+    to = 10.0 if 2 <= turnover <= 8 else (5.0 if 1 <= turnover < 2 else 0.0)
+    pe_s = _score_pe(pe, params)
+    mid = _score_mid_cap(total_mv)
+    return mom + vol + to + pe_s + mid
+
+
+# Populate _SCORERS after all scorers are defined
+_SCORERS.update({
+    BUY_PULLBACK: score_buy_pullback,
+    BREAKOUT: score_breakout,
+    BOTTOM_REVERSAL: score_bottom_reversal,
+    MACD_GOLDEN_CROSS: score_macd_golden_cross,
+})
 
 
 def score_and_rank(
@@ -274,11 +347,7 @@ def score_and_rank(
     top_n: int = 30,
 ) -> List[ScreenedStock]:
     """Score and rank by strategy, return top N with strategy tag."""
-    scorer = {
-        BUY_PULLBACK: score_buy_pullback,
-        BREAKOUT: score_breakout,
-        BOTTOM_REVERSAL: score_bottom_reversal,
-    }.get(strategy_id, score_buy_pullback)
+    scorer_fn = _SCORERS.get(strategy_id, score_buy_pullback)
 
     records: List[ScreenedStock] = []
     for _, row in df.iterrows():
@@ -296,7 +365,7 @@ def score_and_rank(
             pct_60d = float(pd.to_numeric(row.get("60日涨跌幅", 0), errors="coerce") or 0)
 
             row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
-            score = scorer(row_dict, params)
+            score = scorer_fn(row_dict, params)
 
             records.append(
                 ScreenedStock(

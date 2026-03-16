@@ -414,7 +414,7 @@ class PickerBacktestService:
             if (i + 1) % 20 == 0:
                 logger.info(f"[PickerBacktest] Progress {i + 1}/{len(trade_dates)} dates")
             try:
-                candidates, _ = screener.screen_as_of(td)
+                candidates, _, _ = screener.screen_as_of(td)
                 picks = candidates[:top_n]
                 if not picks:
                     logger.debug(f"[PickerBacktest] {td}: 筛选后无候选，跳过")

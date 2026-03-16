@@ -60,6 +60,11 @@ LEADER_TURNOVER_LO, LEADER_TURNOVER_HI = 2.0, 8.0
 # PE scoring: partial score upper bound (outside ideal but not bubble)
 PE_SCORE_PARTIAL_MAX = 80
 
+# Per-strategy top N before merge
+PICKER_TOP_N_PER_STRATEGY = 30
+# MACD golden cross filter lookback (need ~30 days for MACD warmup)
+MACD_LOOKBACK_DAYS = 35
+
 # B-wave risk (波浪 ABC): exclude stocks likely in B-wave bounce (fake recovery before C-wave down)
 B_WAVE_LOOKBACK_DAYS = 20
 B_WAVE_MIN_DROOP_PCT = 5.0  # A-wave drop must be at least 5%
@@ -302,6 +307,7 @@ class PickerResult:
     risk_warning: str = ""
     screen_stats: Optional[ScreenStats] = None
     screened_pool: List[ScreenedStock] = field(default_factory=list)
+    screened_pool_by_strategy: Dict[str, List[ScreenedStock]] = field(default_factory=dict)
     generated_at: str = ""
     error: str = ""
     elapsed_seconds: float = 0.0
@@ -318,6 +324,9 @@ class PickerResult:
             "risk_warning": self.risk_warning,
             "screen_stats": self.screen_stats.to_dict() if self.screen_stats else None,
             "screened_pool": [s.to_dict() for s in self.screened_pool],
+            "screened_pool_by_strategy": {
+                k: [s.to_dict() for s in v] for k, v in self.screened_pool_by_strategy.items()
+            },
             "generated_at": self.generated_at,
             "elapsed_seconds": round(self.elapsed_seconds, 1),
             "error": self.error,
@@ -398,8 +407,8 @@ class StockScreener:
         self._allow_loss = allow_loss
         self._stock_basic_cache: Optional[pd.DataFrame] = None  # Reuse across days in backtest
 
-    def screen(self, trade_date: Optional[str] = None) -> Tuple[List[ScreenedStock], ScreenStats]:
-        """Run the full screening pipeline. Returns (candidates, stats).
+    def screen(self, trade_date: Optional[str] = None) -> Tuple[List[ScreenedStock], ScreenStats, Dict[str, List[ScreenedStock]]]:
+        """Run the full screening pipeline. Returns (candidates, stats, candidates_per_strategy).
         When trade_date is provided (YYYYMMDD), run historical screening (Tushare only).
         Uses multi-strategy when picker_strategies has multiple entries."""
         stats = ScreenStats()
@@ -408,7 +417,7 @@ class StockScreener:
         df = self._fetch_spot_data(trade_date)
         if df is None or df.empty:
             logger.warning("[Screener] No spot data available")
-            return [], stats
+            return [], stats, {}
 
         stats.total_stocks = len(df)
         logger.info(f"[Screener] Starting with {stats.total_stocks} stocks, strategies={self._picker_strategies}")
@@ -425,6 +434,7 @@ class StockScreener:
             filter_volume,
             score_and_rank,
             merge_candidates_by_code,
+            MACD_GOLDEN_CROSS,
         )
 
         candidates_per_strategy: Dict[str, List[ScreenedStock]] = {}
@@ -435,7 +445,7 @@ class StockScreener:
             df_s = filter_volume(df_s, params, self._turnover_min, self._turnover_max)
             stats.after_volume = len(df_s)
 
-            cands = score_and_rank(df_s, strategy_id, params, top_n=30)
+            cands = score_and_rank(df_s, strategy_id, params, top_n=PICKER_TOP_N_PER_STRATEGY)
             cands = self._filter_by_bias(
                 cands,
                 max_bias_pct=params.max_bias_pct,
@@ -444,6 +454,8 @@ class StockScreener:
             cands = self._filter_limit_up_streak(cands)
             cands = self._filter_consecutive_up_days(cands, max_up_days=params.max_consecutive_up_days)
             cands = self._filter_healthy_pullback(cands, params=params)
+            if strategy_id == MACD_GOLDEN_CROSS:
+                cands = self._filter_macd_golden_cross(cands, lookback_days=MACD_LOOKBACK_DAYS)
             if self._enable_b_wave_filter:
                 cands = self._filter_b_wave_risk(cands)
 
@@ -454,14 +466,14 @@ class StockScreener:
         if not candidates_per_strategy:
             stats.final_pool = 0
             logger.warning("[Screener] No candidates from any strategy")
-            return [], stats
+            return [], stats, {}
 
         candidates = merge_candidates_by_code(candidates_per_strategy)
         stats.final_pool = len(candidates)
         logger.info(f"[Screener] Merged {stats.final_pool} candidates from {len(candidates_per_strategy)} strategies")
-        return candidates, stats
+        return candidates, stats, candidates_per_strategy
 
-    def screen_as_of(self, trade_date: str) -> Tuple[List[ScreenedStock], ScreenStats]:
+    def screen_as_of(self, trade_date: str) -> Tuple[List[ScreenedStock], ScreenStats, Dict[str, List[ScreenedStock]]]:
         """Run screening as of a specific trade date (YYYYMMDD). For backtest use."""
         return self.screen(trade_date=trade_date)
 
@@ -731,6 +743,61 @@ class StockScreener:
                             continue
 
             filtered.append(s)
+
+        return filtered
+
+    def _filter_macd_golden_cross(
+        self,
+        candidates: List[ScreenedStock],
+        lookback_days: int = MACD_LOOKBACK_DAYS,
+    ) -> List[ScreenedStock]:
+        """Filter for MACD golden cross: DIF crosses above DEA in last 2 days.
+        Uses pandas_ta_classic for MACD (fast=12, slow=26, signal=9)."""
+        if not self._data_manager or not candidates:
+            return candidates
+
+        try:
+            import pandas_ta_classic as ta
+        except ImportError:
+            logger.warning("[Screener] pandas_ta_classic not installed, skip MACD golden cross filter")
+            return candidates
+
+        end_date = self._as_of_date
+        requests = [(s.code, None, end_date, lookback_days + 5) for s in candidates]
+        batch = self._fetch_daily_batch(requests)
+
+        filtered = []
+        for s in candidates:
+            df_daily, _ = batch.get((s.code, "", end_date, lookback_days + 5), (None, ""))
+            if df_daily is None or len(df_daily) < 30:
+                continue
+
+            close_col = self._first_col(df_daily, "close", "收盘")
+            if close_col is None:
+                continue
+
+            date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
+            df_daily = df_daily.sort_values(date_col).tail(lookback_days).reset_index(drop=True)
+            close = pd.to_numeric(df_daily[close_col], errors="coerce").fillna(0)
+
+            macd_df = ta.macd(close, fast=12, slow=26, signal=9)
+            if macd_df is None or (isinstance(macd_df, pd.DataFrame) and macd_df.empty):
+                continue
+
+            # pandas_ta_classic returns DataFrame: col0=MACD line (DIF), col1=Signal (DEA), col2=Histogram
+            if isinstance(macd_df, pd.DataFrame) and len(macd_df.columns) >= 2:
+                dif = pd.to_numeric(macd_df.iloc[:, 0], errors="coerce").fillna(0)
+                dea = pd.to_numeric(macd_df.iloc[:, 1], errors="coerce").fillna(0)
+            else:
+                continue
+            if len(dif) < 2 or len(dea) < 2:
+                continue
+
+            prev_dif, curr_dif = float(dif.iloc[-2]), float(dif.iloc[-1])
+            prev_dea, curr_dea = float(dea.iloc[-2]), float(dea.iloc[-1])
+            # Golden cross: prev DIF < prev DEA and curr DIF > curr DEA
+            if prev_dif < prev_dea and curr_dif > curr_dea:
+                filtered.append(s)
 
         return filtered
 
@@ -1010,7 +1077,7 @@ class StockScreener:
         return df.rename(columns=renamed)
 
     def _filter_basic(self, df: pd.DataFrame, pe_max: Optional[float] = None) -> pd.DataFrame:
-        """Layer 1: Remove ST, new listings, ETFs, penny stocks, and unprofitable."""
+        """Layer 1: Remove ST, new listings, ETFs, and unprofitable (PE filter)."""
         pe_max = pe_max if pe_max is not None else PickerModeParams.for_mode(self._picker_mode).pe_max
         return self._filter_basic_impl(df, pe_max)
 
@@ -1032,10 +1099,6 @@ class StockScreener:
         code_col = "代码"
         if code_col in df.columns:
             df = df[~df[code_col].str[:2].isin(self._ETF_PREFIXES)]
-
-        # Price > 3 yuan (avoid penny stocks)
-        if "最新价" in df.columns:
-            df = df[pd.to_numeric(df["最新价"], errors="coerce") > 3]
 
         # PE filter: exclude PE >= pe_max; when allow_loss=False, also exclude PE<=0 (unprofitable)
         if "市盈率-动态" in df.columns:
@@ -1266,9 +1329,10 @@ class StockPickerService:
         try:
             # ── Stage 1: Quantitative screening ──
             logger.info("[StockPicker] === Stage 1: Quantitative Screening ===")
-            candidates, stats = self._screener.screen()
+            candidates, stats, candidates_per_strategy = self._screener.screen()
             result.screen_stats = stats
             result.screened_pool = candidates
+            result.screened_pool_by_strategy = candidates_per_strategy
 
             if not candidates:
                 logger.warning("[StockPicker] Screening returned 0 candidates, proceeding with news only")

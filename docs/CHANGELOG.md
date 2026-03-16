@@ -10,7 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- Multi-strategy picker: `PICKER_STRATEGIES` (comma-separated) runs multiple strategies in parallel. Strategies: `buy_pullback` (买回踩), `breakout` (突破), `bottom_reversal` (底部反转). Candidates merged and tagged by strategy. No intensity modes (defensive/balanced/offensive) — each strategy has fixed params.
+- Multi-strategy picker: `PICKER_STRATEGIES` (comma-separated) runs multiple strategies in parallel. Strategies: `buy_pullback` (买回踩), `breakout` (突破), `bottom_reversal` (底部反转), `macd_golden_cross` (MACD金叉). Candidates merged and tagged by strategy. No intensity modes (defensive/balanced/offensive) — each strategy has fixed params.
+- MACD golden cross strategy: uses `pandas-ta-classic` for MACD (fast=12, slow=26, signal=9). Filters candidates where DIF crosses above DEA in last 2 days. Params: 60d -15% ~ 50%, daily 0% ~ 6%, volume_ratio_min 1.0.
+- Picker strategy comparison view: API returns `screened_pool_by_strategy` (per-strategy candidate lists). Frontend toggle "合并" / "按策略对比" to view merged pool or each strategy's candidates separately for comparison.
+
+### Changed
+- Picker strategy params (expert-tuned): 买回踩 daily_change -2.5%~3% (was -1%~4%), pe_ideal_high 35 (was 30); 底部反转 max_retracement_pct 1.0 (was 0.618), pe_max 100 (was 80); MACD max_retracement_pct 0.8 (was 0.618).
+- Picker basic filter: Remove low-price filter (was exclude price < 3 yuan). Low-priced stocks are no longer excluded.
 - Sector rankings (板块排行): Tushare `sw_daily` as priority source when TUSHARE_TOKEN configured. Avoids Eastmoney rate limiting (RemoteDisconnected). Requires 5000+ Tushare points.
 - Picker backtest: stop-loss/take-profit per 买卖点规则 — stop-loss: 跌破 MA20 or -8% drawdown; take-profit: 前高 (20d high), 整数关口 (5/10/20/50/100...), or +15% fallback.
 - Picker backtest speed: `CachingDataFetcherManager` caches get_daily_data per run; screener filters (`_filter_by_bias`, `_filter_limit_up_streak`, `_filter_consecutive_up_days`, `_filter_b_wave_risk`) fetch in parallel (5 workers) with request deduplication.

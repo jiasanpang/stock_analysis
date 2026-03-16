@@ -12,7 +12,7 @@ GET  /api/v1/picker/history/{id} — full detail of a single run
 import asyncio
 import logging
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -62,7 +62,7 @@ class PickRecommendation(BaseModel):
 class PickerRecommendRequest(BaseModel):
     """Optional overrides for picker run. Omit to use .env config."""
     picker_strategies: Optional[List[str]] = Field(
-        None, description="Comma-like list: buy_pullback, breakout, bottom_reversal"
+        None, description="Strategies: buy_pullback, breakout, bottom_reversal, macd_golden_cross"
     )
     picker_mode: Optional[str] = Field(None, description="deprecated, use picker_strategies")
     picker_leader_bias_exempt_pct: Optional[float] = Field(None, ge=0, le=20, description="Leader bias exemption %")
@@ -76,6 +76,7 @@ class PickerResponse(BaseModel):
     risk_warning: str = ""
     screen_stats: Optional[ScreenStatsResponse] = None
     screened_pool: List[ScreenedStockResponse] = Field(default_factory=list)
+    screened_pool_by_strategy: Dict[str, List[ScreenedStockResponse]] = Field(default_factory=dict)
     generated_at: str = ""
     elapsed_seconds: float = 0.0
     error: str = ""

@@ -255,6 +255,7 @@ class PickerHistory(Base):
     risk_warning = Column(Text, default="")
     screen_stats_json = Column(Text)
     screened_pool_json = Column(Text)
+    screened_pool_by_strategy_json = Column(Text, default=None)
     pick_count = Column(Integer, default=0)
     elapsed_seconds = Column(Float, default=0.0)
     created_at = Column(DateTime, default=datetime.now, index=True)
@@ -293,6 +294,10 @@ class PickerHistory(Base):
             "risk_warning": self.risk_warning or "",
             "screen_stats": json.loads(self.screen_stats_json) if self.screen_stats_json else None,
             "screened_pool": json.loads(self.screened_pool_json) if self.screened_pool_json else [],
+            "screened_pool_by_strategy": (
+                json.loads(self.screened_pool_by_strategy_json)
+                if self.screened_pool_by_strategy_json else {}
+            ),
             "generated_at": self.created_at.strftime("%Y-%m-%d %H:%M") if self.created_at else "",
             "elapsed_seconds": self.elapsed_seconds or 0,
             "error": "",
@@ -561,6 +566,7 @@ class DatabaseManager:
                     "ALTER TABLE picker_history ADD COLUMN picker_mode VARCHAR(20)",
                     "ALTER TABLE picker_history ADD COLUMN picker_leader_bias_exempt_pct FLOAT",
                     "ALTER TABLE picker_history ADD COLUMN picker_strategies_json TEXT",
+                    "ALTER TABLE picker_history ADD COLUMN screened_pool_by_strategy_json TEXT",
                 ]:
                     try:
                         conn.execute(text(sql))
@@ -1080,6 +1086,10 @@ class DatabaseManager:
             if result_dict.get("screen_stats") else None,
             screened_pool_json=json.dumps(result_dict.get("screened_pool", []), ensure_ascii=False)
             if result_dict.get("screened_pool") else None,
+            screened_pool_by_strategy_json=(
+                json.dumps(result_dict.get("screened_pool_by_strategy", {}), ensure_ascii=False)
+                if result_dict.get("screened_pool_by_strategy") else None
+            ),
             pick_count=len(result_dict.get("picks", [])),
             elapsed_seconds=result_dict.get("elapsed_seconds", 0),
             created_at=datetime.now(),
