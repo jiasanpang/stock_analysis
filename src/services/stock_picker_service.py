@@ -313,7 +313,6 @@ class PickerResult:
     elapsed_seconds: float = 0.0
     picker_mode: str = "balanced"
     picker_strategies: List[str] = field(default_factory=list)
-    picker_leader_bias_exempt_pct: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -333,7 +332,6 @@ class PickerResult:
         }
         d["picker_mode"] = self.picker_mode
         d["picker_strategies"] = self.picker_strategies
-        d["picker_leader_bias_exempt_pct"] = self.picker_leader_bias_exempt_pct
         return d
 
 
@@ -364,7 +362,6 @@ def create_screener_from_config(data_manager=None) -> "StockScreener":
         data_manager=data_manager,
         picker_strategies=strategies,
         picker_mode=cfg.picker_mode,
-        picker_leader_bias_exempt_pct=cfg.picker_leader_bias_exempt_pct,
         turnover_min=cfg.picker_turnover_min,
         turnover_max=cfg.picker_turnover_max,
         enable_b_wave_filter=getattr(cfg, "picker_enable_b_wave_filter", True),
@@ -386,7 +383,6 @@ class StockScreener:
         data_manager=None,
         picker_strategies: Optional[List[str]] = None,
         picker_mode: str = "balanced",
-        picker_leader_bias_exempt_pct: float = 0.0,
         turnover_min: Optional[float] = None,
         turnover_max: Optional[float] = None,
         enable_b_wave_filter: bool = True,
@@ -400,7 +396,6 @@ class StockScreener:
         self._as_of_date: Optional[str] = None  # YYYY-MM-DD for historical screening
         self._picker_strategies = picker_strategies if picker_strategies else ["buy_pullback"]
         self._picker_mode = (picker_mode or "balanced").lower()
-        self._leader_bias_exempt_pct = max(0.0, float(picker_leader_bias_exempt_pct))
         self._turnover_min = turnover_min if turnover_min is not None else TURNOVER_MIN_PCT
         self._turnover_max = turnover_max if turnover_max is not None else TURNOVER_MAX_PCT
         self._enable_b_wave_filter = enable_b_wave_filter
@@ -449,7 +444,7 @@ class StockScreener:
             cands = self._filter_by_bias(
                 cands,
                 max_bias_pct=params.max_bias_pct,
-                leader_bias_exempt_pct=self._leader_bias_exempt_pct,
+                leader_bias_exempt_pct=getattr(params, "leader_bias_exempt_pct", 0.0),
             )
             cands = self._filter_limit_up_streak(cands)
             cands = self._filter_consecutive_up_days(cands, max_up_days=params.max_consecutive_up_days)
@@ -1276,7 +1271,6 @@ class StockPickerService:
         self,
         picker_strategies_override: Optional[List[str]] = None,
         picker_mode_override: Optional[str] = None,
-        picker_leader_bias_exempt_override: Optional[float] = None,
     ):
         self.config = get_config()
         self._data_manager = DataFetcherManager()
@@ -1286,16 +1280,10 @@ class StockPickerService:
             else (getattr(self.config, "picker_strategies", None) or ["buy_pullback"])
         )
         mode = picker_mode_override or self.config.picker_mode
-        exempt = (
-            picker_leader_bias_exempt_override
-            if picker_leader_bias_exempt_override is not None
-            else self.config.picker_leader_bias_exempt_pct
-        )
         self._screener = StockScreener(
             data_manager=self._data_manager,
             picker_strategies=strategies,
             picker_mode=mode,
-            picker_leader_bias_exempt_pct=exempt,
             enable_b_wave_filter=getattr(self.config, "picker_enable_b_wave_filter", True),
         )
         self._search_service: Optional[SearchService] = None
@@ -1323,7 +1311,6 @@ class StockPickerService:
             generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
             picker_mode=self._screener._picker_mode,
             picker_strategies=getattr(self._screener, "_picker_strategies", []) or ["buy_pullback"],
-            picker_leader_bias_exempt_pct=self._screener._leader_bias_exempt_pct or None,
         )
 
         try:
@@ -1469,15 +1456,13 @@ class StockPickerService:
         chip_map = chip_map or {}
         today = datetime.now().strftime("%Y-%m-%d")
         strategies = getattr(self._screener, "_picker_strategies", []) or ["buy_pullback"]
-        exempt = self._screener._leader_bias_exempt_pct
-        strategies = getattr(self._screener, "_picker_strategies", []) or ["buy_pullback"]
         from src.services.picker_strategies import get_strategy_params, STRATEGY_DISPLAY_NAMES
         strategy_labels = ", ".join(STRATEGY_DISPLAY_NAMES.get(x, x) for x in strategies)
-        exempt = self._screener._leader_bias_exempt_pct
         p = get_strategy_params(strategies[0]) if strategies else PickerModeParams.for_mode("balanced")
+        exempt_desc = "各策略自定" if len(strategies) > 1 else f"{getattr(p, 'leader_bias_exempt_pct', 0)}%"
         parts = [
             f"# 今日选股分析 ({today})\n",
-            f"**当前配置**：策略={strategy_labels}，乖离率阈值={p.max_bias_pct}%，龙头豁免={exempt}%，"
+            f"**当前配置**：策略={strategy_labels}，乖离率阈值={p.max_bias_pct}%，龙头豁免={exempt_desc}，"
             f"PE理想区间={p.pe_ideal_low}-{p.pe_ideal_high}倍\n",
         ]
 

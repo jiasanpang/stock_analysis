@@ -350,8 +350,7 @@ class PickerBacktestService:
         end_date: str,
         hold_days: int = 10,
         top_n: int = 5,
-        picker_mode: Optional[str] = None,
-        picker_leader_bias_exempt_pct: Optional[float] = None,
+        picker_strategies: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Run picker backtest.
@@ -361,23 +360,17 @@ class PickerBacktestService:
             end_date: YYYY-MM-DD or YYYYMMDD
             hold_days: holding period in trading days
             top_n: number of picks per day (by score)
-            picker_mode: optional override (defensive|balanced|offensive)
-            picker_leader_bias_exempt_pct: optional leader exemption %
+            picker_strategies: optional override (buy_pullback, breakout, etc.)
 
         Returns:
             Dict with results, summary, and performance metrics.
         """
-        if picker_mode is not None or picker_leader_bias_exempt_pct is not None:
+        if picker_strategies is not None:
             cfg = get_config()
             screener = StockScreener(
                 data_manager=self._data_manager,
-                picker_strategies=getattr(cfg, "picker_strategies", None) or ["buy_pullback"],
-                picker_mode=picker_mode or cfg.picker_mode,
-                picker_leader_bias_exempt_pct=(
-                    picker_leader_bias_exempt_pct
-                    if picker_leader_bias_exempt_pct is not None
-                    else cfg.picker_leader_bias_exempt_pct
-                ),
+                picker_strategies=picker_strategies,
+                picker_mode=cfg.picker_mode,
                 turnover_min=cfg.picker_turnover_min,
                 turnover_max=cfg.picker_turnover_max,
                 enable_b_wave_filter=getattr(cfg, "picker_enable_b_wave_filter", True),

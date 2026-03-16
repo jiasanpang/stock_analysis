@@ -56,8 +56,7 @@ def run_picker_backtest(request: PickerBacktestRunRequest) -> PickerBacktestRunR
             end_date=request.end_date,
             hold_days=request.hold_days,
             top_n=request.top_n,
-            picker_mode=request.picker_mode,
-            picker_leader_bias_exempt_pct=request.picker_leader_bias_exempt_pct,
+            picker_strategies=request.picker_strategies,
         )
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
@@ -71,8 +70,7 @@ def run_picker_backtest(request: PickerBacktestRunRequest) -> PickerBacktestRunR
                 end_date=request.end_date,
                 hold_days=request.hold_days,
                 top_n=request.top_n,
-                picker_mode=request.picker_mode,
-                picker_leader_bias_exempt_pct=request.picker_leader_bias_exempt_pct,
+                picker_strategies=request.picker_strategies,
             )
         except Exception as e:
             logger.warning(f"Failed to save picker backtest history: {e}")

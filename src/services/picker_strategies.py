@@ -53,6 +53,8 @@ class StrategyParams:
 
     # Bias filter
     max_bias_pct: float
+    # Leader bias exemption: 0=off; when >0, qualified leaders can pass with bias up to this %
+    leader_bias_exempt_pct: float = 0.0
     # PE
     pe_max: float
     pe_ideal_low: float
@@ -74,6 +76,7 @@ class StrategyParams:
 # Buy pullback: 60d > 5%, MA bullish, pullback entry (expert-tuned params)
 BUY_PULLBACK_PARAMS = StrategyParams(
     max_bias_pct=8.0,
+    leader_bias_exempt_pct=0.0,  # No exemption: buy pullback = strict on bias
     pe_max=100,
     pe_ideal_low=10,
     pe_ideal_high=35,
@@ -91,6 +94,7 @@ BUY_PULLBACK_PARAMS = StrategyParams(
 # Breakout: price breaks N-day high, volume confirmation
 BREAKOUT_PARAMS = StrategyParams(
     max_bias_pct=12.0,  # Allow higher bias (breakout = chasing strength)
+    leader_bias_exempt_pct=14.0,  # Leaders breaking out can have higher bias
     pe_max=100,
     pe_ideal_low=15,
     pe_ideal_high=50,
@@ -108,6 +112,7 @@ BREAKOUT_PARAMS = StrategyParams(
 # Bottom reversal: 60d -25% ~ 10%, stabilizing (expert-tuned: retracement relaxed)
 BOTTOM_REVERSAL_PARAMS = StrategyParams(
     max_bias_pct=6.0,  # Stricter (near support)
+    leader_bias_exempt_pct=0.0,  # No exemption: bottom stocks are not leaders
     pe_max=100,
     pe_ideal_low=8,
     pe_ideal_high=35,
@@ -125,6 +130,7 @@ BOTTOM_REVERSAL_PARAMS = StrategyParams(
 # MACD golden cross: 60d -15% ~ 50%, daily 0% ~ 6%, volume confirmation
 MACD_GOLDEN_CROSS_PARAMS = StrategyParams(
     max_bias_pct=8.0,
+    leader_bias_exempt_pct=0.0,  # No exemption: golden cross at inflection
     pe_max=100,
     pe_ideal_low=10,
     pe_ideal_high=35,

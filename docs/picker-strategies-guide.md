@@ -57,7 +57,7 @@
 
 | 过滤 | 说明 |
 |------|------|
-| **乖离率** | 当前价相对 MA5 乖离率 > max_bias_pct 排除；龙头可豁免（60d>15%、今日 2–7%、量比>1.5、换手 2–8%） |
+| **乖离率** | 当前价相对 MA5 乖离率 > max_bias_pct 排除；龙头可豁免（仅突破策略启用，60d>15%、今日 2–7%、量比>1.5、换手 2–8%） |
 | **连板** | 近 5 日 2+ 次涨停排除（主板 9.5%、创业板/科创板 19%） |
 | **连涨** | 连续上涨天数 > max_consecutive_up_days 排除 |
 | **健康回踩** | 缩量检查（可选）、均线多头排列（可选）、回调幅度限制（max_retracement_pct） |
@@ -102,7 +102,7 @@
 | 60日涨跌幅 | -10% ~ 80% | 允许前期下跌后的突破，避免暴涨 |
 | 当日涨幅 | 2% ~ 10% | 必须上涨，不追涨停 |
 | 量比 | > 1.5 | 突破需放量 |
-| 乖离率 | ≤ 12% | 突破允许适度追高 |
+| 乖离率 | ≤ 12% | 突破允许适度追高；龙头可豁免至 14%（60d>15%、今日 2–7%、量比>1.5、换手 2–8%） |
 | 均线 | 不要求 | 突破时可能尚未形成多头 |
 | 最大回调 | 61.8% | 斐波那契 |
 | 连涨天数 | ≤ 4 | 突破常出现在连涨中 |
@@ -234,9 +234,6 @@
 # 选股策略，逗号分隔，默认 buy_pullback
 PICKER_STRATEGIES=buy_pullback,breakout,bottom_reversal,macd_golden_cross
 
-# 龙头乖离率豁免（0–20），默认 0
-PICKER_LEADER_BIAS_EXEMPT_PCT=10
-
 # 是否允许亏损股
 PICKER_ALLOW_LOSS=false
 
@@ -251,8 +248,7 @@ POST /api/v1/picker/recommend
 Content-Type: application/json
 
 {
-  "picker_strategies": ["buy_pullback", "breakout"],
-  "picker_leader_bias_exempt_pct": 10
+  "picker_strategies": ["buy_pullback", "breakout"]
 }
 ```
 

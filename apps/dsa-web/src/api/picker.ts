@@ -49,7 +49,6 @@ export interface PickerResponse {
   history_id?: number | null;
   picker_mode?: string;
   picker_strategies?: string[];
-  picker_leader_bias_exempt_pct?: number | null;
 }
 
 export interface PickPreview {
@@ -68,7 +67,6 @@ export interface PickerHistoryItem {
   created_at: string | null;
   picker_mode?: string;
   picker_strategies?: string[];
-  picker_leader_bias_exempt_pct?: number | null;
 }
 
 export interface PickerHistoryListResponse {
@@ -86,7 +84,6 @@ export type PickerStrategy = 'buy_pullback' | 'breakout' | 'bottom_reversal' | '
 export interface PickerRecommendParams {
   picker_strategies?: PickerStrategy[];
   picker_mode?: PickerMode;
-  picker_leader_bias_exempt_pct?: number;
 }
 
 const STRATEGY_LABELS: Record<string, string> = {
@@ -101,14 +98,12 @@ export { STRATEGY_LABELS };
 export async function fetchRecommendations(params?: PickerRecommendParams): Promise<PickerResponse> {
   const hasParams = params && (
     (params.picker_strategies && params.picker_strategies.length > 0) ||
-    params.picker_mode ||
-    params.picker_leader_bias_exempt_pct != null
+    params.picker_mode
   );
   const body = hasParams
     ? {
         picker_strategies: params?.picker_strategies ?? undefined,
         picker_mode: params?.picker_mode ?? undefined,
-        picker_leader_bias_exempt_pct: params?.picker_leader_bias_exempt_pct ?? undefined,
       }
     : undefined;
   const res = await apiClient.post<PickerResponse>('/api/v1/picker/recommend', body ?? null, {

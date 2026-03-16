@@ -65,7 +65,6 @@ class PickerRecommendRequest(BaseModel):
         None, description="Strategies: buy_pullback, breakout, bottom_reversal, macd_golden_cross"
     )
     picker_mode: Optional[str] = Field(None, description="deprecated, use picker_strategies")
-    picker_leader_bias_exempt_pct: Optional[float] = Field(None, ge=0, le=20, description="Leader bias exemption %")
 
 
 class PickerResponse(BaseModel):
@@ -83,7 +82,6 @@ class PickerResponse(BaseModel):
     history_id: Optional[int] = None
     picker_mode: str = "balanced"
     picker_strategies: List[str] = Field(default_factory=list)
-    picker_leader_bias_exempt_pct: Optional[float] = None
 
 
 # ── History response models ──────────────────────────────────────
@@ -104,7 +102,6 @@ class PickerHistoryItem(BaseModel):
     created_at: Optional[str] = None
     picker_mode: str = "balanced"
     picker_strategies: List[str] = Field(default_factory=list)
-    picker_leader_bias_exempt_pct: Optional[float] = None
 
 
 class PickerHistoryListResponse(BaseModel):
@@ -124,7 +121,7 @@ async def recommend_stocks(body: Optional[PickerRecommendRequest] = Body(None)):
     Stage 1 — Quantitative screening from full A-share market
     Stage 2 — AI selection combining quant pool + market intelligence
 
-    Optional body: picker_mode (defensive|balanced|offensive), picker_leader_bias_exempt_pct (0-20).
+    Optional body: picker_strategies (list of strategy ids).
     """
     try:
         from src.services.stock_picker_service import StockPickerService
@@ -133,7 +130,6 @@ async def recommend_stocks(body: Optional[PickerRecommendRequest] = Body(None)):
         service = StockPickerService(
             picker_strategies_override=req.picker_strategies,
             picker_mode_override=req.picker_mode,
-            picker_leader_bias_exempt_override=req.picker_leader_bias_exempt_pct,
         )
         loop = asyncio.get_event_loop()
         result = await asyncio.wait_for(
@@ -143,7 +139,6 @@ async def recommend_stocks(body: Optional[PickerRecommendRequest] = Body(None)):
         result_dict = result.to_dict()
         picker_mode = result_dict.get("picker_mode") or "balanced"
         picker_strategies = result_dict.get("picker_strategies") or ["buy_pullback"]
-        picker_leader_bias_exempt_pct = result_dict.get("picker_leader_bias_exempt_pct")
 
         history_id = None
         if result_dict.get("success"):
@@ -152,7 +147,6 @@ async def recommend_stocks(body: Optional[PickerRecommendRequest] = Body(None)):
                     result_dict,
                     picker_mode=picker_mode,
                     picker_strategies=picker_strategies,
-                    picker_leader_bias_exempt_pct=picker_leader_bias_exempt_pct,
                 )
                 logger.info(f"[PickerAPI] Saved picker history id={history_id}")
             except Exception as exc:

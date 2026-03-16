@@ -64,7 +64,7 @@ def _get_picker_module():
     return mod
 
 
-def _screener(mode: str = "balanced", leader_bias_exempt_pct: float = 0.0):
+def _screener(mode: str = "balanced"):
     """Get StockScreener instance. Optional mode: defensive/balanced/offensive."""
     try:
         from src.services.stock_picker_service import StockScreener
@@ -73,7 +73,6 @@ def _screener(mode: str = "balanced", leader_bias_exempt_pct: float = 0.0):
     return StockScreener(
         data_manager=None,
         picker_mode=mode,
-        picker_leader_bias_exempt_pct=leader_bias_exempt_pct,
     )
 
 

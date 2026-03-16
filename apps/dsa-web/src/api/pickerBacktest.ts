@@ -20,8 +20,7 @@ export const pickerBacktestApi = {
         end_date: params.endDate,
         hold_days: params.holdDays,
         top_n: params.topN,
-        picker_mode: params.pickerMode,
-        picker_leader_bias_exempt_pct: params.pickerLeaderBiasExemptPct,
+        picker_strategies: params.pickerStrategies,
       },
       { timeout: PICKER_BACKTEST_TIMEOUT_MS },
     );

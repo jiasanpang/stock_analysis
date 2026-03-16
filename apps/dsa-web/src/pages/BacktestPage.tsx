@@ -14,14 +14,16 @@ import type {
   PickerBacktestResultItem,
   PickerBacktestSummary,
   PickerBacktestHistoryItem,
-  PickerMode,
+  PickerStrategy,
 } from '../types/pickerBacktest';
+import { STRATEGY_LABELS } from '../api/picker';
 
-const PICKER_LEADER_EXEMPT: Record<PickerMode, number> = {
-  defensive: 0,
-  balanced: 12,
-  offensive: 12,
-};
+const STRATEGY_OPTIONS: { value: PickerStrategy; label: string }[] = [
+  { value: 'buy_pullback', label: '买回踩' },
+  { value: 'breakout', label: '突破' },
+  { value: 'bottom_reversal', label: '底部反转' },
+  { value: 'macd_golden_cross', label: 'MACD金叉' },
+];
 
 function pct(value?: number | null): string {
   if (value == null) return '--';
@@ -172,12 +174,12 @@ const BacktestPage: React.FC = () => {
     return d.toISOString().slice(0, 10);
   });
   const [pickerEndDate, setPickerEndDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [pickerHoldDays, setPickerHoldDays] = useState(10);
-  const [pickerTopN, setPickerTopN] = useState(5);
+  const [pickerHoldDays, setPickerHoldDays] = useState('10');
+  const [pickerTopN, setPickerTopN] = useState('5');
   const [pickerRunning, setPickerRunning] = useState(false);
   const [pickerResult, setPickerResult] = useState<{ results: PickerBacktestResultItem[]; summary: PickerBacktestSummary | null } | null>(null);
   const [pickerError, setPickerError] = useState<ParsedApiError | null>(null);
-  const [pickerMode, setPickerMode] = useState<PickerMode>('balanced');
+  const [pickerStrategies, setPickerStrategies] = useState<PickerStrategy[]>(['buy_pullback']);
   const [pickerHistory, setPickerHistory] = useState<PickerBacktestHistoryItem[]>([]);
 
   const fetchResults = useCallback(async (page = 1, code?: string, windowDays?: number) => {
@@ -292,14 +294,16 @@ const BacktestPage: React.FC = () => {
     setPickerRunning(true);
     setPickerResult(null);
     setPickerError(null);
+    const holdDays = parseInt(pickerHoldDays, 10) || 10;
+    const topN = parseInt(pickerTopN, 10) || 5;
     try {
+      const strategies = pickerStrategies.length > 0 ? pickerStrategies : ['buy_pullback'];
       const response = await pickerBacktestApi.run({
         startDate: pickerStartDate,
         endDate: pickerEndDate,
-        holdDays: pickerHoldDays,
-        topN: pickerTopN,
-        pickerMode,
-        pickerLeaderBiasExemptPct: PICKER_LEADER_EXEMPT[pickerMode],
+        holdDays,
+        topN,
+        pickerStrategies: strategies,
       });
       setPickerResult({
         results: response.results,
@@ -585,7 +589,7 @@ const BacktestPage: React.FC = () => {
           <p className="text-xs text-muted mb-4">
             选股回测需逐日调用 Tushare 等数据源，日期较多时可能需 5–15 分钟，请耐心等待。
           </p>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 items-end">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-4 items-end">
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-medium text-muted">开始</label>
               <input
@@ -618,7 +622,7 @@ const BacktestPage: React.FC = () => {
                   min={1}
                   max={60}
                   value={pickerHoldDays}
-                  onChange={(e) => setPickerHoldDays(parseInt(e.target.value, 10) || 10)}
+                  onChange={(e) => setPickerHoldDays(e.target.value)}
                   disabled={pickerRunning}
                   className="flex-1 px-3 py-2.5 rounded-lg bg-card border border-border
                              text-sm text-primary text-center
@@ -635,7 +639,7 @@ const BacktestPage: React.FC = () => {
                   min={1}
                   max={20}
                   value={pickerTopN}
-                  onChange={(e) => setPickerTopN(parseInt(e.target.value, 10) || 5)}
+                  onChange={(e) => setPickerTopN(e.target.value)}
                   disabled={pickerRunning}
                   className="flex-1 px-3 py-2.5 rounded-lg bg-card border border-border
                              text-sm text-primary text-center
@@ -644,20 +648,35 @@ const BacktestPage: React.FC = () => {
                 <span className="text-xs text-muted shrink-0">只</span>
               </div>
             </div>
-            <div className="flex flex-col gap-1.5 min-w-0">
-              <label className="text-xs font-medium text-muted">模式</label>
-              <select
-                value={pickerMode}
-                onChange={(e) => setPickerMode(e.target.value as PickerMode)}
-                disabled={pickerRunning}
-                title={pickerMode === 'defensive' ? '严进 (龙头不豁免)' : pickerMode === 'balanced' ? '平衡 (龙头可放宽12%)' : '进攻 (龙头可放宽12%)'}
-                className="w-full min-w-0 px-3 py-2.5 rounded-lg bg-card border border-border text-sm text-primary
-                           focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
-              >
-                <option value="defensive">严进</option>
-                <option value="balanced">平衡</option>
-                <option value="offensive">进攻</option>
-              </select>
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <label className="text-xs font-medium text-muted">选股策略</label>
+              <div className="flex flex-wrap gap-2">
+                {STRATEGY_OPTIONS.map((o) => {
+                  const selected = pickerStrategies.includes(o.value);
+                  return (
+                    <button
+                      key={o.value}
+                      type="button"
+                      onClick={() => {
+                        if (selected) {
+                          const next = pickerStrategies.filter((s) => s !== o.value);
+                          setPickerStrategies(next.length > 0 ? next : ['buy_pullback']);
+                        } else {
+                          setPickerStrategies([...pickerStrategies, o.value]);
+                        }
+                      }}
+                      disabled={pickerRunning}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all
+                        ${selected
+                          ? 'bg-cyan text-white shadow-glow-cyan'
+                          : 'bg-elevated text-secondary border border-border hover:bg-surface-hover hover:border-cyan/20'}
+                        disabled:opacity-60 disabled:cursor-not-allowed`}
+                    >
+                      {o.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-medium text-muted invisible">操作</label>
@@ -705,6 +724,13 @@ const BacktestPage: React.FC = () => {
                   <span className="font-mono">{h.startDate}–{h.endDate}</span>
                   <span className="mx-1.5 text-muted">|</span>
                   <span>{h.holdDays}d×{h.topN}</span>
+                  {(h.pickerStrategies && h.pickerStrategies.length > 0) ? (
+                    <span className="mx-1.5 text-muted">
+                      {h.pickerStrategies.map((s) => STRATEGY_LABELS[s] ?? s).join('、')}
+                    </span>
+                  ) : (
+                    <span className="mx-1.5 text-muted">{STRATEGY_LABELS['buy_pullback']}</span>
+                  )}
                   {h.winRatePct != null && (
                     <span className="ml-1.5 text-cyan">{h.winRatePct.toFixed(1)}%</span>
                   )}

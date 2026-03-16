@@ -257,8 +257,6 @@ class Config:
     picker_strategies: List[str] = field(default_factory=list)
     # PICKER_MODE: deprecated for screening, kept for BIAS_THRESHOLD derivation
     picker_mode: str = "balanced"
-    # 板块龙头乖离率豁免(%)，0=不豁免，12=龙头可放宽至12%
-    picker_leader_bias_exempt_pct: float = 0.0
     # 换手率范围(%)：下限过滤冷门股，上限降低过度投机
     picker_turnover_min: float = 1.0
     picker_turnover_max: float = 15.0
@@ -711,7 +709,6 @@ class Config:
             backtest_neutral_band_pct=float(os.getenv('BACKTEST_NEUTRAL_BAND_PCT', '2.0')),
             picker_strategies=cls._parse_picker_strategies(os.getenv('PICKER_STRATEGIES', '')),
             picker_mode=cls._parse_picker_mode(os.getenv('PICKER_MODE', 'balanced')),
-            picker_leader_bias_exempt_pct=float(os.getenv('PICKER_LEADER_BIAS_EXEMPT_PCT', '0')),
             picker_turnover_min=float(os.getenv('PICKER_TURNOVER_MIN', '1.0')),
             picker_turnover_max=float(os.getenv('PICKER_TURNOVER_MAX', '15.0')),
             picker_enable_b_wave_filter=os.getenv('PICKER_ENABLE_B_WAVE_FILTER', 'true').lower() == 'true',

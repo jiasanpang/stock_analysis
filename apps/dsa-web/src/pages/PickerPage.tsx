@@ -374,6 +374,10 @@ const PIPELINE_STEPS = [
 const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({ result, onBack }) => {
   const highPicks = result.picks.filter(p => p.attention === 'high');
   const otherPicks = result.picks.filter(p => p.attention !== 'high');
+  const hasStrategy = result.picker_strategies && result.picker_strategies.length > 0;
+  const strategyLabel = hasStrategy
+    ? result.picker_strategies!.map((s) => STRATEGY_LABELS[s] ?? s).join('、')
+    : STRATEGY_LABELS['buy_pullback'] ?? '买回踩';
 
   return (
     <div className="space-y-8">
@@ -388,6 +392,13 @@ const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({
           返回列表
         </button>
       )}
+
+      <div className="flex flex-wrap items-center gap-3 text-sm">
+        <span className="text-muted">选股策略：</span>
+        <span className="font-medium text-primary">{strategyLabel}</span>
+        <span className="text-muted">·</span>
+        <span className="text-muted">{result.generated_at}</span>
+      </div>
 
       {result.screen_stats && <ScreenFunnel stats={result.screen_stats} />}
 
@@ -600,43 +611,43 @@ const PickerPage: React.FC = () => {
           </p>
         </div>
 
-        {/* ─── Strategy selector + Action button (same row) ─── */}
-        <div className="flex flex-col items-center gap-2 mb-14">
-          <div className="flex flex-wrap justify-center gap-3 [&>*]:h-11 [&>*]:flex [&>*]:items-center">
-            <div className="flex flex-wrap gap-4 shrink-0">
-              <label className="text-sm font-medium text-secondary shrink-0 w-full text-center sm:w-auto">
-                选股策略
-              </label>
-              {STRATEGY_OPTIONS.map((o) => (
-                <label
-                  key={o.value}
-                  className="flex items-center gap-2 cursor-pointer text-sm text-primary"
-                >
-                  <input
-                    type="checkbox"
-                    checked={pickerStrategies.includes(o.value)}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setPickerStrategies([...pickerStrategies, o.value]);
-                      } else {
+        {/* ─── Strategy selector + Action button (card) ─── */}
+        <div className="bg-card border border-border rounded-2xl p-6 mb-14 shadow-sm">
+          <div className="flex flex-col sm:flex-row sm:flex-wrap items-center justify-center gap-4">
+            <span className="text-sm font-semibold text-primary shrink-0">选股策略</span>
+            <div className="flex flex-wrap justify-center gap-2">
+              {STRATEGY_OPTIONS.map((o) => {
+                const selected = pickerStrategies.includes(o.value);
+                return (
+                  <button
+                    key={o.value}
+                    type="button"
+                    onClick={() => {
+                      if (selected) {
                         const next = pickerStrategies.filter((s) => s !== o.value);
                         setPickerStrategies(next.length > 0 ? next : ['buy_pullback']);
+                      } else {
+                        setPickerStrategies([...pickerStrategies, o.value]);
                       }
                     }}
                     disabled={loading}
-                    className="rounded border-border text-cyan focus:ring-cyan/30"
-                  />
-                  <span>{o.label}</span>
-                </label>
-              ))}
+                    className={`px-4 py-2 rounded-xl text-sm font-medium transition-all
+                      ${selected
+                        ? 'bg-cyan text-white shadow-glow-cyan'
+                        : 'bg-elevated text-secondary border border-border hover:bg-surface-hover hover:border-cyan/20'}
+                      disabled:opacity-60 disabled:cursor-not-allowed`}
+                  >
+                    {o.label}
+                  </button>
+                );
+              })}
             </div>
             <button
               onClick={handleRun}
               disabled={loading}
-              className="shrink-0 group relative px-10 bg-cyan text-white text-base font-semibold rounded-2xl
+              className="shrink-0 group flex items-center gap-2 px-10 py-2.5 bg-cyan text-white text-base font-semibold rounded-2xl
                          hover:bg-cyan/90 disabled:opacity-60 disabled:cursor-not-allowed
-                         transition-all shadow-glow-cyan hover:shadow-[0_8px_30px_rgba(37,99,235,0.25)]
-                         justify-center gap-3"
+                         transition-all shadow-glow-cyan hover:shadow-[0_8px_30px_rgba(37,99,235,0.25)]"
             >
               {loading ? (
                 <>
@@ -653,8 +664,8 @@ const PickerPage: React.FC = () => {
               )}
             </button>
           </div>
-          <p className="text-xs text-muted">
-            严进偏稳健蓝筹 · 平衡兼顾趋势与估值 · 进攻偏动量龙头
+          <p className="text-xs text-muted text-center mt-4">
+            买回踩 · 突破 · 底部反转 · MACD金叉 — 多策略并行，按需组合
           </p>
         </div>
 

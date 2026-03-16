@@ -13,8 +13,10 @@ class PickerBacktestRunRequest(BaseModel):
     end_date: str = Field(..., description="End date YYYY-MM-DD or YYYYMMDD")
     hold_days: int = Field(10, ge=1, le=60, description="Holding period in trading days")
     top_n: int = Field(5, ge=1, le=20, description="Number of picks per day by score")
-    picker_mode: Optional[str] = Field(None, description="defensive | balanced | offensive")
-    picker_leader_bias_exempt_pct: Optional[float] = Field(None, ge=0, le=20)
+    picker_strategies: Optional[List[str]] = Field(
+        None,
+        description="Strategies to use: buy_pullback, breakout, bottom_reversal, macd_golden_cross",
+    )
 
 
 class PickerBacktestResultItem(BaseModel):

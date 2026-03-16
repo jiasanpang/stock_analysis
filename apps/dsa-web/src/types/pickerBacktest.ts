@@ -3,15 +3,14 @@
  * Mirrors api/v1/schemas/picker_backtest.py
  */
 
-export type PickerMode = 'defensive' | 'balanced' | 'offensive';
+export type PickerStrategy = 'buy_pullback' | 'breakout' | 'bottom_reversal' | 'macd_golden_cross';
 
 export interface PickerBacktestRunRequest {
   startDate: string;
   endDate: string;
   holdDays?: number;
   topN?: number;
-  pickerMode?: PickerMode;
-  pickerLeaderBiasExemptPct?: number;
+  pickerStrategies?: PickerStrategy[];
 }
 
 export interface PickerBacktestResultItem {
@@ -55,7 +54,7 @@ export interface PickerBacktestHistoryItem {
   endDate: string;
   holdDays: number;
   topN: number;
-  pickerMode: string;
+  pickerStrategies?: string[];
   tradeDatesCount: number;
   winRatePct?: number;
   avgReturnPct?: number;
