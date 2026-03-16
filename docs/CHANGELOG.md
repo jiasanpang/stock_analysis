@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Picker page: Pill-style strategy chips (buy_pullback, breakout, bottom_reversal, macd_golden_cross), card container, result view shows strategy + timestamp.
+- Picker backtest: Strategy selection (replaces mode dropdown). API accepts `picker_strategies`; history stores `picker_strategies_json`.
+- Per-strategy leader bias exemption: `leader_bias_exempt_pct` in StrategyParams (breakout=14%, others=0). Removed global `PICKER_LEADER_BIAS_EXEMPT_PCT`.
+
+### Changed
+- Picker backtest: Remove `picker_mode` and `picker_leader_bias_exempt_pct` from API. Use `picker_strategies` only.
+- Backtest page: holdDays/topN inputs allow empty (string state, parse on submit).
+- Picker footer tagline: "买回踩 · 突破 · 底部反转 · MACD金叉 — 多策略并行，按需组合".
+
+### Removed
+- `PICKER_LEADER_BIAS_EXEMPT_PCT` env var (leader exemption now per-strategy).
+- Picker mode (严进/平衡/进攻) from picker backtest API and UI.
+
+### Added (previous)
 - Multi-strategy picker: `PICKER_STRATEGIES` (comma-separated) runs multiple strategies in parallel. Strategies: `buy_pullback` (买回踩), `breakout` (突破), `bottom_reversal` (底部反转), `macd_golden_cross` (MACD金叉). Candidates merged and tagged by strategy. No intensity modes (defensive/balanced/offensive) — each strategy has fixed params.
 - MACD golden cross strategy: uses `pandas-ta-classic` for MACD (fast=12, slow=26, signal=9). Filters candidates where DIF crosses above DEA in last 2 days. Params: 60d -15% ~ 50%, daily 0% ~ 6%, volume_ratio_min 1.0.
 - Picker strategy comparison view: API returns `screened_pool_by_strategy` (per-strategy candidate lists). Frontend toggle "合并" / "按策略对比" to view merged pool or each strategy's candidates separately for comparison.
