@@ -810,7 +810,9 @@ class StockScreener:
         # --- 1. Tushare (most stable, no eastmoney dependency) ---
         df = self._try_tushare(trade_date=trade_date)
         if df is not None and not df.empty:
+            logger.info(f"[Screener] Using Tushare data: {len(df)} stocks")
             return df
+        logger.info("[Screener] Tushare unavailable or empty, trying fallback sources")
 
         if trade_date:
             # Historical mode: only Tushare supported
@@ -869,6 +871,7 @@ class StockScreener:
         When trade_date (YYYYMMDD) is provided, use it for historical screening."""
         tushare_api = self._get_tushare_api()
         if tushare_api is None:
+            logger.info("[Screener] Tushare API not available (TUSHARE_TOKEN unset or init failed)")
             return None
 
         try:
