@@ -297,7 +297,7 @@ const BacktestPage: React.FC = () => {
     const holdDays = parseInt(pickerHoldDays, 10) || 10;
     const topN = parseInt(pickerTopN, 10) || 5;
     try {
-      const strategies = pickerStrategies.length > 0 ? pickerStrategies : ['buy_pullback'];
+      const strategies: PickerStrategy[] = pickerStrategies.length > 0 ? pickerStrategies : ['buy_pullback'];
       const response = await pickerBacktestApi.run({
         startDate: pickerStartDate,
         endDate: pickerEndDate,
