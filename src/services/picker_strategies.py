@@ -53,8 +53,6 @@ class StrategyParams:
 
     # Bias filter
     max_bias_pct: float
-    # Leader bias exemption: 0=off; when >0, qualified leaders can pass with bias up to this %
-    leader_bias_exempt_pct: float = 0.0
     # PE
     pe_max: float
     pe_ideal_low: float
@@ -71,6 +69,8 @@ class StrategyParams:
     change_60d_min: float  # min 60d change
     change_60d_max: Optional[float] = None  # max 60d change (None = no cap)
     volume_ratio_min: float = VOLUME_RATIO_MIN
+    # Leader bias exemption: 0=off; when >0, qualified leaders can pass with bias up to this %
+    leader_bias_exempt_pct: float = 0.0
 
 
 # Buy pullback: 60d > 5%, MA bullish, pullback entry (expert-tuned params)
