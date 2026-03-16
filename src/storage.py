@@ -258,7 +258,8 @@ class PickerHistory(Base):
     pick_count = Column(Integer, default=0)
     elapsed_seconds = Column(Float, default=0.0)
     created_at = Column(DateTime, default=datetime.now, index=True)
-    picker_mode = Column(String(20), default=None)  # defensive | balanced | offensive
+    picker_mode = Column(String(20), default=None)  # deprecated, use picker_strategies
+    picker_strategies_json = Column(Text, default=None)  # JSON array: ["buy_pullback","breakout"]
     picker_leader_bias_exempt_pct = Column(Float, default=None)
 
     def to_summary_dict(self) -> Dict[str, Any]:
@@ -273,10 +274,16 @@ class PickerHistory(Base):
             "elapsed_seconds": self.elapsed_seconds or 0,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "picker_mode": self.picker_mode or "balanced",
+            "picker_strategies": (
+                json.loads(self.picker_strategies_json)
+                if self.picker_strategies_json
+                else ["buy_pullback"]
+            ),
             "picker_leader_bias_exempt_pct": self.picker_leader_bias_exempt_pct,
         }
 
     def to_full_dict(self) -> Dict[str, Any]:
+        strategies = json.loads(self.picker_strategies_json) if self.picker_strategies_json else None
         return {
             "id": self.id,
             "success": True,
@@ -290,6 +297,7 @@ class PickerHistory(Base):
             "elapsed_seconds": self.elapsed_seconds or 0,
             "error": "",
             "picker_mode": self.picker_mode or "balanced",
+            "picker_strategies": strategies if strategies else ["buy_pullback"],
             "picker_leader_bias_exempt_pct": self.picker_leader_bias_exempt_pct,
         }
 
@@ -552,6 +560,7 @@ class DatabaseManager:
                 for sql in [
                     "ALTER TABLE picker_history ADD COLUMN picker_mode VARCHAR(20)",
                     "ALTER TABLE picker_history ADD COLUMN picker_leader_bias_exempt_pct FLOAT",
+                    "ALTER TABLE picker_history ADD COLUMN picker_strategies_json TEXT",
                 ]:
                     try:
                         conn.execute(text(sql))
@@ -1054,9 +1063,14 @@ class DatabaseManager:
     # ── Picker History ──────────────────────────────────────────
 
     def save_picker_history(
-        self, result_dict: Dict[str, Any], picker_mode: Optional[str] = None, picker_leader_bias_exempt_pct: Optional[float] = None
+        self,
+        result_dict: Dict[str, Any],
+        picker_mode: Optional[str] = None,
+        picker_strategies: Optional[List[str]] = None,
+        picker_leader_bias_exempt_pct: Optional[float] = None,
     ) -> int:
         """Persist a successful picker run. Returns the new row id, or 0 on failure."""
+        strategies = picker_strategies or result_dict.get("picker_strategies") or ["buy_pullback"]
         record = PickerHistory(
             market_summary=result_dict.get("market_summary", ""),
             picks_json=json.dumps(result_dict.get("picks", []), ensure_ascii=False),
@@ -1070,6 +1084,7 @@ class DatabaseManager:
             elapsed_seconds=result_dict.get("elapsed_seconds", 0),
             created_at=datetime.now(),
             picker_mode=picker_mode,
+            picker_strategies_json=json.dumps(strategies, ensure_ascii=False),
             picker_leader_bias_exempt_pct=picker_leader_bias_exempt_pct,
         )
         with self.get_session() as session:

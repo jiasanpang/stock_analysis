@@ -371,6 +371,7 @@ class PickerBacktestService:
             cfg = get_config()
             screener = StockScreener(
                 data_manager=self._data_manager,
+                picker_strategies=getattr(cfg, "picker_strategies", None) or ["buy_pullback"],
                 picker_mode=picker_mode or cfg.picker_mode,
                 picker_leader_bias_exempt_pct=(
                     picker_leader_bias_exempt_pct

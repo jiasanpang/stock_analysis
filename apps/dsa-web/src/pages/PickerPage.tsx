@@ -3,8 +3,9 @@ import {
   fetchRecommendations,
   fetchPickerHistory,
   fetchPickerDetail,
+  STRATEGY_LABELS,
   type PickerResponse,
-  type PickerMode,
+  type PickerStrategy,
   type StockPick,
   type ScreenStats,
   type ScreenedStock,
@@ -12,11 +13,11 @@ import {
 } from '../api/picker';
 import { Spinner } from '../components/common';
 
-const PICKER_MODE_LABELS: Record<string, string> = {
-  defensive: '严进',
-  balanced: '平衡',
-  offensive: '进攻',
-};
+const STRATEGY_OPTIONS: { value: PickerStrategy; label: string }[] = [
+  { value: 'buy_pullback', label: '买回踩' },
+  { value: 'breakout', label: '突破' },
+  { value: 'bottom_reversal', label: '底部反转' },
+];
 
 const ATTENTION_CFG: Record<string, { dot: string; badge: string; label: string }> = {
   high:   { dot: 'bg-red-500',    badge: 'bg-red-50 text-red-700 ring-red-200',       label: '强烈关注' },
@@ -117,6 +118,9 @@ const ScreenedPoolTable: React.FC<{ pool: ScreenedStock[] }> = ({ pool }) => {
               <th className="px-4 py-2.5 text-right text-xs text-muted font-medium">PE</th>
               <th className="px-4 py-2.5 text-right text-xs text-muted font-medium">市值(亿)</th>
               <th className="px-4 py-2.5 text-right text-xs text-muted font-medium">60日%</th>
+              {pool.some((x) => x.strategies && x.strategies.length > 0) && (
+                <th className="px-4 py-2.5 text-right text-xs text-muted font-medium">策略</th>
+              )}
               <th className="px-4 py-2.5 text-right text-xs text-muted font-medium">评分</th>
             </tr>
           </thead>
@@ -138,6 +142,11 @@ const ScreenedPoolTable: React.FC<{ pool: ScreenedStock[] }> = ({ pool }) => {
                 <td className={`px-4 py-2 text-right tabular-nums ${s.change_pct_60d > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
                   {s.change_pct_60d > 0 ? '+' : ''}{s.change_pct_60d.toFixed(1)}%
                 </td>
+                {pool.some((x) => x.strategies && x.strategies.length > 0) && (
+                  <td className="px-4 py-2 text-right text-xs text-muted">
+                    {(s.strategies || []).map((st) => STRATEGY_LABELS[st] ?? st).join(',')}
+                  </td>
+                )}
                 <td className="px-4 py-2 text-right tabular-nums font-semibold text-cyan">{s.score.toFixed(0)}</td>
               </tr>
             ))}
@@ -244,7 +253,9 @@ const HistoryRow: React.FC<{ item: PickerHistoryItem; onSelect: (id: number) => 
                 {item.pick_count} 只推荐
               </span>
               <span className="text-xs text-muted border border-border px-2 py-0.5 rounded">
-                {PICKER_MODE_LABELS[item.picker_mode ?? 'balanced'] ?? '平衡'}
+                {(item.picker_strategies && item.picker_strategies.length > 0
+                  ? item.picker_strategies.map((s: string) => STRATEGY_LABELS[s] ?? s).join('、')
+                  : STRATEGY_LABELS['buy_pullback'] ?? '买回踩')}
               </span>
             </div>
             <p className="text-sm text-secondary truncate mt-0.5">{item.market_summary || '—'}</p>
@@ -338,9 +349,9 @@ const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({
               <p className="text-base text-secondary leading-relaxed">{result.market_summary}</p>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              {result.picker_mode && (
+              {(result.picker_strategies && result.picker_strategies.length > 0) && (
                 <span className="text-xs font-medium text-muted border border-border px-2 py-1 rounded-lg">
-                  {PICKER_MODE_LABELS[result.picker_mode] ?? result.picker_mode}
+                  {result.picker_strategies.map((s) => STRATEGY_LABELS[s] ?? s).join('、')}
                 </span>
               )}
               <span className="text-sm text-muted whitespace-nowrap bg-elevated px-3 py-1 rounded-lg">
@@ -429,24 +440,11 @@ const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({
 };
 
 /* ── Main page ───────────────────────────────────────────────── */
-const MODE_OPTIONS: { value: PickerMode; label: string }[] = [
-  { value: 'defensive', label: '严进 (偏稳健/蓝筹, PE≤50, 乖离率6%)' },
-  { value: 'balanced', label: '平衡 (PE≤100, 乖离率8%, 龙头可放宽至12%)' },
-  { value: 'offensive', label: '进攻 (偏动量/龙头, PE放宽, 乖离率10%)' },
-];
-
-// 各模式默认龙头豁免%：严进不豁免，平衡/进攻允许板块龙头放宽
-const MODE_LEADER_EXEMPT: Record<PickerMode, number> = {
-  defensive: 0,
-  balanced: 12,
-  offensive: 12,
-};
-
 const PickerPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<PickerResponse | null>(null);
   const [error, setError] = useState('');
-  const [pickerMode, setPickerMode] = useState<PickerMode>('balanced');
+  const [pickerStrategies, setPickerStrategies] = useState<PickerStrategy[]>(['buy_pullback']);
 
   const [history, setHistory] = useState<PickerHistoryItem[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
@@ -475,10 +473,9 @@ const PickerPage: React.FC = () => {
     setResult(null);
     setViewingHistoryId(null);
     try {
-      const params = {
-        picker_mode: pickerMode,
-        picker_leader_bias_exempt_pct: MODE_LEADER_EXEMPT[pickerMode],
-      };
+      const strategies: PickerStrategy[] =
+        pickerStrategies.length > 0 ? pickerStrategies : ['buy_pullback'];
+      const params = { picker_strategies: strategies };
       const data = await fetchRecommendations(params);
       if (data.success) {
         setResult(data);
@@ -543,22 +540,35 @@ const PickerPage: React.FC = () => {
           </p>
         </div>
 
-        {/* ─── Mode selector + Action button (same row) ─── */}
+        {/* ─── Strategy selector + Action button (same row) ─── */}
         <div className="flex flex-col items-center gap-2 mb-14">
           <div className="flex flex-wrap justify-center gap-3 [&>*]:h-11 [&>*]:flex [&>*]:items-center">
-            <div className="gap-2 shrink-0">
-              <label className="text-sm font-medium text-secondary shrink-0">选股模式</label>
-              <select
-                value={pickerMode}
-                onChange={(e) => setPickerMode(e.target.value as PickerMode)}
-                disabled={loading}
-                className="h-11 px-4 rounded-xl border border-border bg-card text-primary text-sm min-w-[280px]
-                           focus:ring-2 focus:ring-cyan/30 focus:border-cyan disabled:opacity-60"
-              >
-                {MODE_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>{o.label}</option>
-                ))}
-              </select>
+            <div className="flex flex-wrap gap-4 shrink-0">
+              <label className="text-sm font-medium text-secondary shrink-0 w-full text-center sm:w-auto">
+                选股策略
+              </label>
+              {STRATEGY_OPTIONS.map((o) => (
+                <label
+                  key={o.value}
+                  className="flex items-center gap-2 cursor-pointer text-sm text-primary"
+                >
+                  <input
+                    type="checkbox"
+                    checked={pickerStrategies.includes(o.value)}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setPickerStrategies([...pickerStrategies, o.value]);
+                      } else {
+                        const next = pickerStrategies.filter((s) => s !== o.value);
+                        setPickerStrategies(next.length > 0 ? next : ['buy_pullback']);
+                      }
+                    }}
+                    disabled={loading}
+                    className="rounded border-border text-cyan focus:ring-cyan/30"
+                  />
+                  <span>{o.label}</span>
+                </label>
+              ))}
             </div>
             <button
               onClick={handleRun}

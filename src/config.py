@@ -252,7 +252,10 @@ class Config:
     backtest_neutral_band_pct: float = 2.0
 
     # === 选股配置 ===
-    # PICKER_MODE: defensive(严进) / offensive(进攻) / balanced(平衡)
+    # PICKER_STRATEGIES: comma-separated strategy IDs (buy_pullback, breakout, bottom_reversal)
+    # Default buy_pullback when not set. PICKER_MODE deprecated for screening.
+    picker_strategies: List[str] = field(default_factory=list)
+    # PICKER_MODE: deprecated for screening, kept for BIAS_THRESHOLD derivation
     picker_mode: str = "balanced"
     # 板块龙头乖离率豁免(%)，0=不豁免，12=龙头可放宽至12%
     picker_leader_bias_exempt_pct: float = 0.0
@@ -706,6 +709,7 @@ class Config:
             backtest_min_age_days=int(os.getenv('BACKTEST_MIN_AGE_DAYS', '14')),
             backtest_engine_version=os.getenv('BACKTEST_ENGINE_VERSION', 'v1'),
             backtest_neutral_band_pct=float(os.getenv('BACKTEST_NEUTRAL_BAND_PCT', '2.0')),
+            picker_strategies=cls._parse_picker_strategies(os.getenv('PICKER_STRATEGIES', '')),
             picker_mode=cls._parse_picker_mode(os.getenv('PICKER_MODE', 'balanced')),
             picker_leader_bias_exempt_pct=float(os.getenv('PICKER_LEADER_BIAS_EXEMPT_PCT', '0')),
             picker_turnover_min=float(os.getenv('PICKER_TURNOVER_MIN', '1.0')),
@@ -1060,6 +1064,16 @@ class Config:
         picker = cls._parse_picker_mode(os.getenv('PICKER_MODE', 'balanced'))
         default = {'defensive': 6.0, 'balanced': 8.0, 'offensive': 10.0}.get(picker, 8.0)
         return max(1.0, default)
+
+    @classmethod
+    def _parse_picker_strategies(cls, value: str) -> List[str]:
+        """Parse PICKER_STRATEGIES (comma-separated). Default [buy_pullback] when empty."""
+        valid = ('buy_pullback', 'breakout', 'bottom_reversal')
+        if not value or not value.strip():
+            return ['buy_pullback']
+        parts = [p.strip().lower() for p in value.split(',') if p.strip()]
+        result = [p for p in parts if p in valid]
+        return result if result else ['buy_pullback']
 
     @classmethod
     def _parse_picker_mode(cls, value: str) -> str:

@@ -46,6 +46,7 @@ class ScreenedStockResponse(BaseModel):
     amount_yi: float = 0
     change_pct_60d: float = 0
     score: float = 0
+    strategies: List[str] = Field(default_factory=list)
 
 
 class PickRecommendation(BaseModel):
@@ -60,7 +61,10 @@ class PickRecommendation(BaseModel):
 
 class PickerRecommendRequest(BaseModel):
     """Optional overrides for picker run. Omit to use .env config."""
-    picker_mode: Optional[str] = Field(None, description="defensive | balanced | offensive")
+    picker_strategies: Optional[List[str]] = Field(
+        None, description="Comma-like list: buy_pullback, breakout, bottom_reversal"
+    )
+    picker_mode: Optional[str] = Field(None, description="deprecated, use picker_strategies")
     picker_leader_bias_exempt_pct: Optional[float] = Field(None, ge=0, le=20, description="Leader bias exemption %")
 
 
@@ -77,6 +81,7 @@ class PickerResponse(BaseModel):
     error: str = ""
     history_id: Optional[int] = None
     picker_mode: str = "balanced"
+    picker_strategies: List[str] = Field(default_factory=list)
     picker_leader_bias_exempt_pct: Optional[float] = None
 
 
@@ -97,6 +102,7 @@ class PickerHistoryItem(BaseModel):
     elapsed_seconds: float = 0
     created_at: Optional[str] = None
     picker_mode: str = "balanced"
+    picker_strategies: List[str] = Field(default_factory=list)
     picker_leader_bias_exempt_pct: Optional[float] = None
 
 
@@ -124,6 +130,7 @@ async def recommend_stocks(body: Optional[PickerRecommendRequest] = Body(None)):
 
         req = body or PickerRecommendRequest()
         service = StockPickerService(
+            picker_strategies_override=req.picker_strategies,
             picker_mode_override=req.picker_mode,
             picker_leader_bias_exempt_override=req.picker_leader_bias_exempt_pct,
         )
@@ -134,13 +141,17 @@ async def recommend_stocks(body: Optional[PickerRecommendRequest] = Body(None)):
         )
         result_dict = result.to_dict()
         picker_mode = result_dict.get("picker_mode") or "balanced"
+        picker_strategies = result_dict.get("picker_strategies") or ["buy_pullback"]
         picker_leader_bias_exempt_pct = result_dict.get("picker_leader_bias_exempt_pct")
 
         history_id = None
         if result_dict.get("success"):
             try:
                 history_id = _get_db().save_picker_history(
-                    result_dict, picker_mode=picker_mode, picker_leader_bias_exempt_pct=picker_leader_bias_exempt_pct
+                    result_dict,
+                    picker_mode=picker_mode,
+                    picker_strategies=picker_strategies,
+                    picker_leader_bias_exempt_pct=picker_leader_bias_exempt_pct,
                 )
                 logger.info(f"[PickerAPI] Saved picker history id={history_id}")
             except Exception as exc:

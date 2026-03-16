@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple  # noqa: F401 - Dict used in screen()
 
 import pandas as pd
 from json_repair import repair_json
@@ -235,9 +235,10 @@ class ScreenedStock:
     amount: float = 0.0              # 成交额(亿)
     change_pct_60d: float = 0.0      # 60日涨跌幅
     score: float = 0.0               # composite score
+    strategies: List[str] = field(default_factory=list)  # strategy IDs that selected this stock
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "code": self.code, "name": self.name, "price": self.price,
             "change_pct": round(self.change_pct, 2),
             "volume_ratio": round(self.volume_ratio, 2),
@@ -248,6 +249,9 @@ class ScreenedStock:
             "change_pct_60d": round(self.change_pct_60d, 2),
             "score": round(self.score, 1),
         }
+        if self.strategies:
+            d["strategies"] = self.strategies
+        return d
 
 
 @dataclass
@@ -302,6 +306,7 @@ class PickerResult:
     error: str = ""
     elapsed_seconds: float = 0.0
     picker_mode: str = "balanced"
+    picker_strategies: List[str] = field(default_factory=list)
     picker_leader_bias_exempt_pct: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -318,6 +323,7 @@ class PickerResult:
             "error": self.error,
         }
         d["picker_mode"] = self.picker_mode
+        d["picker_strategies"] = self.picker_strategies
         d["picker_leader_bias_exempt_pct"] = self.picker_leader_bias_exempt_pct
         return d
 
@@ -344,8 +350,10 @@ def get_tushare_api(data_manager=None):
 def create_screener_from_config(data_manager=None) -> "StockScreener":
     """Create StockScreener with config from environment. Use for picker and backtest."""
     cfg = get_config()
+    strategies = getattr(cfg, "picker_strategies", None) or ["buy_pullback"]
     return StockScreener(
         data_manager=data_manager,
+        picker_strategies=strategies,
         picker_mode=cfg.picker_mode,
         picker_leader_bias_exempt_pct=cfg.picker_leader_bias_exempt_pct,
         turnover_min=cfg.picker_turnover_min,
@@ -367,6 +375,7 @@ class StockScreener:
     def __init__(
         self,
         data_manager=None,
+        picker_strategies: Optional[List[str]] = None,
         picker_mode: str = "balanced",
         picker_leader_bias_exempt_pct: float = 0.0,
         turnover_min: Optional[float] = None,
@@ -380,6 +389,7 @@ class StockScreener:
             os.getenv("PICKER_SPOT_TIMEOUT", "30")
         )
         self._as_of_date: Optional[str] = None  # YYYY-MM-DD for historical screening
+        self._picker_strategies = picker_strategies if picker_strategies else ["buy_pullback"]
         self._picker_mode = (picker_mode or "balanced").lower()
         self._leader_bias_exempt_pct = max(0.0, float(picker_leader_bias_exempt_pct))
         self._turnover_min = turnover_min if turnover_min is not None else TURNOVER_MIN_PCT
@@ -390,7 +400,8 @@ class StockScreener:
 
     def screen(self, trade_date: Optional[str] = None) -> Tuple[List[ScreenedStock], ScreenStats]:
         """Run the full screening pipeline. Returns (candidates, stats).
-        When trade_date is provided (YYYYMMDD), run historical screening (Tushare only)."""
+        When trade_date is provided (YYYYMMDD), run historical screening (Tushare only).
+        Uses multi-strategy when picker_strategies has multiple entries."""
         stats = ScreenStats()
         self._as_of_date = self._trade_date_to_iso(trade_date) if trade_date else None
 
@@ -400,78 +411,54 @@ class StockScreener:
             return [], stats
 
         stats.total_stocks = len(df)
-        logger.info(f"[Screener] Starting with {stats.total_stocks} stocks")
+        logger.info(f"[Screener] Starting with {stats.total_stocks} stocks, strategies={self._picker_strategies}")
 
-        # Layer 1: Basic quality filter
-        df = self._filter_basic(df)
+        # Layer 1: Basic quality filter (shared, pe_max=100)
+        df = self._filter_basic_for_strategies(df)
         stats.after_basic = len(df)
         logger.info(f"[Screener] After basic filter: {len(df)}")
 
-        # Layer 2: Momentum filter
-        df = self._filter_momentum(df)
-        stats.after_momentum = len(df)
-        logger.info(f"[Screener] After momentum filter: {len(df)}")
-
-        # Layer 3: Volume / activity filter
-        df = self._filter_volume(df)
-        stats.after_volume = len(df)
-        logger.info(f"[Screener] After volume filter: {len(df)}")
-
-        # Layer 4: Score and rank
-        candidates = self._score_and_rank(df)
-        stats.final_pool = len(candidates)
-        logger.info(f"[Screener] Final pool: {len(candidates)} candidates")
-
-        # Layer 5: Bias filter (严进策略 — exclude MA5 bias > mode threshold)
-        before_bias = len(candidates)
-        mode_params = PickerModeParams.for_mode(self._picker_mode)
-        candidates = self._filter_by_bias(
-            candidates,
-            max_bias_pct=mode_params.max_bias_pct,
-            leader_bias_exempt_pct=self._leader_bias_exempt_pct,
+        # Run each strategy and merge
+        from src.services.picker_strategies import (
+            get_strategy_params,
+            filter_momentum,
+            filter_volume,
+            score_and_rank,
+            merge_candidates_by_code,
         )
+
+        candidates_per_strategy: Dict[str, List[ScreenedStock]] = {}
+        for strategy_id in self._picker_strategies:
+            params = get_strategy_params(strategy_id)
+            df_s = filter_momentum(df.copy(), params)
+            stats.after_momentum = len(df_s)
+            df_s = filter_volume(df_s, params, self._turnover_min, self._turnover_max)
+            stats.after_volume = len(df_s)
+
+            cands = score_and_rank(df_s, strategy_id, params, top_n=30)
+            cands = self._filter_by_bias(
+                cands,
+                max_bias_pct=params.max_bias_pct,
+                leader_bias_exempt_pct=self._leader_bias_exempt_pct,
+            )
+            cands = self._filter_limit_up_streak(cands)
+            cands = self._filter_consecutive_up_days(cands, max_up_days=params.max_consecutive_up_days)
+            cands = self._filter_healthy_pullback(cands, params=params)
+            if self._enable_b_wave_filter:
+                cands = self._filter_b_wave_risk(cands)
+
+            if cands:
+                candidates_per_strategy[strategy_id] = cands
+                logger.info(f"[Screener] {strategy_id}: {len(cands)} candidates")
+
+        if not candidates_per_strategy:
+            stats.final_pool = 0
+            logger.warning("[Screener] No candidates from any strategy")
+            return [], stats
+
+        candidates = merge_candidates_by_code(candidates_per_strategy)
         stats.final_pool = len(candidates)
-        if len(candidates) < before_bias:
-            logger.info(f"[Screener] After bias filter: {stats.final_pool} candidates (excluded {before_bias - len(candidates)})")
-
-        # Layer 6: Limit-up streak filter (exclude 连板/妖股)
-        before_limit_up = len(candidates)
-        candidates = self._filter_limit_up_streak(candidates)
-        if len(candidates) < before_limit_up:
-            stats.final_pool = len(candidates)
-            logger.info(f"[Screener] After limit-up filter: {stats.final_pool} candidates (excluded {before_limit_up - len(candidates)})")
-
-        # Layer 6b: Consecutive up days filter (avoid buying at streak end)
-        before_consecutive = len(candidates)
-        candidates = self._filter_consecutive_up_days(candidates)
-        if len(candidates) < before_consecutive:
-            stats.final_pool = len(candidates)
-            logger.info(
-                f"[Screener] After consecutive-up filter: {stats.final_pool} candidates "
-                f"(excluded {before_consecutive - len(candidates)})"
-            )
-
-        # Layer 6c: Healthy pullback confirmation (区分健康回踩 vs 趋势转弱)
-        before_pullback = len(candidates)
-        candidates = self._filter_healthy_pullback(candidates)
-        if len(candidates) < before_pullback:
-            stats.final_pool = len(candidates)
-            logger.info(
-                f"[Screener] After healthy-pullback filter: {stats.final_pool} candidates "
-                f"(excluded {before_pullback - len(candidates)})"
-            )
-
-        # Layer 7: B-wave risk filter (exclude B-wave bounce before C-wave down)
-        if self._enable_b_wave_filter:
-            before_b_wave = len(candidates)
-            candidates = self._filter_b_wave_risk(candidates)
-            if len(candidates) < before_b_wave:
-                stats.final_pool = len(candidates)
-                logger.info(
-                    f"[Screener] After B-wave filter: {stats.final_pool} candidates "
-                    f"(excluded {before_b_wave - len(candidates)})"
-                )
-
+        logger.info(f"[Screener] Merged {stats.final_pool} candidates from {len(candidates_per_strategy)} strategies")
         return candidates, stats
 
     def screen_as_of(self, trade_date: str) -> Tuple[List[ScreenedStock], ScreenStats]:
@@ -621,19 +608,14 @@ class StockScreener:
         self,
         candidates: List[ScreenedStock],
         days: int = 5,
+        max_up_days: Optional[int] = None,
     ) -> List[ScreenedStock]:
-        """Exclude stocks with too many consecutive up days (avoid buying at streak end).
-
-        Mode-specific max_consecutive_up_days:
-        - defensive: 2 days max
-        - balanced: 3 days max
-        - offensive: 4 days max
-        """
+        """Exclude stocks with too many consecutive up days (avoid buying at streak end)."""
         if not self._data_manager or not candidates:
             return candidates
 
-        mode_params = PickerModeParams.for_mode(self._picker_mode)
-        max_up_days = mode_params.max_consecutive_up_days
+        if max_up_days is None:
+            max_up_days = PickerModeParams.for_mode(self._picker_mode).max_consecutive_up_days
         end_date = self._as_of_date
         requests = [(s.code, None, end_date, days + 5) for s in candidates]
         batch = self._fetch_daily_batch(requests)
@@ -670,10 +652,11 @@ class StockScreener:
         self,
         candidates: List[ScreenedStock],
         lookback_days: int = 20,
+        params: Optional[Any] = None,
     ) -> List[ScreenedStock]:
         """Filter for healthy pullback confirmation to distinguish from trend reversal.
 
-        Checks (mode-specific):
+        Checks (strategy-specific when params provided):
         1. Volume shrink: volume_ratio < 1.0 on pullback day (缩量回调)
         2. MA bullish alignment: MA5 > MA10 > MA20 (均线多头排列)
         3. Retracement limit: pullback < X% of prior 10d rally (回调幅度限制)
@@ -681,7 +664,7 @@ class StockScreener:
         if not self._data_manager or not candidates:
             return candidates
 
-        mode_params = PickerModeParams.for_mode(self._picker_mode)
+        mode_params = params if params is not None else PickerModeParams.for_mode(self._picker_mode)
         end_date = self._as_of_date
 
         # Batch fetch daily data for all candidates
@@ -1023,8 +1006,17 @@ class StockScreener:
                 renamed[old] = new
         return df.rename(columns=renamed)
 
-    def _filter_basic(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _filter_basic(self, df: pd.DataFrame, pe_max: Optional[float] = None) -> pd.DataFrame:
         """Layer 1: Remove ST, new listings, ETFs, penny stocks, and unprofitable."""
+        pe_max = pe_max if pe_max is not None else PickerModeParams.for_mode(self._picker_mode).pe_max
+        return self._filter_basic_impl(df, pe_max)
+
+    def _filter_basic_for_strategies(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Basic filter for multi-strategy (shared pe_max=100)."""
+        return self._filter_basic_impl(df, pe_max=100.0)
+
+    def _filter_basic_impl(self, df: pd.DataFrame, pe_max: float) -> pd.DataFrame:
+        """Shared implementation for basic filter."""
         # Exclude by name keywords
         name_col = "名称"
         if name_col in df.columns:
@@ -1045,7 +1037,6 @@ class StockScreener:
         # PE filter: exclude PE >= pe_max; when allow_loss=False, also exclude PE<=0 (unprofitable)
         if "市盈率-动态" in df.columns:
             pe = pd.to_numeric(df["市盈率-动态"], errors="coerce")
-            pe_max = PickerModeParams.for_mode(self._picker_mode).pe_max
             if self._allow_loss:
                 df = df[pe < pe_max]
             else:
@@ -1217,11 +1208,17 @@ class StockPickerService:
 
     def __init__(
         self,
+        picker_strategies_override: Optional[List[str]] = None,
         picker_mode_override: Optional[str] = None,
         picker_leader_bias_exempt_override: Optional[float] = None,
     ):
         self.config = get_config()
         self._data_manager = DataFetcherManager()
+        strategies = (
+            picker_strategies_override
+            if picker_strategies_override is not None
+            else (getattr(self.config, "picker_strategies", None) or ["buy_pullback"])
+        )
         mode = picker_mode_override or self.config.picker_mode
         exempt = (
             picker_leader_bias_exempt_override
@@ -1230,6 +1227,7 @@ class StockPickerService:
         )
         self._screener = StockScreener(
             data_manager=self._data_manager,
+            picker_strategies=strategies,
             picker_mode=mode,
             picker_leader_bias_exempt_pct=exempt,
             enable_b_wave_filter=getattr(self.config, "picker_enable_b_wave_filter", True),
@@ -1258,6 +1256,7 @@ class StockPickerService:
         result = PickerResult(
             generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
             picker_mode=self._screener._picker_mode,
+            picker_strategies=getattr(self._screener, "_picker_strategies", []) or ["buy_pullback"],
             picker_leader_bias_exempt_pct=self._screener._leader_bias_exempt_pct or None,
         )
 
@@ -1402,12 +1401,16 @@ class StockPickerService:
         """Build the prompt with quant pool, chip data (if any), and market intel."""
         chip_map = chip_map or {}
         today = datetime.now().strftime("%Y-%m-%d")
-        mode = self._screener._picker_mode
-        p = PickerModeParams.for_mode(mode)
+        strategies = getattr(self._screener, "_picker_strategies", []) or ["buy_pullback"]
         exempt = self._screener._leader_bias_exempt_pct
+        strategies = getattr(self._screener, "_picker_strategies", []) or ["buy_pullback"]
+        from src.services.picker_strategies import get_strategy_params, STRATEGY_DISPLAY_NAMES
+        strategy_labels = ", ".join(STRATEGY_DISPLAY_NAMES.get(x, x) for x in strategies)
+        exempt = self._screener._leader_bias_exempt_pct
+        p = get_strategy_params(strategies[0]) if strategies else PickerModeParams.for_mode("balanced")
         parts = [
             f"# 今日选股分析 ({today})\n",
-            f"**当前配置**：模式={mode}，乖离率阈值={p.max_bias_pct}%，龙头豁免={exempt}%，"
+            f"**当前配置**：策略={strategy_labels}，乖离率阈值={p.max_bias_pct}%，龙头豁免={exempt}%，"
             f"PE理想区间={p.pe_ideal_low}-{p.pe_ideal_high}倍\n",
         ]
 
@@ -1415,19 +1418,22 @@ class StockPickerService:
         if candidates:
             parts.append(f"## 量化筛选池（从全市场筛选出的 {len(candidates)} 只候选）")
             has_chip = any(s.code in chip_map for s in candidates)
+            has_strategies = len(strategies) > 1 and any(getattr(s, "strategies", []) for s in candidates)
+            strat_col = "| 策略 |" if has_strategies else ""
+            strat_sep = "|------|" if has_strategies else ""
             if has_chip:
                 parts.append(
-                    "| 代码 | 名称 | 现价 | 涨跌% | 量比 | 换手% | PE | 市值(亿) | 60日% | 筹码90% | 获利% | 评分 |"
+                    f"| 代码 | 名称 | 现价 | 涨跌% | 量比 | 换手% | PE | 市值(亿) | 60日% | 筹码90% | 获利% |{strat_col} 评分 |"
                 )
                 parts.append(
-                    "|------|------|------|-------|------|-------|-----|---------|-------|---------|-------|------|"
+                    f"|------|------|------|-------|------|-------|-----|---------|-------|---------|-------|{strat_sep}------|"
                 )
             else:
                 parts.append(
-                    "| 代码 | 名称 | 现价 | 涨跌% | 量比 | 换手% | PE | 市值(亿) | 60日% | 评分 |"
+                    f"| 代码 | 名称 | 现价 | 涨跌% | 量比 | 换手% | PE | 市值(亿) | 60日% |{strat_col} 评分 |"
                 )
                 parts.append(
-                    "|------|------|------|-------|------|-------|-----|---------|-------|------|"
+                    f"|------|------|------|-------|------|-------|-----|---------|-------|{strat_sep}------|"
                 )
             for s in candidates:
                 row = (
@@ -1443,6 +1449,10 @@ class StockPickerService:
                     c90_str = f"{c90:.1%}" if c90 is not None else "-"
                     pr_str = f"{pr:.0%}" if pr is not None else "-"
                     row += f" {c90_str} | {pr_str} |"
+                if has_strategies:
+                    strat_tags = getattr(s, "strategies", []) or []
+                    strat_labels = ",".join(STRATEGY_DISPLAY_NAMES.get(x, x) for x in strat_tags[:3])
+                    row += f" {strat_labels} |"
                 row += f" {s.score:.0f} |"
                 parts.append(row)
             parts.append("")

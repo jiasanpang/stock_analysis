@@ -21,6 +21,7 @@ export interface ScreenedStock {
   amount_yi: number;
   change_pct_60d: number;
   score: number;
+  strategies?: string[];
 }
 
 export interface StockPick {
@@ -46,6 +47,7 @@ export interface PickerResponse {
   error: string;
   history_id?: number | null;
   picker_mode?: string;
+  picker_strategies?: string[];
   picker_leader_bias_exempt_pct?: number | null;
 }
 
@@ -64,6 +66,7 @@ export interface PickerHistoryItem {
   elapsed_seconds: number;
   created_at: string | null;
   picker_mode?: string;
+  picker_strategies?: string[];
   picker_leader_bias_exempt_pct?: number | null;
 }
 
@@ -77,16 +80,33 @@ const PICKER_REQUEST_TIMEOUT_MS = 600_000; // 10 min
 
 export type PickerMode = 'defensive' | 'balanced' | 'offensive';
 
+export type PickerStrategy = 'buy_pullback' | 'breakout' | 'bottom_reversal';
+
 export interface PickerRecommendParams {
+  picker_strategies?: PickerStrategy[];
   picker_mode?: PickerMode;
   picker_leader_bias_exempt_pct?: number;
 }
 
+const STRATEGY_LABELS: Record<string, string> = {
+  buy_pullback: '买回踩',
+  breakout: '突破',
+  bottom_reversal: '底部反转',
+};
+
+export { STRATEGY_LABELS };
+
 export async function fetchRecommendations(params?: PickerRecommendParams): Promise<PickerResponse> {
-  const body = params && (params.picker_mode || params.picker_leader_bias_exempt_pct != null)
+  const hasParams = params && (
+    (params.picker_strategies && params.picker_strategies.length > 0) ||
+    params.picker_mode ||
+    params.picker_leader_bias_exempt_pct != null
+  );
+  const body = hasParams
     ? {
-        picker_mode: params.picker_mode ?? undefined,
-        picker_leader_bias_exempt_pct: params.picker_leader_bias_exempt_pct ?? undefined,
+        picker_strategies: params?.picker_strategies ?? undefined,
+        picker_mode: params?.picker_mode ?? undefined,
+        picker_leader_bias_exempt_pct: params?.picker_leader_bias_exempt_pct ?? undefined,
       }
     : undefined;
   const res = await apiClient.post<PickerResponse>('/api/v1/picker/recommend', body ?? null, {

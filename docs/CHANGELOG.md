@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Multi-strategy picker: `PICKER_STRATEGIES` (comma-separated) runs multiple strategies in parallel. Strategies: `buy_pullback` (买回踩), `breakout` (突破), `bottom_reversal` (底部反转). Candidates merged and tagged by strategy. No intensity modes (defensive/balanced/offensive) — each strategy has fixed params.
 - Sector rankings (板块排行): Tushare `sw_daily` as priority source when TUSHARE_TOKEN configured. Avoids Eastmoney rate limiting (RemoteDisconnected). Requires 5000+ Tushare points.
 - Picker backtest: stop-loss/take-profit per 买卖点规则 — stop-loss: 跌破 MA20 or -8% drawdown; take-profit: 前高 (20d high), 整数关口 (5/10/20/50/100...), or +15% fallback.
 - Picker backtest speed: `CachingDataFetcherManager` caches get_daily_data per run; screener filters (`_filter_by_bias`, `_filter_limit_up_streak`, `_filter_consecutive_up_days`, `_filter_b_wave_risk`) fetch in parallel (5 workers) with request deduplication.
@@ -34,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `./test.sh picker-validation`: Offline validation of picker logic (60d decay, volume filter, prompt).
 
 ### Changed
+- `daily_analysis.yml`: Split into 3 parallel jobs — `market-review` (45min), `stocks` (120min), `picker` (45min). Each job runs independently; schedule runs all 3, manual dispatch supports `full` / `market-only` / `stocks-only` / `picker-only`. Artifacts: `analysis-market-*`, `analysis-stocks-*`, `analysis-picker-*`.
 - Backtest page: Improve layout and styling — gradient hero, segmented tabs, grid params for picker backtest.
 - Picker backtest: Speed up — cache stock_basic (saves 1 Tushare call/day), batch benchmark fetch (N→1), parallelize forward returns (5 workers).
 - Tushare: Pass token directly to `pro_api(token=...)` instead of `set_token()` to avoid writing `~/tk.csv`. Fixes "Operation not permitted" in sandbox/restricted environments (e.g. macOS, Docker).
