@@ -61,6 +61,16 @@ class BacktestService:
             force=force,
         )
 
+        total_candidates = len(candidates)
+        logger.info(
+            "[Backtest] run start: candidates=%d code=%s force=%s eval_window_days=%d limit=%d",
+            total_candidates,
+            code or "*",
+            force,
+            int(eval_window_days),
+            int(limit),
+        )
+
         processed = 0
         completed = 0
         insufficient = 0
@@ -72,6 +82,14 @@ class BacktestService:
         for analysis in candidates:
             processed += 1
             touched_codes.add(analysis.code)
+            if processed == 1 or processed % 25 == 0 or processed == total_candidates:
+                logger.info(
+                    "[Backtest] progress %d/%d (code=%s id=%s)",
+                    processed,
+                    total_candidates,
+                    analysis.code,
+                    getattr(analysis, "id", "?"),
+                )
 
             try:
                 analysis_date = self._resolve_analysis_date(analysis)
@@ -202,6 +220,15 @@ class BacktestService:
                 eval_window_days=int(eval_window_days),
                 engine_version=str(engine_version),
             )
+
+        logger.info(
+            "[Backtest] run done: processed=%d saved=%d completed=%d insufficient=%d errors=%d",
+            processed,
+            saved,
+            completed,
+            insufficient,
+            errors,
+        )
 
         return {
             "processed": processed,
