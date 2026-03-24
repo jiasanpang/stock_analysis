@@ -273,14 +273,18 @@ class BacktestService:
         try:
             from data_provider.base import DataFetcherManager
 
-            # fetch a window that covers start + forward bars
-            end_date = analysis_date + timedelta(days=max(eval_window_days * 2, 30))
+            # Calendar span must cover eval_window_days *trading* days (holidays + weekends).
+            # Previously max(eval*2, 30) + days=eval*2 was too tight for CN long holidays or fetcher row caps.
+            ew = int(eval_window_days)
+            calendar_span = max(ew * 3 + 14, 45)
+            end_date = analysis_date + timedelta(days=calendar_span)
+            fetch_rows = min(max(ew + 35, 60), 366)
             manager = DataFetcherManager()
             df, source = manager.get_daily_data(
                 stock_code=code,
                 start_date=analysis_date.strftime("%Y-%m-%d"),
                 end_date=end_date.strftime("%Y-%m-%d"),
-                days=eval_window_days * 2,
+                days=fetch_rows,
             )
             if df is None or df.empty:
                 return
