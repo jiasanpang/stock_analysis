@@ -130,6 +130,9 @@ const PickerBacktestPanel: React.FC<{ summary: PickerBacktestSummary }> = ({ sum
       </div>
       <h2 className="text-sm font-semibold text-primary">选股回测表现</h2>
       <span className="ml-auto text-xs text-muted font-mono">
+        {summary.tradeDatesWithPicks != null && (
+          <span className="text-secondary mr-2">有候选 {summary.tradeDatesWithPicks} 天</span>
+        )}
         {summary.winCount}胜 / {summary.lossCount}负 / {summary.insufficientCount}数据不足
       </span>
     </div>

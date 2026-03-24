@@ -29,6 +29,7 @@ export interface PickerBacktestSummary {
   endDate: string;
   holdDays: number;
   topN: number;
+  tradeDatesWithPicks?: number;  // days that had candidates
   totalPicks: number;
   winCount: number;
   lossCount: number;

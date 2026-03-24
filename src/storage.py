@@ -690,7 +690,17 @@ class DatabaseManager:
             ).scalar_one_or_none()
             
             return result is not None
-    
+
+    def get_daily_bar_updated_at(self, code: str, row_date: date) -> Optional[datetime]:
+        """Return StockDaily.updated_at for the given code and trade date, if any."""
+        with self.get_session() as session:
+            row = session.execute(
+                select(StockDaily.updated_at).where(
+                    and_(StockDaily.code == code, StockDaily.date == row_date)
+                )
+            ).scalar_one_or_none()
+            return row
+
     def get_latest_data(
         self, 
         code: str, 

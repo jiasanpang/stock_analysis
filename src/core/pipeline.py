@@ -16,7 +16,7 @@ import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
 import pandas as pd
@@ -31,7 +31,12 @@ from src.notification import NotificationService, NotificationChannel
 from src.search_service import SearchService
 from src.enums import ReportType
 from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
-from src.core.trading_calendar import get_market_for_stock, is_market_open
+from src.core.trading_calendar import (
+    get_calendar_today_for_market,
+    get_market_for_stock,
+    is_market_open,
+    should_bypass_daily_fetch_cache_cn,
+)
 from bot.models import BotMessage
 
 
@@ -131,17 +136,26 @@ class StockAnalysisPipeline:
             # 首先获取股票名称
             stock_name = self.fetcher_manager.get_stock_name(code)
 
-            today = date.today()
-            # 注意：这里用自然日 date.today() 做“断点续传”判断。
-            # 若在周末/节假日/非交易日运行，或机器时区不在中国，可能出现：
-            # - 数据库已有最新交易日数据但仍会重复拉取（has_today_data 返回 False）
-            # - 或在跨日/时区偏移时误判“今日已有数据”
-            # 该行为目前保留（按需求不改逻辑），但如需更严谨可改为“最新交易日/数据源最新日期”判断。
-            
-            # 断点续传检查：如果今日数据已存在，跳过
+            from zoneinfo import ZoneInfo
+
+            mkt = get_market_for_stock(code)
+            today = get_calendar_today_for_market(mkt)
+            # today: listing-market calendar date (not host date.today()) to avoid UTC skew.
+            # CN: do not skip fetch intraday if today's row was saved earlier (e.g. 09:35 snapshot at 14:30).
+
             if not force_refresh and self.db.has_today_data(code, today):
-                logger.info(f"{stock_name}({code}) 今日数据已存在，跳过获取（断点续传）")
-                return True, None
+                bypass = False
+                if mkt == "cn":
+                    row_ua = self.db.get_daily_bar_updated_at(code, today)
+                    now_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
+                    bypass = should_bypass_daily_fetch_cache_cn(today, row_ua, now_cn)
+                if bypass:
+                    logger.info(
+                        f"{stock_name}({code}) 已有 {today} 日线，但盘中或收盘未定型，重新拉取"
+                    )
+                else:
+                    logger.info(f"{stock_name}({code}) 今日数据已存在，跳过获取（断点续传）")
+                    return True, None
 
             # 从数据源获取数据
             logger.info(f"{stock_name}({code}) 开始从数据源获取数据...")

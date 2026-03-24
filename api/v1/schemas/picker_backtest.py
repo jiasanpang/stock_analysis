@@ -35,6 +35,7 @@ class PickerBacktestSummary(BaseModel):
     end_date: str
     hold_days: int
     top_n: int
+    trade_dates_with_picks: int = 0  # days that had candidates (explains low total_picks)
     total_picks: int
     win_count: int
     loss_count: int

@@ -403,6 +403,7 @@ class PickerBacktestService:
         benchmark_returns: List[float] = []
 
         results: List[PickResult] = []
+        days_with_picks = 0
         for i, (td, exit_date) in enumerate(date_pairs):
             if (i + 1) % 20 == 0:
                 logger.info(f"[PickerBacktest] Progress {i + 1}/{len(trade_dates)} dates")
@@ -415,6 +416,7 @@ class PickerBacktestService:
                 if exit_date is None:
                     logger.debug(f"[PickerBacktest] {td}: 持仓期不足，跳过")
                     continue
+                days_with_picks += 1
                 pick_info = ", ".join(f"{p.code}({p.score:.1f})" for p in picks)
                 logger.info(f"[PickerBacktest] {td}: 筛选 top{top_n} → {pick_info}")
 
@@ -493,9 +495,9 @@ class PickerBacktestService:
         hits, misses = self._data_manager.cache_stats()
         total_lookups = hits + misses
         logger.info(
-            "[PickerBacktest] 回测完成: 总选股=%d, 胜=%d, 负=%d, 数据不足=%d, "
+            "[PickerBacktest] 回测完成: 交易日=%d, 有候选=%d天, 总选股=%d, 胜=%d, 负=%d, 数据不足=%d, "
             "胜率=%.2f%%, 平均收益=%.2f%%, Alpha=%.2f%%, 缓存命中=%d/总查询=%d",
-            len(results), len(wins), len(losses), len(insufficient),
+            len(trade_dates), days_with_picks, len(results), len(wins), len(losses), len(insufficient),
             win_rate or 0, avg_ret or 0, alpha or 0, hits, total_lookups,
         )
 
@@ -518,6 +520,7 @@ class PickerBacktestService:
                 "end_date": summary.end_date,
                 "hold_days": summary.hold_days,
                 "top_n": summary.top_n,
+                "trade_dates_with_picks": days_with_picks,
                 "total_picks": summary.total_picks,
                 "win_count": summary.win_count,
                 "loss_count": summary.loss_count,

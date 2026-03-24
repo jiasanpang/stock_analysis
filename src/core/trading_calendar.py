@@ -13,7 +13,7 @@
 """
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from typing import Optional, Set
 
 import pandas as pd
@@ -40,6 +40,81 @@ MARKET_TIMEZONE = {
     "hk": "Asia/Hong_Kong",
     "us": "America/New_York",
 }
+
+
+def get_calendar_today_for_market(market: Optional[str]) -> date:
+    """
+    Calendar 'today' in the market's timezone (Issue: intraday daily-bar refresh).
+
+    Use this for StockDaily row keys instead of host date.today() when the server
+    runs in UTC or another TZ than the listing market.
+    """
+    if not market:
+        return date.today()
+    tz_name = MARKET_TIMEZONE.get(market)
+    if not tz_name:
+        return date.today()
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo(tz_name)).date()
+
+
+def _cn_regular_auction_session_open(now_shanghai: datetime) -> bool:
+    """True during A-share morning or afternoon auction (not lunch break)."""
+    from zoneinfo import ZoneInfo
+
+    sh = ZoneInfo("Asia/Shanghai")
+    if now_shanghai.tzinfo is None:
+        now_shanghai = now_shanghai.replace(tzinfo=sh)
+    else:
+        now_shanghai = now_shanghai.astimezone(sh)
+    t = now_shanghai.time()
+    morning = time(9, 30) <= t <= time(11, 30)
+    afternoon = time(13, 0) <= t < time(15, 0)
+    return morning or afternoon
+
+
+def should_bypass_daily_fetch_cache_cn(
+    row_date: date,
+    row_updated_at: Optional[datetime],
+    now_shanghai: datetime,
+) -> bool:
+    """
+    When True, pipeline should refetch daily history even if has_today_data is True.
+
+    Covers:
+    - Intraday partial daily bars (scheduled run at e.g. 14:30 after an earlier save).
+    - Rows written before ~15:05 Shanghai after a trading day (still missing final OHLCV).
+    """
+    from zoneinfo import ZoneInfo
+
+    sh = ZoneInfo("Asia/Shanghai")
+    if now_shanghai.tzinfo is None:
+        now_shanghai = now_shanghai.replace(tzinfo=sh)
+    else:
+        now_shanghai = now_shanghai.astimezone(sh)
+
+    if now_shanghai.date() != row_date:
+        return True
+
+    if not is_market_open("cn", row_date):
+        return False
+
+    if _cn_regular_auction_session_open(now_shanghai):
+        return True
+
+    if row_updated_at is None:
+        return True
+
+    ru = row_updated_at
+    if ru.tzinfo is None:
+        # Naive timestamps follow host TZ; deployments set TZ=Asia/Shanghai (see docker-compose).
+        ru = ru.replace(tzinfo=sh)
+    else:
+        ru = ru.astimezone(sh)
+
+    session_end = datetime.combine(row_date, time(15, 0), tzinfo=sh)
+    return ru < session_end + timedelta(minutes=5)
 
 
 def get_market_for_stock(code: str) -> Optional[str]:
