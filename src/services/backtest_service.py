@@ -110,7 +110,24 @@ class BacktestService:
                 start_daily = self.stock_repo.get_start_daily(code=analysis.code, analysis_date=analysis_date)
 
                 if start_daily is None or start_daily.close is None:
-                    self._try_fill_daily_data(code=analysis.code, analysis_date=analysis_date, eval_window_days=eval_window_days)
+                    self._try_fill_daily_data(
+                        code=analysis.code,
+                        anchor_date=analysis_date,
+                        eval_window_days=eval_window_days,
+                        pull_history_before_anchor=True,
+                    )
+                    start_daily = self.stock_repo.get_start_daily(code=analysis.code, analysis_date=analysis_date)
+
+                if start_daily is None or start_daily.close is None:
+                    mt0 = self._market_calendar_today(analysis.code)
+                    self._try_fill_daily_data(
+                        code=analysis.code,
+                        anchor_date=analysis_date,
+                        eval_window_days=eval_window_days,
+                        pull_history_before_anchor=True,
+                        lookback_days=600,
+                        force_end_today=analysis_date >= mt0 - timedelta(days=500),
+                    )
                     start_daily = self.stock_repo.get_start_daily(code=analysis.code, analysis_date=analysis_date)
 
                 if start_daily is None or start_daily.close is None:
@@ -136,7 +153,25 @@ class BacktestService:
                 )
 
                 if len(forward_bars) < int(eval_window_days):
-                    self._try_fill_daily_data(code=analysis.code, analysis_date=start_daily.date, eval_window_days=eval_window_days)
+                    self._try_fill_daily_data(
+                        code=analysis.code,
+                        anchor_date=start_daily.date,
+                        eval_window_days=eval_window_days,
+                    )
+                    forward_bars = self.stock_repo.get_forward_bars(
+                        code=analysis.code,
+                        analysis_date=start_daily.date,
+                        eval_window_days=int(eval_window_days),
+                    )
+
+                if len(forward_bars) < int(eval_window_days):
+                    mt1 = self._market_calendar_today(analysis.code)
+                    self._try_fill_daily_data(
+                        code=analysis.code,
+                        anchor_date=start_daily.date,
+                        eval_window_days=eval_window_days,
+                        force_end_today=start_daily.date >= mt1 - timedelta(days=500),
+                    )
                     forward_bars = self.stock_repo.get_forward_bars(
                         code=analysis.code,
                         analysis_date=start_daily.date,
@@ -152,6 +187,32 @@ class BacktestService:
                     take_profit=analysis.take_profit,
                     config=eval_config,
                 )
+
+                if evaluation.get("eval_status") == "insufficient_data":
+                    mkt_today = self._market_calendar_today(analysis.code)
+                    if start_daily.date >= mkt_today - timedelta(days=500):
+                        self._try_fill_daily_data(
+                            code=analysis.code,
+                            anchor_date=start_daily.date,
+                            eval_window_days=eval_window_days,
+                            force_end_today=True,
+                            widen_span=True,
+                        )
+                        forward_bars = self.stock_repo.get_forward_bars(
+                            code=analysis.code,
+                            analysis_date=start_daily.date,
+                            eval_window_days=int(eval_window_days),
+                        )
+                        if len(forward_bars) >= int(eval_window_days):
+                            evaluation = BacktestEngine.evaluate_single(
+                                operation_advice=analysis.operation_advice,
+                                analysis_date=start_daily.date,
+                                start_price=float(start_daily.close),
+                                forward_bars=forward_bars,
+                                stop_loss=analysis.stop_loss,
+                                take_profit=analysis.take_profit,
+                                config=eval_config,
+                            )
 
                 status = evaluation.get("eval_status")
                 if status == "insufficient_data":
@@ -269,28 +330,92 @@ class BacktestService:
         logger.warning(f"无法确定分析日期，跳过记录: {analysis.code}#{getattr(analysis, 'id', '?')}")
         return None
 
-    def _try_fill_daily_data(self, *, code: str, analysis_date: date, eval_window_days: int) -> None:
+    def _market_calendar_today(self, code: str) -> date:
+        """Listing-market calendar date (avoids UTC host skew for backtest end ranges)."""
+        from src.core.trading_calendar import get_calendar_today_for_market, get_market_for_stock
+
+        return get_calendar_today_for_market(get_market_for_stock(code))
+
+    def _try_fill_daily_data(
+        self,
+        *,
+        code: str,
+        anchor_date: date,
+        eval_window_days: int,
+        pull_history_before_anchor: bool = False,
+        force_end_today: bool = False,
+        widen_span: bool = False,
+        lookback_days: Optional[int] = None,
+    ) -> bool:
+        """
+        Fetch daily OHLC from data providers and persist to DB when backtest lacks bars.
+
+        Returns True if a non-empty frame was returned and save_daily_data ran (may update 0 new rows).
+        """
         try:
             from data_provider.base import DataFetcherManager
 
-            # Calendar span must cover eval_window_days *trading* days (holidays + weekends).
-            # Previously max(eval*2, 30) + days=eval*2 was too tight for CN long holidays or fetcher row caps.
             ew = int(eval_window_days)
-            calendar_span = max(ew * 3 + 14, 45)
-            end_date = analysis_date + timedelta(days=calendar_span)
-            fetch_rows = min(max(ew + 35, 60), 366)
+            base_span = max(ew * 3 + 21, 60)
+            calendar_span = base_span * 2 if widen_span else base_span
+            today_m = self._market_calendar_today(code)
+
+            if pull_history_before_anchor:
+                if lookback_days is not None:
+                    lb = timedelta(days=lookback_days)
+                elif anchor_date > today_m:
+                    lb = timedelta(days=120)
+                else:
+                    lb = timedelta(
+                        days=min(
+                            400,
+                            max(120, (today_m - anchor_date).days + calendar_span + 45),
+                        )
+                    )
+                start_date = anchor_date - lb
+            else:
+                start_date = anchor_date
+
+            end_date = anchor_date + timedelta(days=calendar_span)
+            recent_anchor = anchor_date >= (today_m - timedelta(days=min(max(calendar_span * 2, 120), 800)))
+            if force_end_today or recent_anchor:
+                end_date = max(end_date, today_m)
+
+            if start_date > anchor_date:
+                start_date = anchor_date
+
+            fetch_cap = min(max((end_date - start_date).days + 20, ew + 50), 800)
+
             manager = DataFetcherManager()
             df, source = manager.get_daily_data(
                 stock_code=code,
-                start_date=analysis_date.strftime("%Y-%m-%d"),
+                start_date=start_date.strftime("%Y-%m-%d"),
                 end_date=end_date.strftime("%Y-%m-%d"),
-                days=fetch_rows,
+                days=fetch_cap,
             )
             if df is None or df.empty:
-                return
+                logger.warning(
+                    "[Backtest] daily fetch empty code=%s anchor=%s range=%s..%s",
+                    code,
+                    anchor_date,
+                    start_date,
+                    end_date,
+                )
+                return False
             self.db.save_daily_data(df, code=code, data_source=source)
+            logger.info(
+                "[Backtest] daily fill saved code=%s anchor=%s rows=%d source=%s range=%s..%s",
+                code,
+                anchor_date,
+                len(df),
+                source,
+                start_date,
+                end_date,
+            )
+            return True
         except Exception as exc:
-            logger.warning(f"补全日线数据失败({code}): {exc}")
+            logger.warning("补全日线数据失败(%s): %s", code, exc)
+            return False
 
     def _recompute_summaries(self, *, touched_codes: List[str], eval_window_days: int, engine_version: str) -> None:
         with self.db.get_session() as session:
