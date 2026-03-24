@@ -8,6 +8,9 @@ import type {
   PerformanceMetrics,
 } from '../types/backtest';
 
+// Force-run backtest can trigger many daily-data fills; default axios 30s is too short.
+const BACKTEST_RUN_TIMEOUT_MS = 600000; // 10 min
+
 // ============ API ============
 
 export const backtestApi = {
@@ -25,6 +28,7 @@ export const backtestApi = {
     const response = await apiClient.post<Record<string, unknown>>(
       '/api/v1/backtest/run',
       requestData,
+      { timeout: BACKTEST_RUN_TIMEOUT_MS },
     );
     return toCamelCase<BacktestRunResponse>(response.data);
   },
