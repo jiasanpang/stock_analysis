@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Per-strategy leader bias exemption: `leader_bias_exempt_pct` in StrategyParams (breakout=14%, others=0). Removed global `PICKER_LEADER_BIAS_EXEMPT_PCT`.
 
 ### Changed
+- GitHub Actions `daily_analysis.yml`: default schedule Beijing 18:00 (`cron`: UTC 10:00 Mon–Fri).
 - Picker backtest: Remove `picker_mode` and `picker_leader_bias_exempt_pct` from API. Use `picker_strategies` only.
 - Backtest page: holdDays/topN inputs allow empty (string state, parse on submit).
 - Picker footer tagline: "买回踩 · 突破 · 底部反转 · MACD金叉 — 多策略并行，按需组合".

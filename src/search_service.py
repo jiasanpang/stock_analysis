@@ -765,13 +765,21 @@ class MiniMaxSearchProvider(BaseSearchProvider):
 
     @property
     def is_available(self) -> bool:
-        """Check availability considering circuit breaker state."""
-        if not super().is_available:
+        """Check availability with circuit breaker protection.
+
+        Returns False when:
+        - No API keys configured
+        - Circuit breaker is open (too many consecutive failures)
+        """
+        if not self._api_keys:
             return False
-        if self._consecutive_failures >= self._CB_FAILURE_THRESHOLD:
-            if time.time() < self._circuit_open_until:
-                return False
-            # Cooldown expired -> half-open, allow one probe
+        # Circuit breaker: if open, provider is temporarily unavailable
+        if time.time() < self._circuit_open_until:
+            logger.debug(
+                f"[MiniMax] Circuit breaker OPEN, cooldown remaining: "
+                f"{self._circuit_open_until - time.time():.0f}s"
+            )
+            return False
         return True
 
     def _record_success(self, key: str) -> None:
