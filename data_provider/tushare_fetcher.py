@@ -969,7 +969,8 @@ class TushareFetcher(BaseFetcher):
         try:
             self._check_rate_limit()
             china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
-            end_date = china_now.strftime("%Y%m%d")
+            today_str = china_now.strftime("%Y%m%d")
+            end_date = today_str
             start_date = (china_now - pd.Timedelta(days=10)).strftime("%Y%m%d")
 
             df_cal = self._api.trade_cal(exchange="SSE", start_date=start_date, end_date=end_date)
@@ -977,14 +978,24 @@ class TushareFetcher(BaseFetcher):
                 return None
             df_cal.columns = [c.lower() for c in df_cal.columns]
             open_dates = df_cal[df_cal["is_open"] == 1]["cal_date"].tolist()
+            # Tushare trade_cal usually returns descending order (latest first), but let's sort to be safe
+            open_dates = sorted(open_dates, reverse=True)
             if not open_dates:
                 return None
-            trade_date = open_dates[-1]
-
+            
+            # For market review, we really want TODAY's sector rankings.
+            # If today is a trading day but data is not yet available (e.g. during trading hours),
+            # sw_daily will return empty. We should NOT fall back to yesterday's data because
+            # that would confuse the user (reporting yesterday's rising sectors as today's).
+            # So we only check the latest trading day. If it's today and empty, we return None
+            # to let the manager fall back to realtime fetchers (efinance/akshare).
+            latest_trade_date = open_dates[0]
+            
             self._check_rate_limit()
-            df_sw = self._api.sw_daily(trade_date=trade_date, fields="ts_code,name,pct_change")
+            df_sw = self._api.sw_daily(trade_date=latest_trade_date, fields="ts_code,name,pct_change")
+            
             if df_sw is None or df_sw.empty:
-                logger.debug(f"[板块排行] Tushare sw_daily 返回空 {trade_date}")
+                logger.debug(f"[板块排行] Tushare sw_daily 返回空 {latest_trade_date}，可能尚未更新")
                 return None
 
             df_sw.columns = [c.lower() for c in df_sw.columns]
