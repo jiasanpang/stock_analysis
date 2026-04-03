@@ -297,6 +297,23 @@ class Config:
     enable_chip_distribution: bool = True
     # 东财接口补丁开关
     enable_eastmoney_patch: bool = False
+    
+    # === 增强版复盘分析配置 ===
+    # 是否启用增强版大盘复盘分析（包含情绪分析、板块热点、外界环境等）
+    use_enhanced_market_review: bool = True
+    # 是否自动生成公众号格式报告
+    generate_wechat_format: bool = True
+    
+    # 公众号配置
+    wechat_account_name: str = "A股智能分析"
+    wechat_slogan: str = "AI驱动的股市复盘，让投资更智能"
+    wechat_qr_code_text: str = "扫码关注获取每日复盘"
+    
+    # 报告格式配置
+    wechat_use_emoji: bool = True
+    wechat_use_dividers: bool = True
+    wechat_add_footer: bool = True
+    wechat_max_length: int = 8000
     # 实时行情数据源优先级（逗号分隔）
     # 推荐顺序：tencent > akshare_sina > efinance > akshare_em > tushare
     # - tencent: 腾讯财经，有量比/换手率/市盈率等，单股查询稳定（推荐）
@@ -764,6 +781,21 @@ class Config:
             enable_chip_distribution=os.getenv('ENABLE_CHIP_DISTRIBUTION', 'true').lower() == 'true',
             # 东财接口补丁开关
             enable_eastmoney_patch=os.getenv('ENABLE_EASTMONEY_PATCH', 'false').lower() == 'true',
+            
+            # === 增强版复盘分析配置 ===
+            use_enhanced_market_review=os.getenv('USE_ENHANCED_MARKET_REVIEW', 'true').lower() == 'true',
+            generate_wechat_format=os.getenv('GENERATE_WECHAT_FORMAT', 'true').lower() == 'true',
+            
+            # 公众号配置
+            wechat_account_name=os.getenv('WECHAT_ACCOUNT_NAME', 'A股智能分析'),
+            wechat_slogan=os.getenv('WECHAT_SLOGAN', 'AI驱动的股市复盘，让投资更智能'),
+            wechat_qr_code_text=os.getenv('WECHAT_QR_CODE_TEXT', '扫码关注获取每日复盘'),
+            
+            # 报告格式配置
+            wechat_use_emoji=os.getenv('WECHAT_USE_EMOJI', 'true').lower() == 'true',
+            wechat_use_dividers=os.getenv('WECHAT_USE_DIVIDERS', 'true').lower() == 'true',
+            wechat_add_footer=os.getenv('WECHAT_ADD_FOOTER', 'true').lower() == 'true',
+            wechat_max_length=int(os.getenv('WECHAT_MAX_LENGTH', '8000')),
             # 实时行情数据源优先级：
             # - tencent: 腾讯财经，有量比/换手率/PE/PB等，单股查询稳定（推荐）
             # - akshare_sina: 新浪财经，基本行情稳定，但无量比
