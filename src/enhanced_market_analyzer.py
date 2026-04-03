@@ -363,23 +363,6 @@ class EnhancedMarketAnalyzer(MarketAnalyzer):
     
     def _analyze_sector_catalyst(self, sector_name: str) -> str:
         """分析板块催化剂"""
-        # 这里可以结合新闻搜索来分析具体催化剂
-        # 简化版本直接返回通用分析
-        catalyst_map = {
-            "新能源": "政策利好持续释放",
-            "芯片": "国产化进程加速",
-            "医药": "创新药获批上市",
-            "军工": "装备采购订单增加",
-            "房地产": "政策边际放松预期",
-            "银行": "息差改善预期",
-            "白酒": "春节消费旺季临近",
-            "汽车": "新车型发布推动"
-        }
-        
-        for key, catalyst in catalyst_map.items():
-            if key in sector_name:
-                return catalyst
-        
         return "市场资金关注"
     
     def analyze_external_environment(self) -> ExternalEnvironment:
@@ -433,20 +416,17 @@ class EnhancedMarketAnalyzer(MarketAnalyzer):
     
     def _analyze_policy_impact(self) -> str:
         """分析政策面影响"""
-        # 这里可以结合新闻搜索分析最新政策
+        # 简化版本返回通用分析，实际可接入新闻搜索
         return "政策面保持稳定，关注后续政策信号"
     
     def _analyze_international_market(self, us_futures: Dict, asia_markets: Dict) -> str:
         """分析国际市场表现"""
-        us_trend = "偏强" if sum(us_futures.values()) > 0 else "偏弱"
-        asia_trend = "偏强" if sum(asia_markets.values()) > 0 else "偏弱"
-        
-        return f"美股期货{us_trend}，亚太市场{asia_trend}，外围市场对A股形成{'正面'if us_trend=='偏强' else '负面'}影响"
+        # 简化版本，实际应根据真实数据计算
+        return "外围市场走势分化，对A股影响中性"
     
     def _analyze_macro_data(self) -> str:
         """分析宏观经济数据"""
-        # 这里可以获取最新的宏观数据
-        return "宏观经济数据保持平稳，通胀压力可控"
+        return "宏观经济数据处于观察期"
     
     def analyze_technical_aspects(self, overview: MarketOverview) -> TechnicalAnalysis:
         """
@@ -495,16 +475,16 @@ class EnhancedMarketAnalyzer(MarketAnalyzer):
     
     def _analyze_volume_price(self, index: MarketIndex, total_amount: float) -> str:
         """分析量价关系"""
-        if index.change_pct > 0 and total_amount > 12000:
-            return "量价齐升，上涨动能充足"
+        if index.change_pct > 0 and total_amount > 10000:
+            return "量价齐升，上涨动能较强"
         elif index.change_pct > 0 and total_amount < 8000:
-            return "价涨量缩，上涨乏力"
-        elif index.change_pct < 0 and total_amount > 12000:
-            return "量价齐跌，下跌压力较大"
+            return "价涨量缩，上涨动能略显不足"
+        elif index.change_pct < 0 and total_amount > 10000:
+            return "放量下跌，抛压较重"
         elif index.change_pct < 0 and total_amount < 8000:
-            return "价跌量缩，下跌动能减弱"
+            return "缩量下跌，抛压有所减轻"
         else:
-            return "量价关系平衡"
+            return "量价关系相对平衡"
     
     def _analyze_market_structure(self, overview: MarketOverview) -> str:
         """分析市场结构"""
