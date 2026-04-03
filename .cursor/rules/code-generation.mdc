@@ -1,0 +1,45 @@
+---
+description: 代码生成与实现规范 (Code Generation & Implementation)
+globs: src/**/*.py, api/**/*.py, data_provider/**/*.py, tests/**/*.py
+alwaysApply: false
+---
+
+# 代码生成与实现规范 (Code Generation & Implementation)
+
+当 AI 助手需要编写或修改代码时，必须严格遵循以下规范，确保代码质量、可维护性和稳定性：
+
+## 1. 语言与风格 (Language & Style)
+- **Python 3.10+**：使用现代 Python 特性。
+- **PEP 8 规范**：遵循 `black` 和 `isort` 风格，行宽限制为 120 字符。
+- **类型提示 (Type Hints)**：所有新函数、类方法和关键变量**必须**包含完整的类型提示（`typing` 模块，如 `List`, `Dict`, `Optional`, `Tuple`, `Any`）。
+- **英文注释**：所有新增或修改的代码注释（包括 docstring）必须使用**英文**。
+
+## 2. 架构与模块化 (Architecture & Modularity)
+- **单一职责原则 (SRP)**：函数和类应保持简短，只做一件事。避免编写超过 50 行的巨型函数。
+- **依赖注入**：尽量通过参数传递依赖（如 `SearchService`, `NotificationService`），而不是在函数内部硬编码实例化，以便于测试。
+- **复用现有组件**：
+  - 数据获取使用 `DataFetcherManager` 或具体的 `Fetcher`。
+  - 日志记录使用 `logging.getLogger(__name__)`。
+  - 配置读取使用 `src.config.get_config()`。
+
+## 3. 错误处理与健壮性 (Error Handling & Robustness)
+- **捕获特定异常**：避免使用裸的 `except Exception:`，除非在最外层（如 `main.py` 的任务调度中）用于防止程序崩溃。
+- **日志记录**：
+  - 在关键步骤使用 `logger.info()`。
+  - 在异常分支使用 `logger.error()` 或 `logger.warning()`，并包含上下文信息（如股票代码、API 接口名）。
+  - 调试信息使用 `logger.debug()`。
+- **降级与重试**：对于网络请求或外部 API 调用（如大模型、股票数据接口），必须考虑超时和重试机制（或复用现有的请求工具）。
+
+## 4. 性能与安全 (Performance & Security)
+- **避免阻塞**：在异步上下文（如 FastAPI 路由）中，不要执行长时间的同步阻塞操作。
+- **安全凭证**：绝对不要在代码中硬编码 API Key、Token 或密码。必须通过环境变量 (`os.getenv`) 或 `Config` 类读取。
+
+## 5. 测试与验证 (Testing & Validation)
+- **可测试性**：编写易于单元测试的代码（纯函数、无副作用）。
+- **同步更新测试**：如果修改了核心逻辑，必须同时检查并更新相关的测试用例（`tests/` 目录下）。
+- **语法检查**：在提交代码前，确保不会引入明显的语法错误或未导入的模块（`NameError`）。
+
+## 6. 代码提交前检查 (Pre-commit Checklist)
+- 是否有未使用的 `import` 或变量？（如果有，删除它们）。
+- 是否处理了 `None` 或空列表的情况？
+- 是否添加了必要的英文 docstring？
