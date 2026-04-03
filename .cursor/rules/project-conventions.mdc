@@ -74,3 +74,14 @@ flake8 main.py src/ --max-line-length=120
 | 配置 | `src/config.py` | PICKER_MODE、BIAS_THRESHOLD、PICKER_ALLOW_LOSS 等 |
 
 写公众号文章时，策略描述需与 `公众号/买卖点规则.md`、`公众号/策略规则汇总.md` 保持一致；涉及实现时参考 `stock_picker_service.py` 与 `config.py`。
+
+---
+
+## 四、AI 交互与成本优化 (Cost Optimization)
+
+为了在使用 Cursor 过程中更省钱、更高效，AI 助手需遵循以下原则：
+1. **精简输出 (Conciseness)**：不要输出冗长的解释、重复的代码或无关的背景知识。直接给出答案、代码修改或执行结果。
+2. **精准修改 (Targeted Edits)**：修改代码时，优先使用局部替换（如 `StrReplace`），绝对避免重写整个文件，除非是新建文件。
+3. **减少不必要的读取 (Minimize Reads)**：在确认需要修改前，不要盲目读取大量无关文件。使用 `Grep` 或 `Glob` 精准定位。
+4. **并行调用 (Parallel Tool Calls)**：如果需要读取多个文件或执行多个独立命令，务必在一次回复中并行调用工具，减少对话轮数。
+5. **避免过度重构 (No Over-engineering)**：除非用户明确要求，否则只做满足当前需求的最小修改，不要主动进行大范围重构。
