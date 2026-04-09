@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **fix(picker)**: 空筛选池三重防护 — 跳过LLM、后验证、提示词加严
 
 ### Changed
+- **refactor(picker)**: buy_pullback 策略参数全面收紧 — 启用缩量检查、量比0.7、乖离率5%、PE上限60、日涨幅上限2%、60日上限40%、回调限制0.4
+- **refactor(picker)**: buy_pullback 评分优化 — 缩量(0.5-0.9)最高分、深回踩(-3%~-1%)最高分、放量(>3.0)惩罚
 - **refactor(picker)**: 底部反转策略参数优化 — 启用缩量检查、量比0.7、60日上限-5%、B浪过滤0.618
 - **refactor(picker)**: 底部反转评分增强 — 60日跌幅深度加分、缩量→放量转折信号、反转K线形态加分
 - **refactor(picker)**: bottom_reversal `daily_change_min` 0.0→1.0，macd_golden_cross 0.0→0.5，实时验证更严格

@@ -96,22 +96,22 @@ class StrategyParams:
     leader_bias_exempt_pct: float = 0.0
 
 
-# Buy pullback: 60d > 5%, MA bullish, pullback entry (expert-tuned params)
+# Buy pullback: 60d > 5%, MA bullish, shrinking-volume pullback entry
 BUY_PULLBACK_PARAMS = StrategyParams(
-    max_bias_pct=8.0,
-    leader_bias_exempt_pct=0.0,  # No exemption: buy pullback = strict on bias
-    pe_max=100,
-    pe_ideal_low=10,
-    pe_ideal_high=35,
-    daily_change_min=-2.5,
-    daily_change_max=3.0,
-    max_consecutive_up_days=3,
-    require_volume_shrink=False,
-    require_ma_bullish=True,
-    max_retracement_pct=0.5,
-    change_60d_min=5.0,
-    change_60d_max=None,
-    volume_ratio_min=1.0,
+    max_bias_pct=5.0,                # No chasing: strict bias ceiling
+    leader_bias_exempt_pct=0.0,      # No exemption: buy pullback = strict on bias
+    pe_max=60,                       # Conservative valuation filter
+    pe_ideal_low=10,                 # Lower bound of ideal PE range
+    pe_ideal_high=30,                # Tighter ideal PE ceiling
+    daily_change_min=-2.0,           # Precise pullback range: mild dip
+    daily_change_max=2.0,            # Prevent chasing intraday rallies
+    max_consecutive_up_days=2,       # Conservative: avoid overextended runs
+    require_volume_shrink=True,      # Core: healthy pullback = shrinking volume
+    require_ma_bullish=True,         # MA alignment confirms uptrend
+    max_retracement_pct=0.4,         # Stricter retracement limit
+    change_60d_min=5.0,              # Require established uptrend
+    change_60d_max=40.0,             # Avoid post-surge pullbacks
+    volume_ratio_min=0.7,            # Allow shrinking volume to pass
 )
 
 # Breakout: price breaks N-day high, volume confirmation
@@ -333,7 +333,16 @@ def filter_volume(
 
 
 def score_buy_pullback(row: Dict[str, Any], params: StrategyParams) -> float:
-    """Score for buy_pullback: trend + pullback + volume + PE."""
+    """Score for buy_pullback: trend + pullback + volume + PE.
+
+    Scoring components:
+        1. Trend (60d): established uptrend rewarded, decay above threshold  (0-30)
+        2. Momentum: deeper pullback preferred for ideal entry              (0-20)
+        3. Volume: shrinking volume rewarded (0.5-0.9 highest)              (0-25)
+        4. Turnover                                                         (0-10)
+        5. PE                                                               (0-10)
+        6. Mid-cap bonus                                                    (0-5)
+    """
     pct_60d = float(row.get("60日涨跌幅", 0) or 0)
     change_pct = float(row.get("涨跌幅", 0) or 0)
     vol_ratio = float(row.get("量比", 0) or 0)
@@ -341,7 +350,7 @@ def score_buy_pullback(row: Dict[str, Any], params: StrategyParams) -> float:
     pe = float(row.get("市盈率-动态", 0) or 0)
     total_mv = float(row.get("总市值", 0) or 0)
 
-    # Trend
+    # --- 1. Trend (60d) ---
     if pct_60d <= 0:
         trend = 0.0
     elif pct_60d <= TREND_DECAY_THRESHOLD_PCT:
@@ -350,21 +359,33 @@ def score_buy_pullback(row: Dict[str, Any], params: StrategyParams) -> float:
         decay = 30 - (pct_60d - TREND_DECAY_THRESHOLD_PCT) * 0.5
         trend = max(0.0, decay)
 
-    # Momentum (pullback preferred)
+    # --- 2. Momentum: deeper pullback preferred for buy_pullback ---
     if change_pct < -2:
-        mom = -5.0
-    elif -2 <= change_pct <= 1:
-        mom = 20.0
-    elif 1 < change_pct <= 3:
-        mom = 15.0
-    elif 3 < change_pct <= 5:
-        mom = 8.0
+        mom = 0.0           # Below filter threshold, won't appear
+    elif -2 <= change_pct < -1:
+        mom = 20.0          # Best entry within allowed pullback range
+    elif -1 <= change_pct <= 1:
+        mom = 18.0          # Shallow pullback/flat, good
+    elif 1 < change_pct <= 2:
+        mom = 10.0          # Small rise, acceptable
     else:
-        mom = max(0.0, 8.0 - (change_pct - 5) * 3)
+        mom = 0.0           # Beyond filter range
 
-    # Volume
-    vol = 20.0 if 1.0 <= vol_ratio <= 3.0 else (15.0 if vol_ratio > 3.0 else (10.0 if vol_ratio > 0.8 else 0.0))
-    # Turnover
+    # --- 3. Volume: reward shrinking volume (healthy pullback signal) ---
+    if 0.5 <= vol_ratio <= 0.9:
+        vol = 25.0  # Shrinking volume = best pullback signal
+    elif 0.9 < vol_ratio <= 1.5:
+        vol = 20.0  # Normal to slight expansion, acceptable
+    elif 1.5 < vol_ratio <= 3.0:
+        vol = 15.0  # Moderate expansion, some risk
+    elif vol_ratio > 3.0:
+        vol = 5.0   # Heavy volume, potential distribution
+    elif vol_ratio >= 0.3:
+        vol = 15.0  # Very low volume, thinly traded
+    else:
+        vol = 0.0   # No volume data
+
+    # --- 4. Turnover ---
     to = 10.0 if 2 <= turnover <= 8 else (5.0 if 1 <= turnover < 2 else (3.0 if 8 < turnover <= 15 else 0.0))
     pe_s = _score_pe(pe, params)
     mid = _score_mid_cap(total_mv)
