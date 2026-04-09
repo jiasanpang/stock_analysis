@@ -110,6 +110,8 @@ class PickerModeParams:
     require_ma_bullish: bool         # Require MA5 > MA10 > MA20
     max_retracement_pct: float       # Max retracement of prior 10d rally (0.5 = 50%)
     min_pullback_from_high_pct: float = 0.0  # Min % below N-day high to qualify as pullback (0=disabled)
+    max_distance_above_ma10_pct: float = 0.0  # Max % price can be above MA10 (0=disabled)
+    require_price_above_ma20: bool = False     # Reject if price below MA20
 
     @classmethod
     def for_mode(cls, mode: str) -> "PickerModeParams":
@@ -1039,6 +1041,9 @@ class StockScreener:
         1. Volume shrink: volume_ratio < 1.0 on pullback day (缩量回调)
         2. MA bullish alignment: MA5 > MA10 > MA20 (均线多头排列)
         3. Retracement limit: pullback < X% of prior 10d rally (回调幅度限制)
+        4. Min distance from 20d high: must be >=X% below high (距高点距离)
+        5. Price above MA20: reject if below MA20 (下跌通道排除)
+        6. Near MA10 support: price within X% above MA10 (支撑位确认)
         """
         if not self._data_manager or not candidates:
             return candidates
@@ -1124,6 +1129,32 @@ class StockScreener:
                                 s.code, s.name, distance_from_high_pct, high_20d, min_pb,
                             )
                             continue
+
+            # Check 5: price must be above MA20 (below MA20 = entering downtrend)
+            req_above_ma20 = getattr(mode_params, 'require_price_above_ma20', False)
+            if req_above_ma20 and len(close_series) >= 20:
+                ma20 = float(close_series.tail(20).mean())
+                if ma20 > 0 and s.price < ma20:
+                    logger.debug(
+                        "[Screener] Exclude %s %s: price %.2f below MA20 %.2f, "
+                        "potential downtrend",
+                        s.code, s.name, s.price, ma20,
+                    )
+                    continue
+
+            # Check 6: price must be near MA10 support (not floating above)
+            max_above_ma10 = getattr(mode_params, 'max_distance_above_ma10_pct', 0.0)
+            if max_above_ma10 > 0 and len(close_series) >= 10:
+                ma10 = float(close_series.tail(10).mean())
+                if ma10 > 0:
+                    dist_above_ma10 = (s.price - ma10) / ma10 * 100
+                    if dist_above_ma10 > max_above_ma10:
+                        logger.debug(
+                            "[Screener] Exclude %s %s: %.1f%% above MA10 (%.2f), "
+                            "not near support yet (max %.1f%%)",
+                            s.code, s.name, dist_above_ma10, ma10, max_above_ma10,
+                        )
+                        continue
 
             filtered.append(s)
 

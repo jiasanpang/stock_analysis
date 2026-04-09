@@ -96,6 +96,8 @@ class StrategyParams:
     leader_bias_exempt_pct: float = 0.0
     # Min % below N-day high to qualify as pullback (0=disabled)
     min_pullback_from_high_pct: float = 0.0
+    max_distance_above_ma10_pct: float = 0.0  # Max % price can be above MA10 (0=disabled); ensures near support
+    require_price_above_ma20: bool = False     # Reject if price below MA20 (entering downtrend)
 
 
 # Buy pullback: 60d > 5%, MA bullish, shrinking-volume pullback entry
@@ -115,6 +117,8 @@ BUY_PULLBACK_PARAMS = StrategyParams(
     change_60d_max=40.0,             # Avoid post-surge pullbacks
     volume_ratio_min=0.7,            # Allow shrinking volume to pass
     min_pullback_from_high_pct=3.0,  # Must be >=3% below 20d high for valid pullback
+    max_distance_above_ma10_pct=3.0,  # Must be within 3% above MA10 (near support zone)
+    require_price_above_ma20=True,     # Below MA20 = downtrend, reject
 )
 
 # Breakout: price breaks N-day high, volume confirmation

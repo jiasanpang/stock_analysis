@@ -60,7 +60,7 @@
 | **乖离率** | 当前价相对 MA5 乖离率 > max_bias_pct 排除；龙头可豁免（仅突破策略启用，60d>15%、今日 2–7%、量比>1.5、换手 2–8%） |
 | **连板** | 近 5 日 2+ 次涨停排除（主板 9.5%、创业板/科创板 19%） |
 | **连涨** | 连续上涨天数 > max_consecutive_up_days 排除 |
-| **健康回踩** | 缩量检查（可选）、均线多头排列（可选）、回调幅度限制（max_retracement_pct） |
+| **健康回踩** | 6 层过滤：缩量检查、均线多头、回调幅度、距20日高点≥3%、价格在MA20之上、距MA10≤3% |
 | **MACD 金叉** | 仅 MACD 策略：DIF 上穿 DEA（最近 2 日） |
 | **B 浪风险** | 可选：疑似 B 浪反弹（反弹 35–65%，低点 2–14 日前）排除 |
 
@@ -83,6 +83,9 @@
 | 缩量检查 | **启用** | `require_volume_shrink=True`，健康回踩需缩量 |
 | 最大回调 | **40%** | 收紧自 50%，更严格的回调幅度限制 |
 | 连涨天数 | ≤ **2** | 收紧自 3，更保守 |
+| 距20日高点最小距离 | **3%** | `min_pullback_from_high_pct=3.0`，排除追高（距高点不足3%不选） |
+| 价格在MA20之上 | **✓** | `require_price_above_ma20=True`，跌破MA20排除（下跌通道防护） |
+| 距MA10最大距离 | **3%** | `max_distance_above_ma10_pct=3.0`，距MA10超3%排除（确认支撑位附近） |
 
 **评分逻辑**（趋势 + 回踩 + 量能 + PE + 市值，总分 0–95）：
 
@@ -194,31 +197,56 @@
 | require_ma_bullish | ✓ | ✗ | ✗ | ✗ |
 | require_volume_shrink | **✓** | ✗ | **✓** | ✗ |
 | max_retracement_pct | **40%** | 61.8% | **61.8%** | 80% |
+| min_pullback_from_high_pct | **3.0** | 0 (disabled) | 0 (disabled) | 0 (disabled) |
+| require_price_above_ma20 | **True** | False | False | False |
+| max_distance_above_ma10_pct | **3.0** | 0 (disabled) | 0 (disabled) | 0 (disabled) |
 
 ---
 
 ## 五、健康回踩过滤详解
 
-健康回踩用于区分「健康回踩蓄势待涨」与「趋势转弱进入震荡」，包含三项检查：
+健康回踩用于区分「健康回踩到支撑位」与「下跌通道」与「半空中下跌途中」，包含 **6 层检查**：
 
-### 5.1 缩量回调（可选）
+> **设计思路**：真正的健康回踩应满足三个条件：①从高点回落足够距离（不是追高）；②仍处于上升趋势中（未跌破MA20）；③回落到均线支撑位附近（MA10附近）。通过 6 层过滤，精准定位「回踩到支撑位准备反弹」的时机，排除「下跌通道中的反弹」和「半空中无支撑的下跌途中」。
+
+### 5.1 Check 1: 缩量回调（可选）
 
 - 策略 `require_volume_shrink=True` 时启用
 - 当日为跌或平盘（change_pct ≤ 0）且量比 ≥ 1.0 时排除
 - **底部反转策略启用**（`require_volume_shrink=True`），回调缩量确认底部
 
-### 5.2 均线多头排列（可选）
+### 5.2 Check 2: 均线多头排列（可选）
 
 - 策略 `require_ma_bullish=True` 时启用
 - 要求 MA5 > MA10 > MA20
 - 仅买回踩要求
 
-### 5.3 回调幅度限制
+### 5.3 Check 3: 回调幅度限制
 
 - 公式：`retracement = (近10日高点 - 当前价) / (近10日高点 - 近10日低点)`
 - 仅当 `current_pullback > 0`（即当前价低于近 10 日高点）时检查
 - 若 retracement > max_retracement_pct，排除
 - 底部反转设为 100%， effectively 不限制（因底部时 retracement 常接近 100%）
+
+### 5.4 Check 4: 距20日高点最小距离（`min_pullback_from_high_pct`）
+
+- 仅 buy_pullback 启用（默认 3.0%）
+- 当前价距20日最高点的跌幅必须 ≥ 3%，排除追高
+- 公式：`(20d_high - current_price) / 20d_high × 100 ≥ min_pullback_from_high_pct`
+- 其他策略设为 0（不启用）
+
+### 5.5 Check 5: 价格在 MA20 之上（`require_price_above_ma20`）
+
+- 仅 buy_pullback 启用（默认 True）
+- 当前价必须在 MA20 之上，跌破 MA20 说明已进入下跌通道，排除
+- 防止误把「下跌通道中的反弹」当作「健康回踩」
+
+### 5.6 Check 6: 距 MA10 不超过指定距离（`max_distance_above_ma10_pct`）
+
+- 仅 buy_pullback 启用（默认 3.0%）
+- 当前价与 MA10 的距离不超过 3%，确认价格在支撑位（MA10）附近
+- 公式：`abs(current_price - MA10) / MA10 × 100 ≤ max_distance_above_ma10_pct`
+- 排除「半空中下跌途中」——价格远离所有均线支撑，无着力点
 
 ---
 

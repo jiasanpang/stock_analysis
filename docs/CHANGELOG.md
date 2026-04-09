@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **feat(picker)**: buy_pullback 新增距20日高点最小距离过滤 (`min_pullback_from_high_pct=3.0`)，排除追高
+- **feat(picker)**: buy_pullback 新增 MA20 下跌通道防护 (`require_price_above_ma20`)，跌破 MA20 排除
+- **feat(picker)**: buy_pullback 新增 MA10 支撑位距离过滤 (`max_distance_above_ma10_pct=3.0`)，确认支撑位附近
 - **feat(picker)**: eod_buyback 策略重写为龙虾方案 — 使用 `ts.get_realtime_quotes()` 分批200只查询全市场实时行情，替代 efinance 全市场接口
 - **feat(picker)**: eod_buyback 补充 Tushare Pro `daily_basic` 数据（换手率、总市值）
 - **feat(picker)**: eod_buyback 添加盘后量比过滤（15:00后生效）和 VWAP 实时验证
