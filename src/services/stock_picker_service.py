@@ -109,6 +109,7 @@ class PickerModeParams:
     require_volume_shrink: bool      # Require volume_ratio < 1.0 on pullback
     require_ma_bullish: bool         # Require MA5 > MA10 > MA20
     max_retracement_pct: float       # Max retracement of prior 10d rally (0.5 = 50%)
+    min_pullback_from_high_pct: float = 0.0  # Min % below N-day high to qualify as pullback (0=disabled)
 
     @classmethod
     def for_mode(cls, mode: str) -> "PickerModeParams":
@@ -1105,6 +1106,22 @@ class StockScreener:
                         if retracement > mode_params.max_retracement_pct:
                             logger.debug(
                                 f"[Screener] Exclude {s.code}: retracement {retracement:.1%} > max {mode_params.max_retracement_pct:.1%}"
+                            )
+                            continue
+
+            # Check 4: minimum distance from 20-day high
+            min_pb = getattr(mode_params, 'min_pullback_from_high_pct', 0.0)
+            if min_pb > 0 and high_col and len(close_series) >= 20:
+                high_series_4 = pd.to_numeric(df_daily[high_col], errors="coerce").fillna(0)
+                if len(high_series_4) >= 20:
+                    high_20d = float(high_series_4.tail(20).max())
+                    if high_20d > 0:
+                        distance_from_high_pct = (high_20d - s.price) / high_20d * 100
+                        if distance_from_high_pct < min_pb:
+                            logger.debug(
+                                "[Screener] Exclude %s %s: only %.1f%% below 20d high (%.2f), "
+                                "need >= %.1f%% pullback",
+                                s.code, s.name, distance_from_high_pct, high_20d, min_pb,
                             )
                             continue
 

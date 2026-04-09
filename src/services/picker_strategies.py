@@ -94,6 +94,8 @@ class StrategyParams:
     market_cap_max: Optional[float] = None  # None = no maximum
     # Leader bias exemption: 0=off; when >0, qualified leaders can pass with bias up to this %
     leader_bias_exempt_pct: float = 0.0
+    # Min % below N-day high to qualify as pullback (0=disabled)
+    min_pullback_from_high_pct: float = 0.0
 
 
 # Buy pullback: 60d > 5%, MA bullish, shrinking-volume pullback entry
@@ -112,6 +114,7 @@ BUY_PULLBACK_PARAMS = StrategyParams(
     change_60d_min=5.0,              # Require established uptrend
     change_60d_max=40.0,             # Avoid post-surge pullbacks
     volume_ratio_min=0.7,            # Allow shrinking volume to pass
+    min_pullback_from_high_pct=3.0,  # Must be >=3% below 20d high for valid pullback
 )
 
 # Breakout: price breaks N-day high, volume confirmation
