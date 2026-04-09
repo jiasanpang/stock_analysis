@@ -28,12 +28,28 @@ BUY_PULLBACK = "buy_pullback"
 BREAKOUT = "breakout"
 BOTTOM_REVERSAL = "bottom_reversal"
 MACD_GOLDEN_CROSS = "macd_golden_cross"
+EOD_BUYBACK = "eod_buyback"  # 尾盘买入法 (End-of-Day Buyback)
 
 # Default strategy when PICKER_STRATEGIES not set
 DEFAULT_STRATEGIES = [BUY_PULLBACK]
 
 # All available strategies
-ALL_STRATEGIES = [BUY_PULLBACK, BREAKOUT, BOTTOM_REVERSAL, MACD_GOLDEN_CROSS]
+ALL_STRATEGIES = [BUY_PULLBACK, BREAKOUT, BOTTOM_REVERSAL, MACD_GOLDEN_CROSS, EOD_BUYBACK]
+
+def is_mainboard_stock(code: str) -> bool:
+    """Check if a stock is listed on the main board (SSE/SZSE main).
+
+    Excludes: ChiNext (300xxx), STAR Market (688xxx), BSE (8xxxxx/4xxxxx).
+    """
+    c = (code or "").strip().split(".")[0]
+    if c.startswith("688") or c.startswith("30"):
+        return False  # ChiNext + STAR
+    if c.startswith("8") or c.startswith("4"):
+        return False  # BSE
+    if c.startswith("6") or c.startswith("00") or c.startswith("001") or c.startswith("002") or c.startswith("003"):
+        return True  # SSE main + SZSE main
+    return False
+
 
 # Mid-cap bonus: 50-500 yi (亿) market cap
 _MID_CAP_MIN = 50e8
@@ -44,6 +60,7 @@ STRATEGY_DISPLAY_NAMES: Dict[str, str] = {
     BREAKOUT: "突破",
     BOTTOM_REVERSAL: "底部反转",
     MACD_GOLDEN_CROSS: "MACD金叉",
+    EOD_BUYBACK: "尾盘买入",
 }
 
 
@@ -57,18 +74,24 @@ class StrategyParams:
     pe_max: float
     pe_ideal_low: float
     pe_ideal_high: float
-    # Momentum / entry range
-    daily_change_min: float
-    daily_change_max: float
+    # Momentum / entry range (None = skip filter)
+    daily_change_min: Optional[float] = None
+    daily_change_max: Optional[float] = None
     # Post-filters
-    max_consecutive_up_days: int
-    require_volume_shrink: bool
-    require_ma_bullish: bool
-    max_retracement_pct: float
+    max_consecutive_up_days: int = 3
+    require_volume_shrink: bool = False
+    require_ma_bullish: bool = False
+    max_retracement_pct: float = 0.5
     # Strategy-specific
-    change_60d_min: float  # min 60d change
+    change_60d_min: Optional[float] = None  # min 60d change (None = skip)
     change_60d_max: Optional[float] = None  # max 60d change (None = no cap)
-    volume_ratio_min: float = VOLUME_RATIO_MIN
+    volume_ratio_min: Optional[float] = VOLUME_RATIO_MIN  # None = skip filter
+    # Turnover rate filter (None = skip filter)
+    turnover_rate_min: Optional[float] = TURNOVER_MIN_PCT
+    turnover_rate_max: Optional[float] = TURNOVER_MAX_PCT
+    # Market cap filter (in 亿)
+    market_cap_min: Optional[float] = None  # None = no minimum
+    market_cap_max: Optional[float] = None  # None = no maximum
     # Leader bias exemption: 0=off; when >0, qualified leaders can pass with bias up to this %
     leader_bias_exempt_pct: float = 0.0
 
@@ -145,6 +168,35 @@ MACD_GOLDEN_CROSS_PARAMS = StrategyParams(
     volume_ratio_min=1.0,
 )
 
+# EOD buyback (尾盘买入法): 七条铁律
+# Dynamic indicators (change%, turnover%, volume ratio) are checked exclusively
+# in the Phase-2 realtime filter (_filter_by_realtime), NOT in Phase-1 pre-filter.
+# Only structural / static conditions are used here for pre-screening.
+EOD_BUYBACK_PARAMS = StrategyParams(
+    max_bias_pct=8.0,  # Strict entry, no chasing
+    leader_bias_exempt_pct=0.0,  # No exemption
+    pe_max=100,
+    pe_ideal_low=12,
+    pe_ideal_high=40,
+    # Dynamic momentum: skip pre-filter (delegated to realtime phase)
+    daily_change_min=None,
+    daily_change_max=None,
+    max_consecutive_up_days=5,
+    require_volume_shrink=False,
+    require_ma_bullish=False,
+    max_retracement_pct=0.5,
+    # 60d trend: skip pre-filter (not important for eod_buyback)
+    change_60d_min=None,
+    change_60d_max=None,
+    # Dynamic volume: skip pre-filter (delegated to realtime phase)
+    volume_ratio_min=None,
+    turnover_rate_min=None,
+    turnover_rate_max=None,
+    # Structural: market cap range (slightly wider than realtime 50-300)
+    market_cap_min=48.0,
+    market_cap_max=320.0,
+)
+
 
 # Registry for get_strategy_params (single source of truth)
 _STRATEGY_PARAMS: Dict[str, StrategyParams] = {
@@ -152,6 +204,7 @@ _STRATEGY_PARAMS: Dict[str, StrategyParams] = {
     BREAKOUT: BREAKOUT_PARAMS,
     BOTTOM_REVERSAL: BOTTOM_REVERSAL_PARAMS,
     MACD_GOLDEN_CROSS: MACD_GOLDEN_CROSS_PARAMS,
+    EOD_BUYBACK: EOD_BUYBACK_PARAMS,
 }
 
 
@@ -193,14 +246,23 @@ def parse_picker_strategies(value: Optional[str]) -> List[str]:
 
 
 def filter_momentum(df: pd.DataFrame, params: StrategyParams) -> pd.DataFrame:
-    """Apply strategy-specific momentum filter."""
+    """Apply strategy-specific momentum filter.
+
+    When a param is None the corresponding condition is skipped entirely,
+    so strategies like eod_buyback can delegate dynamic checks to the
+    realtime phase.
+    """
     if "涨跌幅" in df.columns:
         pct = pd.to_numeric(df["涨跌幅"], errors="coerce")
-        df = df[(pct >= params.daily_change_min) & (pct <= params.daily_change_max)]
+        if params.daily_change_min is not None:
+            df = df[pct >= params.daily_change_min]
+        if params.daily_change_max is not None:
+            df = df[pct <= params.daily_change_max]
 
     if "60日涨跌幅" in df.columns:
         pct60 = pd.to_numeric(df["60日涨跌幅"], errors="coerce")
-        df = df[pct60 >= params.change_60d_min]
+        if params.change_60d_min is not None:
+            df = df[pct60 >= params.change_60d_min]
         if params.change_60d_max is not None:
             df = df[pct60 <= params.change_60d_max]
 
@@ -213,21 +275,56 @@ def filter_volume(
     turnover_min: float = TURNOVER_MIN_PCT,
     turnover_max: float = TURNOVER_MAX_PCT,
 ) -> pd.DataFrame:
-    """Apply volume filter with strategy-specific volume_ratio_min."""
-    if "量比" in df.columns:
+    """Apply volume filter with strategy-specific settings.
+
+    When a param is None the corresponding condition is skipped entirely,
+    so strategies like eod_buyback can delegate dynamic checks to the
+    realtime phase.
+
+    Priority:
+    1. Use params.turnover_rate_min/max if explicitly set in strategy
+    2. Fall back to passed-in turnover_min/max
+    3. Use params.market_cap_min/max if set, otherwise apply default amount filter
+    """
+    if "量比" in df.columns and params.volume_ratio_min is not None:
         vr = pd.to_numeric(df["量比"], errors="coerce")
         df = df[vr > params.volume_ratio_min]
 
+    # Turnover rate filter: use params if set, else use passed-in defaults
     if "换手率" in df.columns:
-        tr = pd.to_numeric(df["换手率"], errors="coerce")
-        df = df[(tr > turnover_min) & (tr < turnover_max)]
+        tr_min = getattr(params, 'turnover_rate_min', None)
+        tr_max = getattr(params, 'turnover_rate_max', None)
+        # Only apply turnover filter when at least one bound is defined
+        if tr_min is not None or tr_max is not None:
+            tr = pd.to_numeric(df["换手率"], errors="coerce")
+            # Fall back to passed-in defaults when strategy value is None
+            effective_min = tr_min if tr_min is not None else turnover_min
+            effective_max = tr_max if tr_max is not None else turnover_max
+            df = df[(tr >= effective_min) & (tr <= effective_max)]
 
-    if "成交额" in df.columns and "总市值" in df.columns:
-        amt = pd.to_numeric(df["成交额"], errors="coerce")
+    # Market cap + amount filter
+    if "总市值" in df.columns:
         cap_yi = pd.to_numeric(df["总市值"], errors="coerce") / 1e8
-        ok_small = (cap_yi < MARKET_CAP_TIER_YI) & (amt > AMOUNT_MIN_SMALL_CAP)
-        ok_large = (cap_yi >= MARKET_CAP_TIER_YI) & (amt > AMOUNT_MIN_LARGE_CAP)
-        df = df[ok_small | ok_large]
+        
+        # If strategy defines market_cap_min/max, use those
+        market_cap_min = getattr(params, 'market_cap_min', None)
+        market_cap_max = getattr(params, 'market_cap_max', None)
+        
+        if market_cap_min is not None or market_cap_max is not None:
+            # Strategy-specific market cap range
+            mask = pd.Series([True] * len(cap_yi), index=cap_yi.index)
+            if market_cap_min is not None:
+                mask = mask & (cap_yi >= market_cap_min)
+            if market_cap_max is not None:
+                mask = mask & (cap_yi <= market_cap_max)
+            df = df[mask]
+        else:
+            # Default: use amount-based filter
+            if "成交额" in df.columns:
+                amt = pd.to_numeric(df["成交额"], errors="coerce")
+                ok_small = (cap_yi < MARKET_CAP_TIER_YI) & (amt > AMOUNT_MIN_SMALL_CAP)
+                ok_large = (cap_yi >= MARKET_CAP_TIER_YI) & (amt > AMOUNT_MIN_LARGE_CAP)
+                df = df[ok_small | ok_large]
     elif "成交额" in df.columns:
         amt = pd.to_numeric(df["成交额"], errors="coerce")
         df = df[amt > AMOUNT_MIN_SMALL_CAP]
@@ -337,12 +434,57 @@ def score_macd_golden_cross(row: Dict[str, Any], params: StrategyParams) -> floa
     return mom + vol + to + pe_s + mid
 
 
+def score_eod_buyback(
+    row: Dict[str, Any], params: StrategyParams, *, has_recent_limit_up: bool = False,
+) -> float:
+    """Phase-1 structural scoring for EOD buyback (尾盘买入法).
+
+    Only scores STRUCTURAL / STATIC conditions that do not change intraday.
+    Dynamic indicators (change%, turnover%, volume ratio, VWAP) are evaluated
+    exclusively in the Phase-2 realtime filter (_filter_by_realtime).
+
+    Structural rules scored here:
+        - Rule ①: Main-board only
+        - Rule ⑥: Market cap 50-300 yi
+        - Rule ④: Recent limit-up within 20 trading days (bonus)
+
+    Args:
+        row: Stock data dict from DataFrame row.
+        params: Strategy parameters.
+        has_recent_limit_up: Whether stock had a limit-up day in recent 20 trading days.
+    """
+    code = str(row.get("代码", ""))
+
+    # Rule ①: Main-board only — non-mainboard stocks score 0
+    if not is_mainboard_stock(code):
+        return 0.0
+
+    total_mv = float(row.get("总市值", 0) or 0)
+
+    # Rule ⑥: Market cap 50-300 yi (optimal center ~150 yi scores highest)
+    market_cap_yi = total_mv / 1e8
+    if 100 <= market_cap_yi <= 200:
+        cap = 30.0  # sweet spot
+    elif 50 <= market_cap_yi < 100 or 200 < market_cap_yi <= 300:
+        cap = 20.0  # acceptable range
+    elif 40 <= market_cap_yi < 50 or 300 < market_cap_yi <= 350:
+        cap = 10.0  # borderline
+    else:
+        cap = 0.0
+
+    # Rule ④: Bonus for recent limit-up within 20 trading days
+    limit_up_bonus = 15.0 if has_recent_limit_up else 0.0
+
+    return cap + limit_up_bonus
+
+
 # Populate _SCORERS after all scorers are defined
 _SCORERS.update({
     BUY_PULLBACK: score_buy_pullback,
     BREAKOUT: score_breakout,
     BOTTOM_REVERSAL: score_bottom_reversal,
     MACD_GOLDEN_CROSS: score_macd_golden_cross,
+    EOD_BUYBACK: score_eod_buyback,
 })
 
 

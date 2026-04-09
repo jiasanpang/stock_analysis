@@ -159,6 +159,7 @@ def eastmoney_patch():
                 "fund.eastmoney.com",
                 "push2.eastmoney.com",
                 "push2his.eastmoney.com",
+                "push2delay.eastmoney.com",
             ]
         )
         if not is_target:
@@ -172,6 +173,11 @@ def eastmoney_patch():
         if nid:
             headers["Cookie"] = f"nid18={nid}"
         kwargs["headers"] = headers
+        # Increase timeout for slow Eastmoney endpoints (push2delay default is 15s)
+        if "timeout" not in kwargs or kwargs["timeout"] is None:
+            kwargs["timeout"] = 30
+        elif isinstance(kwargs["timeout"], (int, float)) and kwargs["timeout"] < 30:
+            kwargs["timeout"] = 30
         # 随机休眠，降低被封风险
         sleep_time = random.uniform(1, 4)
         time.sleep(sleep_time)

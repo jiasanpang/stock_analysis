@@ -772,21 +772,24 @@ class AkshareFetcher(BaseFetcher):
         
         return df
     
-    def get_realtime_quote(self, stock_code: str, source: str = "em") -> Optional[UnifiedRealtimeQuote]:
+    def get_realtime_quote(
+        self, stock_code: str, source: str = "em", force_refresh: bool = False
+    ) -> Optional[UnifiedRealtimeQuote]:
         """
-        获取实时行情数据（支持多数据源）
+        Get realtime quote data (supports multiple data sources).
 
-        数据源优先级（可配置）：
-        1. em: 东方财富（akshare ak.stock_zh_a_spot_em）- 数据最全，含量比/PE/PB/市值等
-        2. sina: 新浪财经（akshare ak.stock_zh_a_spot）- 轻量级，基本行情
-        3. tencent: 腾讯直连接口 - 单股票查询，负载小
+        Data source priority (configurable):
+        1. em: Eastmoney (akshare ak.stock_zh_a_spot_em) - richest fields
+        2. sina: Sina Finance - lightweight, basic quote
+        3. tencent: Tencent direct API - single stock query, low load
 
         Args:
-            stock_code: 股票/ETF代码
-            source: 数据源类型，可选 "em", "sina", "tencent"
+            stock_code: Stock / ETF code
+            source: Data source type, one of "em", "sina", "tencent"
+            force_refresh: If True, bypass cache and fetch fresh data from API
 
         Returns:
-            UnifiedRealtimeQuote 对象，获取失败返回 None
+            UnifiedRealtimeQuote object, or None on failure
         """
         # 检查熔断器状态
         circuit_breaker = get_realtime_circuit_breaker()
@@ -804,17 +807,19 @@ class AkshareFetcher(BaseFetcher):
         elif _is_hk_code(stock_code):
             return self._get_hk_realtime_quote(stock_code)
         elif _is_etf_code(stock_code):
-            return self._get_etf_realtime_quote(stock_code)
+            return self._get_etf_realtime_quote(stock_code, force_refresh=force_refresh)
         else:
-            # 普通 A 股：根据 source 选择数据源
+            # A-shares: route by source
             if source == "sina":
                 return self._get_stock_realtime_quote_sina(stock_code)
             elif source == "tencent":
                 return self._get_stock_realtime_quote_tencent(stock_code)
             else:
-                return self._get_stock_realtime_quote_em(stock_code)
+                return self._get_stock_realtime_quote_em(stock_code, force_refresh=force_refresh)
     
-    def _get_stock_realtime_quote_em(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+    def _get_stock_realtime_quote_em(
+        self, stock_code: str, force_refresh: bool = False
+    ) -> Optional[UnifiedRealtimeQuote]:
         """
         获取普通 A 股实时行情数据（东方财富数据源）
         
@@ -827,9 +832,9 @@ class AkshareFetcher(BaseFetcher):
         source_key = "akshare_em"
         
         try:
-            # 检查缓存
+            # Check cache (skip when force_refresh is requested)
             current_time = time.time()
-            if (_realtime_cache['data'] is not None and 
+            if (not force_refresh and _realtime_cache['data'] is not None and
                 current_time - _realtime_cache['timestamp'] < _realtime_cache['ttl']):
                 df = _realtime_cache['data']
                 cache_age = int(current_time - _realtime_cache['timestamp'])
@@ -1217,7 +1222,7 @@ class AkshareFetcher(BaseFetcher):
             circuit_breaker.record_failure(source_key, failure_message)
             return None
     
-    def _get_etf_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+    def _get_etf_realtime_quote(self, stock_code: str, force_refresh: bool = False) -> Optional[UnifiedRealtimeQuote]:
         """
         获取 ETF 基金实时行情数据
         
@@ -1235,9 +1240,9 @@ class AkshareFetcher(BaseFetcher):
         source_key = "akshare_etf"
         
         try:
-            # 检查缓存
+            # Check cache (skip when force_refresh is requested)
             current_time = time.time()
-            if (_etf_realtime_cache['data'] is not None and 
+            if (not force_refresh and _etf_realtime_cache['data'] is not None and
                 current_time - _etf_realtime_cache['timestamp'] < _etf_realtime_cache['ttl']):
                 df = _etf_realtime_cache['data']
                 logger.debug(f"[缓存命中] 使用缓存的ETF实时行情数据")

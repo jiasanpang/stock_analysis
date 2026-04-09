@@ -10,7 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- Picker page: Pill-style strategy chips (buy_pullback, breakout, bottom_reversal, macd_golden_cross), card container, result view shows strategy + timestamp.
+- Real-time filtering stage (Stage 1.5) for stock picker: After quantitative screening, filter candidates by live market conditions (limit-up/down, daily price range, volume spike). **Enables intraday picking & same-day trading**.
+  - `PICKER_ENABLE_REALTIME_FILTER` (bool, default true): Main toggle
+  - `PICKER_REALTIME_EXCLUDE_LIMIT_UP` (bool, default true): Exclude up-limit-locked stocks
+  - `PICKER_REALTIME_EXCLUDE_LIMIT_DOWN` (bool, default true): Exclude down-limit-locked stocks
+  - `PICKER_REALTIME_DAILY_CHG_MIN` (float, optional): Min daily gain % (e.g. -2 for at least -2% pullback)
+  - `PICKER_REALTIME_DAILY_CHG_MAX` (float, optional): Max daily gain % (e.g. 8 to avoid chasing too high)
+  - `PICKER_REALTIME_MAX_VOLUME_RATIO` (float, default 0): Filter abnormal volume spikes (0 = no limit)
+- New guide: `docs/realtime-picker-guide.md` with 3 ready-to-use templates (conservative/balanced/aggressive)
+- Demo script: `test_realtime_filter_demo.py` shows filtering logic in action
+
+### Changed
+- Picker pipeline now has 3 stages:
+  1. Quantitative screening (historical daily data)
+  2. **Real-time filtering** (NEW: intraday market conditions)
+  3. AI selection (LLM picks 1-5 from filtered pool)
+
+### Picker page: Pill-style strategy chips (buy_pullback, breakout, bottom_reversal, macd_golden_cross), card container, result view shows strategy + timestamp.
 - Picker backtest: Strategy selection (replaces mode dropdown). API accepts `picker_strategies`; history stores `picker_strategies_json`.
 - Per-strategy leader bias exemption: `leader_bias_exempt_pct` in StrategyParams (breakout=14%, others=0). Removed global `PICKER_LEADER_BIAS_EXEMPT_PCT`.
 

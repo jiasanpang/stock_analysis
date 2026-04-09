@@ -693,23 +693,24 @@ class DataFetcherManager:
             logger.error(f"[预取] 批量预取异常: {e}")
             return 0
     
-    def get_realtime_quote(self, stock_code: str):
+    def get_realtime_quote(self, stock_code: str, force_refresh: bool = False):
         """
-        获取实时行情数据（自动故障切换）
-        
-        故障切换策略（按配置的优先级）：
-        1. 美股：使用 YfinanceFetcher.get_realtime_quote()
+        Get realtime quote data (with automatic failover).
+
+        Failover strategy (by configured priority):
+        1. US stocks: use YfinanceFetcher.get_realtime_quote()
         2. EfinanceFetcher.get_realtime_quote()
-        3. AkshareFetcher.get_realtime_quote(source="em")  - 东财
-        4. AkshareFetcher.get_realtime_quote(source="sina") - 新浪
-        5. AkshareFetcher.get_realtime_quote(source="tencent") - 腾讯
-        6. 返回 None（降级兜底）
-        
+        3. AkshareFetcher.get_realtime_quote(source="em")  - Eastmoney
+        4. AkshareFetcher.get_realtime_quote(source="sina") - Sina
+        5. AkshareFetcher.get_realtime_quote(source="tencent") - Tencent
+        6. Return None (graceful degradation)
+
         Args:
-            stock_code: 股票代码
-            
+            stock_code: Stock code
+            force_refresh: If True, bypass cache in underlying fetchers
+
         Returns:
-            UnifiedRealtimeQuote 对象，所有数据源都失败则返回 None
+            UnifiedRealtimeQuote object, or None if all sources fail
         """
         # Normalize code (strip SH/SZ prefix etc.)
         stock_code = normalize_stock_code(stock_code)
@@ -773,35 +774,43 @@ class DataFetcherManager:
                 quote = None
                 
                 if source == "efinance":
-                    # 尝试 EfinanceFetcher
+                    # Try EfinanceFetcher
                     for fetcher in self._fetchers:
                         if fetcher.name == "EfinanceFetcher":
                             if hasattr(fetcher, 'get_realtime_quote'):
-                                quote = fetcher.get_realtime_quote(stock_code)
+                                quote = fetcher.get_realtime_quote(
+                                    stock_code, force_refresh=force_refresh
+                                )
                             break
                 
                 elif source == "akshare_em":
-                    # 尝试 AkshareFetcher 东财数据源
+                    # Try AkshareFetcher Eastmoney source
                     for fetcher in self._fetchers:
                         if fetcher.name == "AkshareFetcher":
                             if hasattr(fetcher, 'get_realtime_quote'):
-                                quote = fetcher.get_realtime_quote(stock_code, source="em")
+                                quote = fetcher.get_realtime_quote(
+                                    stock_code, source="em", force_refresh=force_refresh
+                                )
                             break
                 
                 elif source == "akshare_sina":
-                    # 尝试 AkshareFetcher 新浪数据源
+                    # Try AkshareFetcher Sina source
                     for fetcher in self._fetchers:
                         if fetcher.name == "AkshareFetcher":
                             if hasattr(fetcher, 'get_realtime_quote'):
-                                quote = fetcher.get_realtime_quote(stock_code, source="sina")
+                                quote = fetcher.get_realtime_quote(
+                                    stock_code, source="sina", force_refresh=force_refresh
+                                )
                             break
                 
                 elif source in ("tencent", "akshare_qq"):
-                    # 尝试 AkshareFetcher 腾讯数据源
+                    # Try AkshareFetcher Tencent source
                     for fetcher in self._fetchers:
                         if fetcher.name == "AkshareFetcher":
                             if hasattr(fetcher, 'get_realtime_quote'):
-                                quote = fetcher.get_realtime_quote(stock_code, source="tencent")
+                                quote = fetcher.get_realtime_quote(
+                                    stock_code, source="tencent", force_refresh=force_refresh
+                                )
                             break
                 
                 elif source == "tushare":
@@ -821,20 +830,30 @@ class DataFetcherManager:
                         if not self._quote_needs_supplement(primary_quote):
                             return primary_quote
                         # Otherwise, continue to try later sources for missing fields
-                        logger.debug(f"[实时行情] {stock_code} 部分字段缺失，尝试从后续数据源补充")
-                        supplement_attempts = 0
+                        missing = self._get_missing_supplement_fields(primary_quote)
+                        logger.debug(
+                            f"[实时行情] {stock_code} 部分字段缺失 {missing}，尝试从后续数据源补充"
+                        )
                     else:
-                        # Supplement missing fields from this source (limit attempts)
-                        supplement_attempts += 1
-                        if supplement_attempts > 1:
-                            logger.debug(f"[实时行情] {stock_code} 补充尝试已达上限，停止继续")
-                            break
+                        # Supplement missing fields from this source
                         merged = self._merge_quote_fields(primary_quote, quote)
                         if merged:
                             logger.info(f"[实时行情] {stock_code} 从 {source} 补充了缺失字段: {merged}")
+                        else:
+                            logger.debug(f"[实时行情] {stock_code} 从 {source} 未能补充任何字段")
                         # Stop supplementing once all key fields are filled
                         if not self._quote_needs_supplement(primary_quote):
                             break
+                elif quote is not None and primary_quote is not None:
+                    # quote has no basic price data but may still carry supplement
+                    # fields (e.g. turnover_rate from akshare_em)
+                    merged = self._merge_quote_fields(primary_quote, quote)
+                    if merged:
+                        logger.info(
+                            f"[实时行情] {stock_code} 从 {source} (无基础价格) 补充了字段: {merged}"
+                        )
+                    if not self._quote_needs_supplement(primary_quote):
+                        break
                     
             except Exception as e:
                 error_msg = f"[{source}] 失败: {str(e)}"
@@ -869,6 +888,11 @@ class DataFetcherManager:
             if getattr(quote, f, None) is None:
                 return True
         return False
+
+    @classmethod
+    def _get_missing_supplement_fields(cls, quote) -> list:
+        """Return list of supplement field names that are still None."""
+        return [f for f in cls._SUPPLEMENT_FIELDS if getattr(quote, f, None) is None]
 
     @classmethod
     def _merge_quote_fields(cls, primary, secondary) -> list:
@@ -1125,3 +1149,5 @@ class DataFetcherManager:
                 logger.warning(f"[{fetcher.name}] 获取板块排行失败: {e}")
                 continue
         return [], []
+
+

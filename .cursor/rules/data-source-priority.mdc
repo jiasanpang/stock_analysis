@@ -1,0 +1,78 @@
+# 数据源优先级规范 (Data Source Priority)
+
+用户有 5000 积分的 Tushare Pro Token，所以在所有涉及实时数据的场景中，应该**优先使用 Tushare**。
+
+## 1. 实时行情数据源优先级
+
+在 `src/config.py` 中的 `realtime_source_priority` 配置：
+
+### 推荐配置（有 5000+ 积分的 Tushare Token）
+
+```python
+realtime_source_priority: str = "tushare,tencent,akshare_sina,efinance,akshare_em"
+```
+
+或在 `.env` 中配置：
+
+```bash
+REALTIME_SOURCE_PRIORITY=tushare,tencent,akshare_sina,efinance,akshare_em
+```
+
+### 优先级原因
+
+| 数据源 | 优先级 | 原因 |
+|-------|--------|------|
+| **Tushare** | 1️⃣ 最高 | 5000 积分账号，数据最全最准，支持 API 调用 |
+| Tencent | 2️⃣ 次高 | 腾讯财经，快速但数据项目较少 |
+| AkShare Sina | 3️⃣ 中等 | 新浪财经，稳定但可能有延迟 |
+| efinance | 4️⃣ 较低 | 东方财富库，容易被限流 |
+| AkShare EM | 5️⃣ 最低 | 东财集群，最容易被限流 |
+
+## 2. 日线数据源优先级
+
+日线数据也应该优先用 Tushare（已在 `data_provider/base.py` 中实现）：
+
+```python
+# _fetch_spot_data() 方法的优先级：
+# 1. Tushare (priority: 0)
+# 2. AkShare (priority: 1)
+# 3. efinance (priority: 2)
+```
+
+## 3. 选股场景中的应用
+
+### 量化筛选阶段（Stage 1）
+- 使用 Tushare 获取**日线数据**（60 日涨跌幅、均线、MACD 等）
+- 作用：量化指标计算需要历史数据，Tushare 最稳定
+
+### 实时筛选阶段（Stage 1.5）
+- 使用 Tushare 获取**实时报价**（当前涨幅、量比、换手率）
+- 作用：检查涨停/跌停、异常放量等需要最新数据
+
+### 策略：Tushare 主力，其他源作备选
+```python
+# 在 get_realtime_quote() 中
+for source in source_priority:  # ["tushare", "tencent", ...]
+    try:
+        quote = fetcher.get_realtime_quote(stock_code)
+        if quote:
+            return quote  # 成功就返回，不再尝试其他源
+    except Exception:
+        continue  # 失败才尝试下一个源
+```
+
+## 4. 配置确认
+
+✅ 用户已确认：
+- 拥有 5000 积分 Tushare Token
+- Token 已在 `.env` 中配置：`TUSHARE_TOKEN=2d425d1ab6ca98da205f5db031dc69ca3b46c85910f1bdcc1050e641`
+- 每分钟 500 请求额度（对选股场景足够）
+
+因此所有涉及实时/日线数据的开发，**必须优先考虑 Tushare 作为第一数据源**。
+
+## 5. 相关文件
+
+- `src/config.py` - 配置管理
+- `data_provider/base.py` - 数据获取管理
+- `.env` - 环境变量配置
+- `src/services/stock_picker_service.py` - 选股服务（使用实时筛选）

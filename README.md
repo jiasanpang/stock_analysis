@@ -60,6 +60,7 @@ Docker：`docker-compose -f docker/docker-compose.yml up -d server`
 - [配置指南](docs/guide.md) — 环境变量、Docker、LLM、通知渠道
 - [分析策略指南](docs/analysis-strategy-guide.md) — 核心理念、选股原则、策略说明
 - [选股策略详解](docs/picker-strategies-guide.md) — 量化筛选四类策略（买回踩/突破/底部反转/MACD金叉）参数与流程
+- **[实时行情筛选指南](docs/realtime-picker-guide.md)** — 🆕 支持当天选股+操作，实时筛选规则配置
 - [远端部署](docs/remote-deploy.md) — Token 获取、自建服务器
 - [常见问题](docs/faq.md)
 - [更新日志](docs/CHANGELOG.md)

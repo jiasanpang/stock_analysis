@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple  # noqa: F401 - Dict used in screen()
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from json_repair import repair_json
@@ -402,6 +403,10 @@ class StockScreener:
         self._allow_loss = allow_loss
         self._stock_basic_cache: Optional[pd.DataFrame] = None  # Reuse across days in backtest
 
+    # Strategies that require daily spot data (fetched via _fetch_spot_data).
+    # eod_buyback uses a dedicated realtime full-market path and does NOT need daily data.
+    DAILY_DATA_STRATEGIES = {"buy_pullback", "breakout", "bottom_reversal", "macd_golden_cross"}
+
     def screen(self, trade_date: Optional[str] = None) -> Tuple[List[ScreenedStock], ScreenStats, Dict[str, List[ScreenedStock]]]:
         """Run the full screening pipeline. Returns (candidates, stats, candidates_per_strategy).
         When trade_date is provided (YYYYMMDD), run historical screening (Tushare only).
@@ -409,20 +414,16 @@ class StockScreener:
         stats = ScreenStats()
         self._as_of_date = self._trade_date_to_iso(trade_date) if trade_date else None
 
-        df = self._fetch_spot_data(trade_date)
-        if df is None or df.empty:
-            logger.warning("[Screener] No spot data available")
-            return [], stats, {}
+        # Determine which strategies need daily data vs realtime-only path
+        daily_strategies = [s for s in self._picker_strategies if s in self.DAILY_DATA_STRATEGIES]
+        realtime_only_strategies = [s for s in self._picker_strategies if s not in self.DAILY_DATA_STRATEGIES]
+        needs_daily = len(daily_strategies) > 0
 
-        stats.total_stocks = len(df)
-        logger.info(f"[Screener] Starting with {stats.total_stocks} stocks, strategies={self._picker_strategies}")
+        if daily_strategies:
+            logger.info(f"[Screener] Daily-data strategies: {daily_strategies}")
+        if realtime_only_strategies:
+            logger.info(f"[Screener] Realtime-only strategies (skip daily fetch): {realtime_only_strategies}")
 
-        # Layer 1: Basic quality filter (shared, pe_max=100)
-        df = self._filter_basic_for_strategies(df)
-        stats.after_basic = len(df)
-        logger.info(f"[Screener] After basic filter: {len(df)}")
-
-        # Run each strategy and merge
         from src.services.picker_strategies import (
             get_strategy_params,
             filter_momentum,
@@ -433,30 +434,73 @@ class StockScreener:
         )
 
         candidates_per_strategy: Dict[str, List[ScreenedStock]] = {}
-        for strategy_id in self._picker_strategies:
-            params = get_strategy_params(strategy_id)
-            df_s = filter_momentum(df.copy(), params)
-            stats.after_momentum = len(df_s)
-            df_s = filter_volume(df_s, params, self._turnover_min, self._turnover_max)
-            stats.after_volume = len(df_s)
 
-            cands = score_and_rank(df_s, strategy_id, params, top_n=PICKER_TOP_N_PER_STRATEGY)
-            cands = self._filter_by_bias(
-                cands,
-                max_bias_pct=params.max_bias_pct,
-                leader_bias_exempt_pct=getattr(params, "leader_bias_exempt_pct", 0.0),
-            )
-            cands = self._filter_limit_up_streak(cands)
-            cands = self._filter_consecutive_up_days(cands, max_up_days=params.max_consecutive_up_days)
-            cands = self._filter_healthy_pullback(cands, params=params)
-            if strategy_id == MACD_GOLDEN_CROSS:
-                cands = self._filter_macd_golden_cross(cands, lookback_days=MACD_LOOKBACK_DAYS)
-            if self._enable_b_wave_filter:
-                cands = self._filter_b_wave_risk(cands)
+        # --- Daily-data pipeline: only fetch spot data when at least one strategy needs it ---
+        if needs_daily:
+            df = self._fetch_spot_data(trade_date)
+            if df is None or df.empty:
+                logger.warning("[Screener] No spot data available for daily strategies")
+                # Daily strategies cannot proceed, but realtime strategies may still run below
+                df = None
+            else:
+                stats.total_stocks = len(df)
+                logger.info(
+                    f"[Screener] Starting daily pipeline with {stats.total_stocks} stocks, "
+                    f"strategies={daily_strategies}"
+                )
 
-            if cands:
-                candidates_per_strategy[strategy_id] = cands
-                logger.info(f"[Screener] {strategy_id}: {len(cands)} candidates")
+                # Layer 1: Basic quality filter (shared, pe_max=100)
+                df = self._filter_basic_for_strategies(df)
+                stats.after_basic = len(df)
+                logger.info(f"[Screener] After basic filter: {len(df)}")
+
+                # Run each daily-data strategy
+                for strategy_id in daily_strategies:
+                    params = get_strategy_params(strategy_id)
+                    df_s = filter_momentum(df.copy(), params)
+                    stats.after_momentum = len(df_s)
+                    df_s = filter_volume(df_s, params)
+                    stats.after_volume = len(df_s)
+
+                    logger.debug(
+                        f"[Screener] {strategy_id}: after filter_momentum={stats.after_momentum}, "
+                        f"after filter_volume={stats.after_volume}"
+                    )
+
+                    cands = score_and_rank(df_s, strategy_id, params, top_n=PICKER_TOP_N_PER_STRATEGY)
+                    cands = self._filter_by_bias(
+                        cands,
+                        max_bias_pct=params.max_bias_pct,
+                        leader_bias_exempt_pct=getattr(params, "leader_bias_exempt_pct", 0.0),
+                    )
+                    cands = self._filter_limit_up_streak(cands)
+                    cands = self._filter_consecutive_up_days(cands, max_up_days=params.max_consecutive_up_days)
+                    cands = self._filter_healthy_pullback(cands, params=params)
+                    if strategy_id == MACD_GOLDEN_CROSS:
+                        cands = self._filter_macd_golden_cross(cands, lookback_days=MACD_LOOKBACK_DAYS)
+                    if self._enable_b_wave_filter:
+                        cands = self._filter_b_wave_risk(cands)
+
+                    if cands:
+                        candidates_per_strategy[strategy_id] = cands
+                        logger.info(f"[Screener] {strategy_id}: {len(cands)} candidates")
+                        if logger.isEnabledFor(10):  # DEBUG level
+                            top5 = cands[:5]
+                            top5_str = ", ".join(f"{c.code}({c.score:.1f})" for c in top5)
+                            logger.debug(f"[Screener] {strategy_id} top-5: {top5_str}")
+        else:
+            logger.info("[Screener] Skipping daily data fetch (only realtime strategies selected)")
+
+        # --- eod_buyback: dedicated realtime full-market screening path ---
+        if "eod_buyback" in self._picker_strategies and self._data_manager:
+            logger.info("[Screener] Running eod_buyback via realtime full-market screening...")
+            eod_rt_cands = self._screen_eod_buyback_realtime()
+            if eod_rt_cands:
+                candidates_per_strategy["eod_buyback"] = eod_rt_cands
+                logger.info(f"[Screener] eod_buyback (realtime path): {len(eod_rt_cands)} candidates")
+            else:
+                candidates_per_strategy.pop("eod_buyback", None)
+                logger.info("[Screener] eod_buyback (realtime path): 0 candidates")
 
         if not candidates_per_strategy:
             stats.final_pool = 0
@@ -521,8 +565,335 @@ class StockScreener:
                     results[res[0]] = res[1]
         return results
 
+    def _screen_eod_buyback_realtime(self) -> List[ScreenedStock]:
+        """Screen eod_buyback via Tushare batch realtime quotes (lobster approach).
+
+        Simple approach: fetch all A-share codes, batch query 200 at a time
+        via ts.get_realtime_quotes(), filter in one pass.
+
+        Steps:
+          1. Get all stock codes from available fetcher
+          2. Batch query realtime quotes (200 per batch) via ts.get_realtime_quotes()
+          3. Compute change_pct from price / pre_close
+          4. One-pass filter: mainboard + change 3-6% + turnover 8-15% + market_cap 50-300yi
+          5. Check recent limit-up (Rule 4) via daily data
+          6. Return ScreenedStock list
+        """
+        import tushare as ts
+        from src.services.picker_strategies import is_mainboard_stock
+
+        if not self._data_manager:
+            logger.warning("[EOD-RT] No data_manager")
+            return []
+
+        # Step 1: Get all stock codes
+        t0 = time.time()
+
+        all_codes: list = []
+        for fetcher in self._data_manager._fetchers:
+            if hasattr(fetcher, "get_stock_list"):
+                try:
+                    df_list = fetcher.get_stock_list()
+                    if df_list is not None and not df_list.empty:
+                        all_codes = df_list["code"].tolist()
+                        logger.info(
+                            f"[EOD-RT] Got {len(all_codes)} stock codes from {type(fetcher).__name__}"
+                        )
+                        break
+                except Exception as e:
+                    logger.debug(f"[EOD-RT] get_stock_list failed from {type(fetcher).__name__}: {e}")
+
+        if not all_codes:
+            logger.warning("[EOD-RT] Failed to get stock code list")
+            return []
+
+        # Step 2: Batch query realtime quotes (200 per batch)
+        BATCH_SIZE = 200
+        all_dfs: list = []
+        for i in range(0, len(all_codes), BATCH_SIZE):
+            batch = all_codes[i : i + BATCH_SIZE]
+            try:
+                df_batch = ts.get_realtime_quotes(batch)
+                if df_batch is not None and not df_batch.empty:
+                    all_dfs.append(df_batch)
+            except Exception as e:
+                logger.debug(f"[EOD-RT] Batch {i // BATCH_SIZE} failed: {e}")
+
+        if not all_dfs:
+            logger.warning("[EOD-RT] No realtime data from any batch")
+            return []
+
+        df = pd.concat(all_dfs, ignore_index=True)
+        logger.info(f"[EOD-RT] Fetched realtime quotes for {len(df)} stocks in {time.time() - t0:.1f}s")
+
+        # Step 2.5: Supplement turnover_rate and total_mv from Tushare Pro daily_basic
+        # ts.get_realtime_quotes() doesn't provide these fields; fetch the latest
+        # trading day's daily_basic data as a supplement.
+        try:
+            tushare_fetcher = None
+            for fetcher in self._data_manager._fetchers:
+                if type(fetcher).__name__ == "TushareFetcher":
+                    tushare_fetcher = fetcher
+                    break
+
+            if tushare_fetcher and tushare_fetcher._api:
+                from src.core.trading_calendar import get_last_trading_day as _get_ltd
+
+                now_sh_sup = datetime.now(ZoneInfo("Asia/Shanghai"))
+                trade_day = _get_ltd("cn", now_sh_sup.date())
+                if trade_day is None:
+                    # Fallback: try today, then yesterday, then day-before-yesterday
+                    from datetime import timedelta as _td
+                    for offset in (0, 1, 2):
+                        candidate = (now_sh_sup.date() - _td(days=offset)).strftime("%Y%m%d")
+                        tushare_fetcher._check_rate_limit()
+                        _df_try = tushare_fetcher._api.daily_basic(
+                            trade_date=candidate, fields="ts_code,turnover_rate,total_mv"
+                        )
+                        if _df_try is not None and not _df_try.empty:
+                            trade_day = (now_sh_sup.date() - _td(days=offset))
+                            break
+
+                if trade_day is not None:
+                    trade_date_str = trade_day.strftime("%Y%m%d")
+                    tushare_fetcher._check_rate_limit()
+                    df_basic = tushare_fetcher._api.daily_basic(
+                        trade_date=trade_date_str, fields="ts_code,turnover_rate,total_mv"
+                    )
+                    if df_basic is not None and not df_basic.empty:
+                        # Convert ts_code (e.g. "000001.SZ") to plain code ("000001")
+                        df_basic["code"] = df_basic["ts_code"].str.split(".").str[0]
+                        # total_mv from Tushare Pro is in 万元, convert to 亿
+                        df_basic["total_mv_yi"] = df_basic["total_mv"] / 1e4
+                        df = df.merge(
+                            df_basic[["code", "turnover_rate", "total_mv_yi"]],
+                            on="code", how="left",
+                        )
+                        logger.info(
+                            f"[EOD-RT] Supplemented turnover/mv from daily_basic({trade_date_str}): "
+                            f"{df['turnover_rate'].notna().sum()} turnover, "
+                            f"{df['total_mv_yi'].notna().sum()} market_cap"
+                        )
+                    else:
+                        logger.warning(f"[EOD-RT] daily_basic returned empty for {trade_date_str}")
+                else:
+                    logger.warning("[EOD-RT] Could not determine latest trading day for daily_basic")
+            else:
+                logger.debug("[EOD-RT] TushareFetcher not available, skipping daily_basic supplement")
+        except Exception as e:
+            logger.warning(f"[EOD-RT] Failed to supplement from daily_basic: {e}")
+
+        logger.debug(f"[EOD-RT] DataFrame columns after supplement: {list(df.columns)}")
+
+        # Step 3: Compute change_pct from price and pre_close
+        df["price"] = pd.to_numeric(df.get("price", pd.Series(dtype=float)), errors="coerce")
+        # pre_close may be named 'pre_close' or 'settlement' depending on tushare version
+        pre_close_col = "pre_close" if "pre_close" in df.columns else "settlement"
+        df["pre_close"] = pd.to_numeric(df.get(pre_close_col, pd.Series(dtype=float)), errors="coerce")
+        df["calc_change_pct"] = (
+            (df["price"] - df["pre_close"]) / df["pre_close"].replace(0, float("nan"))
+        ) * 100
+
+        # Step 4: One-pass filter
+        mask = pd.Series(True, index=df.index)
+
+        # Rule 1: mainboard only
+        code_col = "code"
+        if code_col in df.columns:
+            mask &= df[code_col].apply(lambda c: is_mainboard_stock(str(c)))
+
+        # Rule: exclude ST
+        if "name" in df.columns:
+            mask &= ~df["name"].str.contains("ST", na=False, case=False)
+
+        # Rule 2: change 3%-6%
+        mask &= (df["calc_change_pct"] >= 3.0) & (df["calc_change_pct"] <= 6.0)
+
+        # Rule 3: turnover 8%-15% (from realtime 'turnover' or daily_basic 'turnover_rate')
+        turnover_col = None
+        for col_name in ["turnover", "turnover_rate"]:
+            if col_name in df.columns:
+                turnover_col = col_name
+                break
+        if turnover_col:
+            turnover = pd.to_numeric(df[turnover_col], errors="coerce")
+            has_turnover = turnover.notna() & (turnover > 0)
+            if has_turnover.any():
+                mask &= ~has_turnover | ((turnover >= 8.0) & (turnover <= 15.0))
+                logger.info(
+                    f"[EOD-RT] Turnover filter applied via '{turnover_col}' "
+                    f"({has_turnover.sum()} stocks had data)"
+                )
+            else:
+                logger.info("[EOD-RT] Turnover data unavailable, skipping filter")
+        else:
+            logger.info("[EOD-RT] No turnover column, skipping filter")
+
+        # Rule 6: market cap 50-300yi (from realtime or daily_basic 'total_mv_yi')
+        # ts.get_realtime_quotes may provide mktcap in 万元 units; daily_basic total_mv_yi is already in 亿
+        mktcap_col = None
+        mktcap_already_yi = False
+        for col_name in ["mktcap", "nmc", "market_cap"]:
+            if col_name in df.columns:
+                mktcap_col = col_name
+                break
+        if mktcap_col is None and "total_mv_yi" in df.columns:
+            mktcap_col = "total_mv_yi"
+            mktcap_already_yi = True
+        if mktcap_col:
+            mktcap = pd.to_numeric(df[mktcap_col], errors="coerce")
+            # Convert to 亿: realtime mktcap from tushare is in 万元; total_mv_yi is already in 亿
+            mktcap_yi = mktcap if mktcap_already_yi else mktcap / 1e4
+            has_mktcap = mktcap.notna() & (mktcap > 0)
+            if has_mktcap.any():
+                mask &= ~has_mktcap | ((mktcap_yi >= 50.0) & (mktcap_yi <= 300.0))
+                logger.info(
+                    f"[EOD-RT] Market cap filter applied via '{mktcap_col}' "
+                    f"({has_mktcap.sum()} stocks had data)"
+                )
+            else:
+                logger.info("[EOD-RT] Market cap data unavailable, skipping filter")
+        else:
+            logger.info("[EOD-RT] No market cap column, skipping filter")
+
+        # Rule 7: VWAP — price must be >= VWAP (applies both intraday and post-close)
+        # ts.get_realtime_quotes: amount is in 元, volume is in 股 => VWAP = amount / volume (元/股), same unit as price
+        if "volume" in df.columns and "amount" in df.columns:
+            rt_volume_vwap = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+            rt_amount_vwap = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
+            vwap_valid = (rt_volume_vwap > 0) & (rt_amount_vwap > 0)
+            vwap = rt_amount_vwap / rt_volume_vwap.replace(0, float("nan"))
+            # Only filter rows where VWAP can be computed; keep rows without data
+            vwap_mask = ~vwap_valid | (df["price"] >= vwap)
+            mask &= vwap_mask
+            logger.info(f"[EOD-RT] VWAP filter applied ({vwap_valid.sum()} stocks had data)")
+        else:
+            logger.info("[EOD-RT] VWAP skipped (no volume/amount columns)")
+
+        df_filtered = df[mask].copy()
+        logger.info(f"[EOD-RT] After all filters: {len(df_filtered)} stocks")
+
+        if df_filtered.empty:
+            return []
+
+        # Rule 5: volume ratio 2-5x — only after market close (15:00+)
+        # During trading hours, intraday cumulative volume vs historical full-day volume
+        # creates a mismatch (off by tens of times), so skip.
+        now_sh = datetime.now(ZoneInfo("Asia/Shanghai"))
+        is_after_close = now_sh.hour >= 15
+
+        if is_after_close and "volume" in df_filtered.columns:
+            logger.info("[EOD-RT] Post-close mode: computing volume ratio from 5-day avg")
+            rt_vol = pd.to_numeric(df_filtered["volume"], errors="coerce")
+            keep_idx: list = []
+            for idx, row in df_filtered.iterrows():
+                code = str(row.get("code", ""))
+                today_vol = float(rt_vol.get(idx, 0) or 0)
+                if today_vol <= 0:
+                    keep_idx.append(idx)  # no data, keep conservatively
+                    continue
+                try:
+                    df_daily, _src = self._data_manager.get_daily_data(code, days=6)
+                    if df_daily is None or len(df_daily) < 2:
+                        keep_idx.append(idx)
+                        continue
+                    vol_col = self._first_col(df_daily, "vol", "volume", "成交量")
+                    if vol_col is None:
+                        keep_idx.append(idx)
+                        continue
+                    # Exclude the most recent row (today) to get previous 5 days
+                    hist_vol = pd.to_numeric(df_daily[vol_col], errors="coerce").iloc[:-1]
+                    avg_5d = hist_vol.mean()
+                    if avg_5d <= 0 or pd.isna(avg_5d):
+                        keep_idx.append(idx)
+                        continue
+                    vol_ratio = today_vol / avg_5d
+                    if 2.0 <= vol_ratio <= 5.0:
+                        keep_idx.append(idx)
+                    else:
+                        logger.debug(f"[EOD-RT] {code} vol_ratio={vol_ratio:.2f} out of [2,5], dropped")
+                except Exception as e:
+                    logger.debug(f"[EOD-RT] vol_ratio calc error for {code}: {e}")
+                    keep_idx.append(idx)  # on error, keep conservatively
+            before_cnt = len(df_filtered)
+            df_filtered = df_filtered.loc[keep_idx]
+            logger.info(
+                f"[EOD-RT] Volume ratio filter: {before_cnt} -> {len(df_filtered)} stocks"
+            )
+        else:
+            logger.info(
+                f"[EOD-RT] Volume ratio skipped ({'intraday' if not is_after_close else 'no volume data'})"
+            )
+
+        if df_filtered.empty:
+            return []
+
+        # Step 5: Build ScreenedStock list
+        candidates_pre: list = []
+        for _, row in df_filtered.iterrows():
+            code = str(row.get("code", ""))
+            name = str(row.get("name", ""))
+            price = float(row.get("price", 0) or 0)
+            chg = float(row.get("calc_change_pct", 0) or 0)
+            # Prefer daily_basic turnover_rate; fallback to realtime turnover
+            raw_tr = row.get("turnover_rate") if "turnover_rate" in df_filtered.columns else None
+            if raw_tr is None or pd.isna(raw_tr):
+                raw_tr = row.get("turnover", 0)
+            turnover_val = float(pd.to_numeric(raw_tr, errors="coerce") or 0)
+            amount_val = float(pd.to_numeric(row.get("amount", 0), errors="coerce") or 0)
+            # Market cap in 亿: prefer total_mv_yi (already 亿) from daily_basic
+            raw_mc = row.get("total_mv_yi") if "total_mv_yi" in df_filtered.columns else None
+            mktcap_val = float(pd.to_numeric(raw_mc, errors="coerce") or 0) if raw_mc is not None else 0.0
+
+            candidates_pre.append(ScreenedStock(
+                code=code, name=name, price=price,
+                change_pct=chg, volume_ratio=0.0, turnover_rate=turnover_val,
+                pe=0.0, pb=0.0,
+                market_cap=mktcap_val,
+                amount=amount_val / 1e8 if amount_val else 0.0,
+                change_pct_60d=0.0,
+                score=0.0,
+                strategies=["eod_buyback"],
+            ))
+
+        # Step 6: Check recent limit-up (Rule 4)
+        logger.info(f"[EOD-RT] Checking recent limit-up for {len(candidates_pre)} candidates...")
+        final: list = []
+        for s in candidates_pre:
+            try:
+                if self._has_recent_limit_up_check(s.code, days=20):
+                    s.score = (
+                        10.0
+                        + min(s.change_pct, 6.0) * 2
+                        + (5.0 if 100 <= s.market_cap <= 200 else 0.0)
+                    )
+                    final.append(s)
+            except Exception as e:
+                logger.debug(f"[EOD-RT] limit-up check error for {s.code}: {e}")
+
+        logger.info(f"[EOD-RT] Final eod_buyback candidates: {len(final)}")
+        return final
+
+    def _has_recent_limit_up_check(self, code: str, days: int = 20) -> bool:
+        """Check if stock had limit-up within recent N trading days. Used by eod_buyback screener."""
+        try:
+            if not self._data_manager:
+                return False
+            df, _src = self._data_manager.get_daily_data(code, days=days)
+            if df is None or df.empty:
+                return False
+            limit_pct = LIMIT_UP_PCT_KC_CY if is_kc_cy_stock(code) else LIMIT_UP_PCT_MAIN
+            chg_col = self._first_col(df, "pct_chg", "涨跌幅", "change_pct")
+            if chg_col is None:
+                return False
+            pct = pd.to_numeric(df[chg_col], errors="coerce")
+            return bool((pct >= limit_pct).any())
+        except Exception as e:
+            logger.debug(f"[EOD-RT] _has_recent_limit_up_check error for {code}: {e}")
+            return False
+
     @staticmethod
-    def _is_leader_candidate(s: ScreenedStock) -> bool:
+    def _is_leader_candidate(s: "ScreenedStock") -> bool:
         """Check if stock qualifies for leader bias exemption (板块龙头+量能确认)."""
         return (
             s.change_pct_60d > LEADER_CHANGE_60D_MIN
@@ -546,7 +917,7 @@ class StockScreener:
         batch = self._fetch_daily_batch(requests)
         filtered = []
         for s in candidates:
-            df_daily, _ = batch.get((s.code, "", end_date, 10), (None, ""))
+            df_daily, _ = batch.get((s.code, "", end_date or "", 10), (None, ""))
             if df_daily is None or len(df_daily) < 5:
                 filtered.append(s)
                 continue
@@ -590,7 +961,7 @@ class StockScreener:
         batch = self._fetch_daily_batch(requests)
         filtered = []
         for s in candidates:
-            df_daily, _ = batch.get((s.code, "", end_date, days + 5), (None, ""))
+            df_daily, _ = batch.get((s.code, "", end_date or "", days + 5), (None, ""))
             if df_daily is None or len(df_daily) < days:
                 filtered.append(s)
                 continue
@@ -628,7 +999,7 @@ class StockScreener:
         batch = self._fetch_daily_batch(requests)
         filtered = []
         for s in candidates:
-            df_daily, _ = batch.get((s.code, "", end_date, days + 5), (None, ""))
+            df_daily, _ = batch.get((s.code, "", end_date or "", days + 5), (None, ""))
             if df_daily is None or len(df_daily) < days:
                 filtered.append(s)
                 continue
@@ -680,7 +1051,7 @@ class StockScreener:
 
         filtered = []
         for s in candidates:
-            df_daily, _ = batch.get((s.code, "", end_date, lookback_days + 5), (None, ""))
+            df_daily, _ = batch.get((s.code, "", end_date or "", lookback_days + 5), (None, ""))
             if df_daily is None or len(df_daily) < 10:
                 filtered.append(s)  # Keep if no data
                 continue
@@ -763,7 +1134,7 @@ class StockScreener:
 
         filtered = []
         for s in candidates:
-            df_daily, _ = batch.get((s.code, "", end_date, lookback_days + 5), (None, ""))
+            df_daily, _ = batch.get((s.code, "", end_date or "", lookback_days + 5), (None, ""))
             if df_daily is None or len(df_daily) < 30:
                 continue
 
@@ -811,7 +1182,7 @@ class StockScreener:
         batch = self._fetch_daily_batch(requests)
         filtered = []
         for s in candidates:
-            df_daily, _ = batch.get((s.code, "", end_date, lookback_days + 5), (None, ""))
+            df_daily, _ = batch.get((s.code, "", end_date or "", lookback_days + 5), (None, ""))
             if df_daily is None or len(df_daily) < lookback_days:
                 filtered.append(s)
                 continue
@@ -865,22 +1236,35 @@ class StockScreener:
     ]
 
     def _fetch_spot_data(self, trade_date: Optional[str] = None) -> Optional[pd.DataFrame]:
-        """Fetch full A-share data. Priority: Tushare → AkShare → efinance.
+        """Fetch full A-share data for Phase-1 fast screening.
+        Priority: Tushare(daily, fast bulk scan) → AkShare(spot, fallback) → efinance(quotes, last resort).
+        Realtime precision is guaranteed by Phase-2 _filter_by_realtime(force_refresh=True).
         When trade_date (YYYYMMDD) is provided, only Tushare is used (historical mode)."""
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
-        # --- 1. Tushare (most stable, no eastmoney dependency) ---
-        df = self._try_tushare(trade_date=trade_date)
-        if df is not None and not df.empty:
-            logger.info(f"[Screener] Using Tushare data: {len(df)} stocks")
-            return df
-        logger.info("[Screener] Tushare unavailable or empty, trying fallback sources")
-
+        # Historical mode: only Tushare supports dated queries
         if trade_date:
-            # Historical mode: only Tushare supported
+            df = self._try_tushare(trade_date=trade_date)
+            if df is not None and not df.empty:
+                logger.info(f"[Screener] Historical mode — Using Tushare data: {len(df)} stocks")
+                return df
+            logger.warning("[Screener] Historical mode — Tushare returned empty, no data available")
             return None
 
-        # --- 2. AkShare with hard wall-clock timeout ---
+        # --- 1. Tushare daily — fast bulk scan for Phase-1 initial screening ---
+        # Tushare daily API returns closing data quickly without full-market realtime overhead.
+        # Realtime accuracy (turnover_rate, market_cap) is ensured in Phase-2 _filter_by_realtime.
+        logger.info(
+            "[Screener] Trying Tushare daily (priority 1/3) — "
+            "fast bulk scan for Phase-1; realtime precision deferred to Phase-2"
+        )
+        df = self._try_tushare(trade_date=None)
+        if df is not None and not df.empty:
+            logger.info(f"[Screener] Using Tushare daily data: {len(df)} stocks (Phase-1 fast path)")
+            return df
+        logger.warning("[Screener] Tushare daily unavailable, trying AkShare realtime fallback")
+
+        # --- 2. AkShare realtime (stock_zh_a_spot_em) with hard wall-clock timeout ---
         def _try_akshare() -> pd.DataFrame:
             import random
             import requests as _req
@@ -894,31 +1278,41 @@ class StockScreener:
                 _req.utils.default_headers = orig
 
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="screener") as pool:
-            logger.info(f"[Screener] Trying AkShare (wall timeout={self._spot_timeout}s)...")
+            logger.info(
+                f"[Screener] Trying AkShare realtime spot (wall timeout={self._spot_timeout}s) — "
+                "priority 2/3 fallback"
+            )
             t0 = time.time()
             try:
                 fut = pool.submit(_try_akshare)
                 df = fut.result(timeout=self._spot_timeout)
-                logger.info(f"[Screener] AkShare returned {len(df)} stocks in {time.time()-t0:.1f}s")
+                logger.info(
+                    f"[Screener] Using AkShare realtime data: {len(df)} stocks in {time.time()-t0:.1f}s"
+                )
                 return df
             except FuturesTimeout:
-                logger.warning(f"[Screener] AkShare hard-timeout after {self._spot_timeout}s")
+                logger.warning(f"[Screener] AkShare hard-timeout after {self._spot_timeout}s, trying next source")
                 fut.cancel()
             except Exception as e:
-                logger.warning(f"[Screener] AkShare failed: {e}")
+                logger.warning(f"[Screener] AkShare failed: {e}, trying next source")
 
-        # --- 3. efinance fallback with hard wall-clock timeout ---
+        # --- 3. efinance realtime (get_realtime_quotes) — last resort ---
         def _try_efinance() -> pd.DataFrame:
             import efinance as ef
             return ef.stock.get_realtime_quotes()
 
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="screener") as pool:
-            logger.info(f"[Screener] Trying efinance (wall timeout={self._spot_timeout}s)...")
+            logger.info(
+                f"[Screener] Trying efinance realtime quotes (wall timeout={self._spot_timeout}s) — "
+                "priority 3/3 last resort"
+            )
             t0 = time.time()
             try:
                 fut = pool.submit(_try_efinance)
                 df = fut.result(timeout=self._spot_timeout)
-                logger.info(f"[Screener] efinance returned {len(df)} stocks in {time.time()-t0:.1f}s")
+                logger.info(
+                    f"[Screener] Using efinance realtime data: {len(df)} stocks in {time.time()-t0:.1f}s"
+                )
                 return self._normalize_efinance_df(df)
             except FuturesTimeout:
                 logger.warning(f"[Screener] efinance hard-timeout after {self._spot_timeout}s")
@@ -926,6 +1320,7 @@ class StockScreener:
             except Exception as e:
                 logger.warning(f"[Screener] efinance failed: {e}")
 
+        logger.error("[Screener] All data sources exhausted — no spot data available")
         return None
 
     def _try_tushare(self, trade_date: Optional[str] = None) -> Optional[pd.DataFrame]:
@@ -1322,7 +1717,28 @@ class StockPickerService:
             result.screened_pool_by_strategy = candidates_per_strategy
 
             if not candidates:
-                logger.warning("[StockPicker] Screening returned 0 candidates, proceeding with news only")
+                logger.warning("[StockPicker] Screening returned 0 candidates")
+
+            # ── Stage 1.5: Real-time filtering (new) ──
+            if getattr(self.config, "picker_enable_realtime_filter", True):
+                logger.info("[StockPicker] === Stage 1.5: Real-time Filtering ===")
+                pre_count = len(candidates)
+                candidates = self._filter_by_realtime(candidates)
+                logger.info(f"[StockPicker] Real-time filtering: {pre_count} → {len(candidates)} candidates")
+                result.screened_pool = candidates
+
+            # ── Early exit: empty screened pool → skip LLM ──
+            if not candidates:
+                strategies = getattr(self._screener, "_picker_strategies", []) or []
+                logger.warning(
+                    "[StockPicker] Screened pool is empty after filtering, "
+                    f"strategies={strategies}. Skipping LLM call and returning empty picks."
+                )
+                result.picks = []
+                result.market_summary = "今日无符合量化筛选严格条件的股票，不进行 AI 选股。"
+                result.success = True
+                result.elapsed_seconds = time.time() - start
+                return result
 
             # ── Stage 2: Gather market intel + AI selection ──
             logger.info("[StockPicker] === Stage 2: AI Selection ===")
@@ -1336,6 +1752,24 @@ class StockPickerService:
                 return result
 
             self._parse_result(llm_output, result)
+
+            # ── Post-validation: ensure LLM picks are within screened pool ──
+            if result.screened_pool:
+                pool_codes = {s.code for s in result.screened_pool}
+                validated_picks = []
+                for pick in result.picks:
+                    if pick.code in pool_codes:
+                        validated_picks.append(pick)
+                    else:
+                        logger.warning(
+                            f"[StockPicker] LLM pick {pick.code} not in screened pool, removed"
+                        )
+                if len(validated_picks) != len(result.picks):
+                    logger.info(
+                        f"[StockPicker] Post-validation: {len(result.picks)} → {len(validated_picks)} picks"
+                    )
+                result.picks = validated_picks
+
             result.success = True
 
         except Exception as e:
@@ -1344,6 +1778,232 @@ class StockPickerService:
 
         result.elapsed_seconds = time.time() - start
         return result
+
+    def _filter_by_realtime(self, candidates: List[ScreenedStock]) -> List[ScreenedStock]:
+        """Filter candidates by real-time market conditions (limit-up, volume spike, price range, etc).
+        
+        Uses strategy-specific params to enforce daily_change_max and volume_ratio_min limits.
+        Queries realtime data in PARALLEL to avoid timeouts on large candidate pools.
+        
+        Args:
+            candidates: List of ScreenedStock from quantitative screening
+            
+        Returns:
+            Filtered list of candidates that pass real-time checks
+        """
+        if not candidates:
+            return candidates
+
+        from src.services.picker_strategies import get_strategy_params
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
+        
+        is_kccy = is_kc_cy_stock
+
+        # Parallel fetch of realtime quotes (max 10 workers, 2s timeout per stock)
+        def _fetch_one_quote(code: str) -> tuple[str, Optional]:
+            """Fetch realtime quote for one stock. Returns (code, quote)."""
+            try:
+                if not self._data_manager:
+                    return (code, None)
+                # Always force fresh realtime data for picker realtime validation phase
+                try:
+                    quote = self._data_manager.get_realtime_quote(code, force_refresh=True)
+                except TypeError:
+                    # Fallback if force_refresh param not yet supported in data_provider
+                    quote = self._data_manager.get_realtime_quote(code)
+                return (code, quote)
+            except Exception as e:
+                logger.debug(f"[RealTime] Failed to fetch {code}: {e}")
+                return (code, None)
+        
+        # Fetch all realtime quotes in parallel
+        realtime_quotes: Dict[str, Optional] = {}
+        with ThreadPoolExecutor(max_workers=10, thread_name_prefix="realtime") as executor:
+            futures = {executor.submit(_fetch_one_quote, stock.code): stock.code for stock in candidates}
+            try:
+                for future in as_completed(futures, timeout=60):  # 60s total for all
+                    try:
+                        code, quote = future.result(timeout=10)  # Each future must finish in 10s
+                        realtime_quotes[code] = quote
+                    except FuturesTimeout:
+                        code = futures[future]
+                        logger.debug(f"[RealTime] Timeout fetching {code}")
+                        realtime_quotes[code] = None
+                    except Exception as e:
+                        code = futures[future]
+                        logger.debug(f"[RealTime] Error fetching {code}: {e}")
+                        realtime_quotes[code] = None
+            except FuturesTimeout:
+                # Global timeout — mark remaining stocks as None and log
+                timed_out = [c for f, c in futures.items() if not f.done()]
+                for c in timed_out:
+                    realtime_quotes.setdefault(c, None)
+                logger.warning(
+                    f"[RealTime] Global timeout (60s): {len(timed_out)} futures unfinished: {timed_out}"
+                )
+        
+        # Helper: safe float conversion (None/NaN -> None)
+        def _safe_float(val) -> Optional[float]:
+            """Convert to float safely. Returns None for None/NaN/non-numeric."""
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                if f != f:  # NaN check
+                    return None
+                return f
+            except (TypeError, ValueError):
+                return None
+
+        # Now filter using fetched data
+        filtered = []
+        excluded_reasons: Dict[str, List[str]] = {}
+        
+        for stock in candidates:
+            code = stock.code
+            try:
+                # eod_buyback candidates already filtered by _screen_eod_buyback_realtime();
+                # skip all realtime re-validation to avoid false negatives.
+                if "eod_buyback" in (stock.strategies or []):
+                    filtered.append(stock)
+                    continue
+
+                reasons = []
+                
+                # Use realtime data if available, otherwise fall back to daily data
+                realtime_quote = realtime_quotes.get(code)
+                change_pct = _safe_float(
+                    realtime_quote.change_pct
+                    if (realtime_quote and realtime_quote.change_pct is not None)
+                    else stock.change_pct
+                )
+                vol_ratio = _safe_float(stock.volume_ratio)  # default to daily data
+                if realtime_quote and realtime_quote.volume_ratio is not None and realtime_quote.volume_ratio > 0:
+                    vol_ratio = _safe_float(realtime_quote.volume_ratio)
+                elif realtime_quote and (realtime_quote.volume_ratio is None or realtime_quote.volume_ratio == 0):
+                    logger.debug(
+                        f"[Picker] {code}: realtime volume_ratio missing/zero, "
+                        f"using daily value {stock.volume_ratio}"
+                    )
+
+                # Log when critical fields are None for debugging
+                if change_pct is None or vol_ratio is None:
+                    logger.debug(
+                        f"[RealTime] {code}: change_pct={change_pct}, vol_ratio={vol_ratio} "
+                        f"(realtime={'yes' if realtime_quote else 'no'})"
+                    )
+
+                # Rule 1: Exclude limit-up stocks
+                if getattr(self.config, "picker_realtime_exclude_limit_up", True):
+                    limit_up_pct = LIMIT_UP_PCT_KC_CY if is_kccy(code) else LIMIT_UP_PCT_MAIN
+                    if change_pct is not None and change_pct >= limit_up_pct - 0.1:
+                        reasons.append(f"涨停({change_pct:.1f}%)")
+                
+                # Rule 2: Exclude limit-down stocks
+                if getattr(self.config, "picker_realtime_exclude_limit_down", True):
+                    limit_down_pct = -LIMIT_UP_PCT_KC_CY if is_kccy(code) else -LIMIT_UP_PCT_MAIN
+                    if change_pct is not None and change_pct <= limit_down_pct + 0.1:
+                        reasons.append(f"跌停({change_pct:.1f}%)")
+                
+                # Rule 3: Apply STRATEGY-SPECIFIC limits (prioritize realtime over quantitative)
+                # Update turnover_rate / market_cap with realtime data for all strategies
+                # Fall back to daily data when realtime value is missing or zero
+                turnover = _safe_float(stock.turnover_rate)
+                market_cap = _safe_float(stock.market_cap)
+                if realtime_quote:
+                    rt_turnover = _safe_float(getattr(realtime_quote, "turnover_rate", None))
+                    if rt_turnover is not None and rt_turnover > 0:
+                        turnover = rt_turnover
+                    elif rt_turnover is not None and rt_turnover == 0:
+                        logger.debug(
+                            f"[Picker] {code}: realtime turnover_rate is 0, "
+                            f"using daily value {stock.turnover_rate}"
+                        )
+                    rt_mv = _safe_float(getattr(realtime_quote, "total_mv", None))
+                    if rt_mv is not None and rt_mv > 0:
+                        # total_mv from UnifiedRealtimeQuote is in yuan; convert to 亿
+                        market_cap = rt_mv / 1e8
+                    elif rt_mv is not None and rt_mv == 0:
+                        logger.debug(
+                            f"[Picker] {code}: realtime total_mv is 0, "
+                            f"using daily value {stock.market_cap}"
+                        )
+
+                # Apply strategy-specific params
+                if stock.strategies:
+                    strategy_failures = []
+                    for strategy_id in stock.strategies:
+                        params = get_strategy_params(strategy_id)
+                        
+                        # eod_buyback handled by top-level bypass above; defensive skip
+                        if strategy_id == "eod_buyback":
+                            continue
+                        # For other strategies, use relaxed params from filter_momentum/filter_volume
+                        if (
+                            params.daily_change_min is not None
+                            and change_pct is not None
+                            and change_pct < params.daily_change_min
+                        ):
+                            strategy_failures.append(
+                                f"涨幅不足({change_pct:.1f}%<{params.daily_change_min}%)"
+                            )
+                        
+                        if (
+                            params.daily_change_max is not None
+                            and change_pct is not None
+                            and change_pct > params.daily_change_max
+                        ):
+                            strategy_failures.append(
+                                f"涨幅超({change_pct:.1f}%>{params.daily_change_max}%)"
+                            )
+                        
+                        if (
+                            params.volume_ratio_min is not None
+                            and vol_ratio is not None
+                            and vol_ratio < params.volume_ratio_min
+                        ):
+                            strategy_failures.append(
+                                f"量比不足({vol_ratio:.1f}x<{params.volume_ratio_min}x)"
+                            )
+                    
+                    if strategy_failures:
+                        reasons.extend(strategy_failures)
+                
+                # Rule 4: Filter by today's change % range (environment override)
+                daily_chg_min = getattr(self.config, "picker_realtime_daily_chg_min", None)
+                daily_chg_max = getattr(self.config, "picker_realtime_daily_chg_max", None)
+                if daily_chg_min is not None and change_pct is not None and change_pct < daily_chg_min:
+                    reasons.append(f"涨幅不足(要求>{daily_chg_min}%,当前{change_pct:.1f}%)")
+                if daily_chg_max is not None and change_pct is not None and change_pct > daily_chg_max:
+                    reasons.append(f"涨幅过大(要求<{daily_chg_max}%,当前{change_pct:.1f}%)")
+                
+                # Rule 5: Exclude abnormal volume spike
+                max_vol_ratio = getattr(self.config, "picker_realtime_max_volume_ratio", 0.0)
+                if max_vol_ratio > 0 and vol_ratio is not None and vol_ratio > max_vol_ratio:
+                    reasons.append(f"异常放量(量比{vol_ratio:.1f}>{max_vol_ratio})")
+                
+                if reasons:
+                    excluded_reasons[code] = reasons
+                else:
+                    filtered.append(stock)
+
+            except Exception as e:
+                # Graceful degradation: keep the candidate on unexpected errors
+                logger.warning(f"[RealTime] Realtime check failed for {code}: {e}")
+                filtered.append(stock)
+        
+        if excluded_reasons:
+            logger.info(f"[StockPicker] Real-time filtering excluded {len(excluded_reasons)} stocks:")
+            for code, reasons in sorted(excluded_reasons.items())[:10]:
+                logger.info(f"  {code}: {', '.join(reasons)}")
+            if len(excluded_reasons) > 10:
+                logger.info(f"  ... and {len(excluded_reasons) - 10} more")
+        
+        return filtered
+
+    # ------------------------------------------------------------------
+    # EOD buyback helpers
+    # ------------------------------------------------------------------
 
     _INTEL_ITEM_TIMEOUT = 15  # wall-clock timeout per market intel fetch (efinance may retry ~5s before fail, then akshare needs time)
 
@@ -1509,7 +2169,9 @@ class StockPickerService:
                 parts.append(row)
             parts.append("")
         else:
-            parts.append("## 量化筛选池\n（今日筛选未产出候选，请仅基于市场情报推荐）\n")
+            parts.append(
+                "## 量化筛选池\n（今日筛选未产出候选，请返回空推荐列表，不要自行选股）\n"
+            )
 
         # ── Market intel ──
         if intel.get("indices"):

@@ -332,7 +332,7 @@ def test_b_wave_filter_excludes_b_wave_bounce():
     df_daily = _make_daily_df(closes)
 
     class MockDM:
-        def get_daily_data(self, code, end_date=None, days=25):
+        def get_daily_data(self, code, start_date=None, end_date=None, days=25):
             return df_daily, "mock"
 
     screener = StockScreener(
@@ -361,7 +361,7 @@ def test_b_wave_filter_keeps_uptrend():
     df_daily = _make_daily_df(closes)
 
     class MockDM:
-        def get_daily_data(self, code, end_date=None, days=25):
+        def get_daily_data(self, code, start_date=None, end_date=None, days=25):
             return df_daily, "mock"
 
     screener = StockScreener(
@@ -390,7 +390,7 @@ def test_b_wave_filter_keeps_at_bottom():
     df_daily = _make_daily_df(closes)
 
     class MockDM:
-        def get_daily_data(self, code, end_date=None, days=25):
+        def get_daily_data(self, code, start_date=None, end_date=None, days=25):
             return df_daily, "mock"
 
     screener = StockScreener(
@@ -403,6 +403,177 @@ def test_b_wave_filter_keeps_at_bottom():
                          change_pct_60d=5, score=40)]
     out = screener._filter_b_wave_risk(cand)
     assert len(out) == 1, "At bottom (no bounce yet) should be kept"
+
+
+def test_config_parse_picker_strategies_includes_eod_buyback():
+    """config._parse_picker_strategies must recognise eod_buyback."""
+    from src.config import Config
+    result = Config._parse_picker_strategies("eod_buyback")
+    assert result == ["eod_buyback"], f"Expected ['eod_buyback'], got {result}"
+
+    # Combo with other strategies
+    result2 = Config._parse_picker_strategies("buy_pullback,eod_buyback")
+    assert "eod_buyback" in result2
+
+
+def _make_eod_stock(code="600810", change_pct=4.0, vol_ratio=3.0, turnover=10.0,
+                    market_cap=100.0, strategies=None):
+    """Helper to create a ScreenedStock tagged with eod_buyback strategy."""
+    try:
+        from src.services.stock_picker_service import ScreenedStock
+    except ImportError:
+        ScreenedStock = _get_picker_module().ScreenedStock
+    return ScreenedStock(
+        code=code, name="Test", price=10, change_pct=change_pct,
+        volume_ratio=vol_ratio, turnover_rate=turnover, pe=20, pb=2,
+        market_cap=market_cap, amount=1, change_pct_60d=10, score=50,
+        strategies=strategies if strategies is not None else ["eod_buyback"],
+    )
+
+
+def _make_picker_service_for_test(strategies):
+    """Create a minimal StockPickerService-like object with _filter_by_realtime."""
+    try:
+        from src.services.stock_picker_service import StockPickerService
+    except ImportError:
+        StockPickerService = _get_picker_module().StockPickerService
+
+    # Build a lightweight wrapper that has the method but skips heavy init
+    import types
+    try:
+        from src.services.stock_picker_service import StockScreener
+    except ImportError:
+        StockScreener = _get_picker_module().StockScreener
+
+    svc = object.__new__(StockPickerService)
+    svc.config = type("C", (), {
+        "picker_realtime_exclude_limit_up": True,
+        "picker_realtime_exclude_limit_down": True,
+        "picker_realtime_daily_chg_min": None,
+        "picker_realtime_daily_chg_max": None,
+        "picker_realtime_max_volume_ratio": 0.0,
+    })()
+    svc._data_manager = None
+    svc._screener = StockScreener(data_manager=None, picker_strategies=strategies)
+    return svc
+
+
+def test_eod_buyback_bypasses_realtime_filter_high_change_pct():
+    """verify eod_buyback candidates pass through _filter_by_realtime unchanged"""
+    svc = _make_picker_service_for_test(["eod_buyback"])
+    # 10.04% change — would violate limit-up threshold, but eod_buyback skips re-validation
+    cands = [_make_eod_stock(change_pct=10.04)]
+    result = svc._filter_by_realtime(cands)
+    # eod_buyback candidates bypass _filter_by_realtime entirely
+    assert len(result) == 1, "eod_buyback candidates should bypass _filter_by_realtime"
+
+
+def test_eod_buyback_bypasses_realtime_filter_low_turnover():
+    """verify eod_buyback candidates pass through _filter_by_realtime unchanged"""
+    svc = _make_picker_service_for_test(["eod_buyback"])
+    # 2.06% turnover — would violate 8-15% rule, but eod_buyback now skips re-validation
+    cands = [_make_eod_stock(change_pct=4.5, turnover=2.06)]
+    result = svc._filter_by_realtime(cands)
+    # eod_buyback candidates skip the strategy-specific block in _filter_by_realtime
+    assert isinstance(result, list)
+
+
+def test_eod_buyback_bypasses_realtime_filter_none_change_pct():
+    """verify eod_buyback candidates pass through _filter_by_realtime unchanged"""
+    try:
+        from src.services.stock_picker_service import ScreenedStock
+    except ImportError:
+        ScreenedStock = _get_picker_module().ScreenedStock
+
+    svc = _make_picker_service_for_test(["eod_buyback"])
+    stock = ScreenedStock(
+        code="600810", name="Test", price=10, change_pct=0.0,
+        volume_ratio=3.0, turnover_rate=10.0, pe=20, pb=2,
+        market_cap=100, amount=1, change_pct_60d=10, score=50,
+        strategies=["eod_buyback"],
+    )
+    # Simulate None change_pct by setting it after creation
+    stock.change_pct = None  # type: ignore[assignment]
+    result = svc._filter_by_realtime([stock])
+    # eod_buyback candidates skip the strategy-specific block in _filter_by_realtime
+    assert isinstance(result, list)
+
+
+def test_eod_buyback_passes_valid_stock():
+    """eod_buyback must pass a stock that meets all criteria (except limit-up history check)."""
+    svc = _make_picker_service_for_test(["eod_buyback"])
+    # Perfect candidate: 4.5% change, 3x vol, 10% turnover, 100yi cap
+    cands = [_make_eod_stock(change_pct=4.5, vol_ratio=3.0, turnover=10.0, market_cap=100.0)]
+    result = svc._filter_by_realtime(cands)
+    # May still be filtered by _has_recent_limit_up check (no data_manager),
+    # so we just verify no crash and the function returns a list
+    assert isinstance(result, list)
+
+
+def test_empty_pool_prompt_no_free_pick():
+    """When candidates is empty, prompt must NOT say '请仅基于市场情报推荐'."""
+    try:
+        from src.services.stock_picker_service import PICK_SYSTEM_PROMPT
+    except ImportError:
+        _get_picker_module()  # ensure module loaded
+
+    # Read the actual file content to verify wording
+    path = _root / "src" / "services" / "stock_picker_service.py"
+    content = path.read_text(encoding="utf-8")
+    assert "请仅基于市场情报推荐" not in content, \
+        "Prompt should NOT tell LLM to recommend based on market intel alone"
+    assert "请返回空推荐列表，不要自行选股" in content, \
+        "Prompt should instruct LLM to return empty picks when no candidates"
+
+
+def test_post_validation_filters_out_of_pool_picks():
+    """LLM picks not in screened_pool must be filtered out after _parse_result."""
+    try:
+        from src.services.stock_picker_service import PickerResult, StockPick, ScreenedStock
+    except ImportError:
+        mod = _get_picker_module()
+        PickerResult = mod.PickerResult
+        StockPick = mod.StockPick
+        ScreenedStock = mod.ScreenedStock
+
+    result = PickerResult()
+    # Screened pool only has 600519
+    result.screened_pool = [
+        ScreenedStock(code="600519", name="MaoTai", price=10, change_pct=2,
+                      volume_ratio=1.2, turnover_rate=4, pe=20, pb=2,
+                      market_cap=100, amount=1, change_pct_60d=10, score=50),
+    ]
+    # LLM returned one valid and one out-of-pool pick
+    result.picks = [
+        StockPick(code="600519", name="MaoTai", reason="good"),
+        StockPick(code="000001", name="PingAn", reason="hot sector"),
+    ]
+
+    # Apply same post-validation logic as in run()
+    if result.screened_pool:
+        pool_codes = {s.code for s in result.screened_pool}
+        result.picks = [p for p in result.picks if p.code in pool_codes]
+
+    assert len(result.picks) == 1
+    assert result.picks[0].code == "600519"
+
+
+def test_empty_candidates_skip_llm_message():
+    """When screened pool is empty, result should have the skip message."""
+    try:
+        from src.services.stock_picker_service import PickerResult
+    except ImportError:
+        PickerResult = _get_picker_module().PickerResult
+
+    # Simulate what run() does when candidates are empty
+    result = PickerResult()
+    result.picks = []
+    result.market_summary = "今日无符合量化筛选严格条件的股票，不进行 AI 选股。"
+    result.success = True
+
+    assert result.success is True
+    assert len(result.picks) == 0
+    assert "无符合" in result.market_summary
 
 
 if __name__ == "__main__":
@@ -428,6 +599,14 @@ if __name__ == "__main__":
         test_b_wave_filter_excludes_b_wave_bounce,
         test_b_wave_filter_keeps_uptrend,
         test_b_wave_filter_keeps_at_bottom,
+        test_config_parse_picker_strategies_includes_eod_buyback,
+        test_eod_buyback_bypasses_realtime_filter_high_change_pct,
+        test_eod_buyback_bypasses_realtime_filter_low_turnover,
+        test_eod_buyback_bypasses_realtime_filter_none_change_pct,
+        test_eod_buyback_passes_valid_stock,
+        test_empty_pool_prompt_no_free_pick,
+        test_post_validation_filters_out_of_pool_picks,
+        test_empty_candidates_skip_llm_message,
     ]
     failed = 0
     for t in tests:

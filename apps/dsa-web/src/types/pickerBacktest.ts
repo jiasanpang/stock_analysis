@@ -3,7 +3,7 @@
  * Mirrors api/v1/schemas/picker_backtest.py
  */
 
-export type PickerStrategy = 'buy_pullback' | 'breakout' | 'bottom_reversal' | 'macd_golden_cross';
+export type PickerStrategy = 'buy_pullback' | 'breakout' | 'bottom_reversal' | 'macd_golden_cross' | 'eod_buyback';
 
 export interface PickerBacktestRunRequest {
   startDate: string;

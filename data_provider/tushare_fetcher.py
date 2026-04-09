@@ -610,9 +610,10 @@ class TushareFetcher(BaseFetcher):
         """
         获取实时行情
 
-        策略：
-        1. 优先尝试 Pro 接口（需要2000积分）：数据全，稳定性高
-        2. 失败降级到旧版接口：门槛低，数据较少
+        策略（优先级）：
+        1. 优先用 realtime_quote (0积分爬虫接口，无限制)
+        2. 降级到旧版接口 ts.get_realtime_quotes
+        3. 最后尝试 Pro 接口（需要积分）
 
         Args:
             stock_code: 股票代码
@@ -628,42 +629,52 @@ class TushareFetcher(BaseFetcher):
             safe_float, safe_int
         )
 
-        # 速率限制检查
-        self._check_rate_limit()
+        # 速率限制检查（仅对付费接口）
+        # self._check_rate_limit()  # 因为 realtime_quote 无限制，不需要检查
 
-        # 尝试 Pro 接口
+        # === 策略 1: ts.realtime_quote() - 0积分爬虫接口（最优） ===
         try:
-            ts_code = self._convert_stock_code(stock_code)
-            # 尝试调用 Pro 实时接口 (需要积分)
-            df = self._api.quotation(ts_code=ts_code)
-
+            import tushare as ts
+            code_6 = stock_code.split('.')[0] if '.' in stock_code else stock_code
+            
+            # realtime_quote 使用 6 位代码
+            df = ts.realtime_quote(code_6)
+            
             if df is not None and not df.empty:
                 row = df.iloc[0]
-                logger.debug(f"Tushare Pro 实时行情获取成功: {stock_code}")
+                logger.debug(f"[RealTime] {stock_code} via realtime_quote (0积分爬虫接口)")
+                
+                # 字段映射：realtime_quote 的列名可能不同，需要检查
+                # 通常包括: code, name, price, bid, ask, volume, time, date, changepercent 等
+                change_pct = safe_float(row.get('changepercent')) or safe_float(row.get('change_pct'))
+                
+                # Compute change_amount = price - pre_close
+                _price = safe_float(row.get('price'))
+                _pre = safe_float(row.get('pre_close')) or safe_float(row.get('settlement'))
+                _change_amount = (_price - _pre) if (_price is not None and _pre is not None and _pre != 0) else None
 
                 return UnifiedRealtimeQuote(
                     code=stock_code,
                     name=str(row.get('name', '')),
                     source=RealtimeSource.TUSHARE,
-                    price=safe_float(row.get('price')),
-                    change_pct=safe_float(row.get('pct_chg')),  # Pro 接口通常直接返回涨跌幅
-                    change_amount=safe_float(row.get('change')),
-                    volume=safe_int(row.get('vol')),
-                    amount=safe_float(row.get('amount')),
-                    high=safe_float(row.get('high')),
-                    low=safe_float(row.get('low')),
-                    open_price=safe_float(row.get('open')),
-                    pre_close=safe_float(row.get('pre_close')),
-                    turnover_rate=safe_float(row.get('turnover_ratio')), # Pro 接口可能有换手率
-                    pe_ratio=safe_float(row.get('pe')),
-                    pb_ratio=safe_float(row.get('pb')),
-                    total_mv=safe_float(row.get('total_mv')),
+                    price=_price,
+                    change_pct=change_pct,
+                    change_amount=_change_amount,
+                    volume=safe_int(row.get('volume')),
+                    amount=None,  # not provided by realtime_quote
+                    high=None,  # not provided by realtime_quote
+                    low=None,  # not provided by realtime_quote
+                    open_price=None,  # not provided by realtime_quote
+                    pre_close=_pre,  # not provided by realtime_quote
+                    turnover_rate=None,  # not provided by realtime_quote
+                    pe_ratio=None,  # not provided by realtime_quote
+                    pb_ratio=None,  # not provided by realtime_quote
+                    total_mv=None,  # not provided by realtime_quote
                 )
         except Exception as e:
-            # 仅记录调试日志，不报错，继续尝试降级
-            logger.debug(f"Tushare Pro 实时行情不可用 (可能是积分不足): {e}")
+            logger.debug(f"[RealTime] realtime_quote 失败: {e}")
 
-        # 降级：尝试旧版接口
+        # === 策略 2: 降级到旧版接口 ts.get_realtime_quotes ===
         try:
             import tushare as ts
 
@@ -687,41 +698,72 @@ class TushareFetcher(BaseFetcher):
 
             # 调用旧版实时接口 (ts.get_realtime_quotes)
             df = ts.get_realtime_quotes(symbol)
+            
+            if df is not None and not df.empty:
+                row = df.iloc[0]
+                logger.debug(f"[RealTime] {stock_code} via get_realtime_quotes (旧版接口)")
+                
+                # Compute change_amount = price - pre_close
+                _price = safe_float(row.get('price'))
+                _pre = safe_float(row.get('pre_close')) or safe_float(row.get('settlement'))
+                _change_amount = (_price - _pre) if (_price is not None and _pre is not None and _pre != 0) else None
 
-            if df is None or df.empty:
-                return None
-
-            row = df.iloc[0]
-
-            # 计算涨跌幅
-            price = safe_float(row['price'])
-            pre_close = safe_float(row['pre_close'])
-            change_pct = 0.0
-            change_amount = 0.0
-
-            if price and pre_close and pre_close > 0:
-                change_amount = price - pre_close
-                change_pct = (change_amount / pre_close) * 100
-
-            # 构建统一对象
-            return UnifiedRealtimeQuote(
-                code=stock_code,
-                name=str(row['name']),
-                source=RealtimeSource.TUSHARE,
-                price=price,
-                change_pct=round(change_pct, 2),
-                change_amount=round(change_amount, 2),
-                volume=safe_int(row['volume']) // 100,  # 转换为手
-                amount=safe_float(row['amount']),
-                high=safe_float(row['high']),
-                low=safe_float(row['low']),
-                open_price=safe_float(row['open']),
-                pre_close=pre_close,
-            )
-
+                return UnifiedRealtimeQuote(
+                    code=stock_code,
+                    name=str(row.get('name', '')),
+                    source=RealtimeSource.TUSHARE,
+                    price=_price,
+                    change_pct=safe_float(row.get('changepercent')),
+                    change_amount=_change_amount,
+                    volume=safe_int(row.get('volume')),
+                    amount=None,  # not provided by get_realtime_quotes
+                    high=None,  # not provided by get_realtime_quotes
+                    low=None,  # not provided by get_realtime_quotes
+                    open_price=None,  # not provided by get_realtime_quotes
+                    pre_close=_pre,  # not provided by get_realtime_quotes
+                    turnover_rate=None,  # not provided by get_realtime_quotes
+                    pe_ratio=None,  # not provided by get_realtime_quotes
+                    pb_ratio=None,  # not provided by get_realtime_quotes
+                    total_mv=None,  # not provided by get_realtime_quotes
+                )
         except Exception as e:
-            logger.warning(f"Tushare (旧版) 获取实时行情失败 {stock_code}: {e}")
-            return None
+            logger.debug(f"[RealTime] get_realtime_quotes 失败: {e}")
+        
+        # === 策略 3: Pro 接口（备选，需要积分） ===
+        try:
+            self._check_rate_limit()
+            ts_code = self._convert_stock_code(stock_code)
+            # 尝试调用 Pro 实时接口 (需要积分)
+            df = self._api.quotation(ts_code=ts_code)
+
+            if df is not None and not df.empty:
+                row = df.iloc[0]
+                logger.debug(f"[RealTime] {stock_code} via Pro quotation API")
+
+                return UnifiedRealtimeQuote(
+                    code=stock_code,
+                    name=str(row.get('name', '')),
+                    source=RealtimeSource.TUSHARE,
+                    price=safe_float(row.get('price')),
+                    change_pct=safe_float(row.get('pct_chg')),  # Pro 接口通常直接返回涨跌幅
+                    change_amount=safe_float(row.get('change')),
+                    volume=safe_int(row.get('vol')),
+                    amount=safe_float(row.get('amount')),
+                    high=safe_float(row.get('high')),
+                    low=safe_float(row.get('low')),
+                    open_price=safe_float(row.get('open')),
+                    pre_close=safe_float(row.get('pre_close')),
+                    turnover_rate=safe_float(row.get('turnover_ratio')),
+                    pe_ratio=safe_float(row.get('pe')),
+                    pb_ratio=safe_float(row.get('pb')),
+                    total_mv=safe_float(row.get('total_mv')),
+                )
+        except Exception as e:
+            logger.debug(f"[RealTime] Pro quotation API 失败: {e}")
+        
+        # 所有策略都失败，返回 None
+        logger.warning(f"[RealTime] Unable to fetch realtime quote for {stock_code}")
+        return None
 
     def get_main_indices(self, region: str = "cn") -> Optional[List[dict]]:
         """
@@ -827,15 +869,11 @@ class TushareFetcher(BaseFetcher):
                 use_realtime = False
 
             # 若实盘的时候使用 则使用其他可以实盘获取的数据源 akshare、efinance
+            # NOTE: rt_k has strict rate limit (1/hour for standard accounts)
+            # Skip it and let other sources (akshare, efinance) handle market stats
             if use_realtime:
-                try:
-                    df = self._api.rt_k(ts_code='3*.SZ,6*.SH,0*.SZ,92*.BJ')
-                    if df is not None and not df.empty:
-                        return self._calc_market_stats(df)
-                    
-                except Exception as e:
-                    logger.error(f"[Tushare] ts.pro_api().rt_k 尝试获取实时数据失败: {e}")
-                    return None
+                logger.debug("[Tushare] Skipping rt_k (rate limited), delegate to other sources")
+                return None
             else:
 
                 if current_date not in date_list:

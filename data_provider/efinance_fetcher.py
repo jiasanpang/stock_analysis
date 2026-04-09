@@ -501,22 +501,23 @@ class EfinanceFetcher(BaseFetcher):
         
         return df
     
-    def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+    def get_realtime_quote(self, stock_code: str, force_refresh: bool = False) -> Optional[UnifiedRealtimeQuote]:
         """
-        获取实时行情数据
-        
-        数据来源：ef.stock.get_realtime_quotes()
-        ETF 数据源：ef.stock.get_realtime_quotes(['ETF'])
-        
+        Get realtime quote data.
+
+        Data source: ef.stock.get_realtime_quotes()
+        ETF source: ef.stock.get_realtime_quotes(['ETF'])
+
         Args:
-            stock_code: 股票代码
-            
+            stock_code: Stock code
+            force_refresh: If True, bypass cache and fetch fresh data from API
+
         Returns:
-            UnifiedRealtimeQuote 对象，获取失败返回 None
+            UnifiedRealtimeQuote object, or None on failure
         """
-        # ETF 需要单独请求 ETF 实时行情接口
+        # ETF needs a separate realtime quote endpoint
         if _is_etf_code(stock_code):
-            return self._get_etf_realtime_quote(stock_code)
+            return self._get_etf_realtime_quote(stock_code, force_refresh=force_refresh)
 
         import efinance as ef
         circuit_breaker = get_realtime_circuit_breaker()
@@ -528,9 +529,9 @@ class EfinanceFetcher(BaseFetcher):
             return None
         
         try:
-            # 检查缓存
+            # Check cache (skip when force_refresh is requested)
             current_time = time.time()
-            if (_realtime_cache['data'] is not None and 
+            if (not force_refresh and _realtime_cache['data'] is not None and
                 current_time - _realtime_cache['timestamp'] < _realtime_cache['ttl']):
                 df = _realtime_cache['data']
                 cache_age = int(current_time - _realtime_cache['timestamp'])
@@ -616,7 +617,7 @@ class EfinanceFetcher(BaseFetcher):
             circuit_breaker.record_failure(source_key, str(e))
             return None
 
-    def _get_etf_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+    def _get_etf_realtime_quote(self, stock_code: str, force_refresh: bool = False) -> Optional[UnifiedRealtimeQuote]:
         """
         获取 ETF 实时行情
 
@@ -632,7 +633,9 @@ class EfinanceFetcher(BaseFetcher):
 
         try:
             current_time = time.time()
+            # Check cache (skip when force_refresh is requested)
             if (
+                not force_refresh and
                 _etf_realtime_cache['data'] is not None and
                 current_time - _etf_realtime_cache['timestamp'] < _etf_realtime_cache['ttl']
             ):

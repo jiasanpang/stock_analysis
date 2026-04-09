@@ -266,6 +266,17 @@ class Config:
     picker_allow_loss: bool = False
     # 选股全市场行情拉取超时(秒)，AkShare/efinance 东财接口较慢时可适当增大
     picker_spot_timeout: int = 30
+    # 实时行情筛选：开关（默认启用）
+    picker_enable_realtime_filter: bool = True
+    # 实时行情筛选：排除涨停的股票
+    picker_realtime_exclude_limit_up: bool = True
+    # 实时行情筛选：排除跌停的股票
+    picker_realtime_exclude_limit_down: bool = True
+    # 实时行情筛选：当日涨幅范围（%），如 -2,8 表示只要当日涨-2%~8%的（空表示无限制）
+    picker_realtime_daily_chg_min: Optional[float] = None
+    picker_realtime_daily_chg_max: Optional[float] = None
+    # 实时行情筛选：排除异常放量（量比>此值），如 5.0 排除量比>5的（0表示无限制）
+    picker_realtime_max_volume_ratio: float = 0.0
 
     # === 日志配置 ===
     log_dir: str = "./logs"  # 日志文件目录
@@ -731,6 +742,12 @@ class Config:
             picker_enable_b_wave_filter=os.getenv('PICKER_ENABLE_B_WAVE_FILTER', 'true').lower() == 'true',
             picker_allow_loss=os.getenv('PICKER_ALLOW_LOSS', 'false').lower() == 'true',
             picker_spot_timeout=int(os.getenv('PICKER_SPOT_TIMEOUT', '30')),
+            picker_enable_realtime_filter=os.getenv('PICKER_ENABLE_REALTIME_FILTER', 'true').lower() == 'true',
+            picker_realtime_exclude_limit_up=os.getenv('PICKER_REALTIME_EXCLUDE_LIMIT_UP', 'true').lower() == 'true',
+            picker_realtime_exclude_limit_down=os.getenv('PICKER_REALTIME_EXCLUDE_LIMIT_DOWN', 'true').lower() == 'true',
+            picker_realtime_daily_chg_min=float(os.getenv('PICKER_REALTIME_DAILY_CHG_MIN', '')) if os.getenv('PICKER_REALTIME_DAILY_CHG_MIN') else None,
+            picker_realtime_daily_chg_max=float(os.getenv('PICKER_REALTIME_DAILY_CHG_MAX', '')) if os.getenv('PICKER_REALTIME_DAILY_CHG_MAX') else None,
+            picker_realtime_max_volume_ratio=float(os.getenv('PICKER_REALTIME_MAX_VOLUME_RATIO', '0.0')),
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             max_workers=int(os.getenv('MAX_WORKERS', '3')),
@@ -1097,7 +1114,7 @@ class Config:
     @classmethod
     def _parse_picker_strategies(cls, value: str) -> List[str]:
         """Parse PICKER_STRATEGIES (comma-separated). Default [buy_pullback] when empty."""
-        valid = ('buy_pullback', 'breakout', 'bottom_reversal', 'macd_golden_cross')
+        valid = ('buy_pullback', 'breakout', 'bottom_reversal', 'macd_golden_cross', 'eod_buyback')
         if not value or not value.strip():
             return ['buy_pullback']
         parts = [p.strip().lower() for p in value.split(',') if p.strip()]

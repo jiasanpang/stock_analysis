@@ -23,6 +23,7 @@ const STRATEGY_OPTIONS: { value: PickerStrategy; label: string }[] = [
   { value: 'breakout', label: '突破' },
   { value: 'bottom_reversal', label: '底部反转' },
   { value: 'macd_golden_cross', label: 'MACD金叉' },
+  { value: 'eod_buyback', label: '尾盘买入' },
 ];
 
 function pct(value?: number | null): string {

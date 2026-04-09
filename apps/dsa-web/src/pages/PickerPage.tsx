@@ -18,6 +18,7 @@ const STRATEGY_OPTIONS: { value: PickerStrategy; label: string }[] = [
   { value: 'breakout', label: '突破' },
   { value: 'bottom_reversal', label: '底部反转' },
   { value: 'macd_golden_cross', label: 'MACD金叉' },
+  { value: 'eod_buyback', label: '尾盘买入' },
 ];
 
 const ATTENTION_CFG: Record<string, { dot: string; badge: string; label: string }> = {
@@ -624,9 +625,11 @@ const PickerPage: React.FC = () => {
                     type="button"
                     onClick={() => {
                       if (selected) {
-                        const next = pickerStrategies.filter((s) => s !== o.value);
-                        setPickerStrategies(next.length > 0 ? next : ['buy_pullback']);
+                        // Deselect: remove this strategy; fall back to default if none left
+                        const remaining = pickerStrategies.filter(s => s !== o.value);
+                        setPickerStrategies(remaining.length > 0 ? remaining : ['buy_pullback']);
                       } else {
+                        // Select: add this strategy to the list
                         setPickerStrategies([...pickerStrategies, o.value]);
                       }
                     }}
@@ -665,7 +668,7 @@ const PickerPage: React.FC = () => {
             </button>
           </div>
           <p className="text-xs text-muted text-center mt-4">
-            买回踩 · 突破 · 底部反转 · MACD金叉 — 多策略并行，按需组合
+            买回踩 · 突破 · 底部反转 · MACD金叉 · 尾盘买入 — 多策略并行，按需组合
           </p>
         </div>
 

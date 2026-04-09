@@ -79,7 +79,7 @@ const PICKER_REQUEST_TIMEOUT_MS = 600_000; // 10 min
 
 export type PickerMode = 'defensive' | 'balanced' | 'offensive';
 
-export type PickerStrategy = 'buy_pullback' | 'breakout' | 'bottom_reversal' | 'macd_golden_cross';
+export type PickerStrategy = 'buy_pullback' | 'breakout' | 'bottom_reversal' | 'macd_golden_cross' | 'eod_buyback';
 
 export interface PickerRecommendParams {
   picker_strategies?: PickerStrategy[];
@@ -91,6 +91,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   breakout: '突破',
   bottom_reversal: '底部反转',
   macd_golden_cross: 'MACD金叉',
+  eod_buyback: '尾盘买入',
 };
 
 export { STRATEGY_LABELS };
