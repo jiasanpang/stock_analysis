@@ -6,7 +6,7 @@ Strategies: buy_pullback, breakout, bottom_reversal, macd_golden_cross
 No intensity modes (defensive/balanced/offensive) — each strategy has one set of params.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import pandas as pd

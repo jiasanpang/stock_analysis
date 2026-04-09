@@ -26,13 +26,10 @@ h h# 实时行情筛选优化 - 完成总结
 2. **docs/realtime-filter-quickstart.md**
    - 快速参考卡片（适合快速查阅）
 
-3. **优化说明_实时筛选.md**
-   - 中文友好的优化说明
-
-4. **README.md**
+3. **README.md**
    - 更新文档索引，突出新功能
 
-5. **docs/CHANGELOG.md**
+4. **docs/CHANGELOG.md**
    - 记录新功能的所有细节
 
 ### 测试与验证
