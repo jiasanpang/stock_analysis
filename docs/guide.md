@@ -5,13 +5,13 @@
 ### 必填
 
 | 变量 | 说明 |
-|------|------|
+| ---- | ---- |
 | `STOCK_LIST` | 自选股代码，如 `600519,hk00700,AAPL` |
 
 ### AI 模型（至少配置一个）
 
 | 变量 | 说明 |
-|------|------|
+| ---- | ---- |
 | `GEMINI_API_KEY` | Google AI Studio 免费 Key |
 | `OPENAI_API_KEY` | OpenAI 兼容 API（DeepSeek、通义千问等） |
 | `OPENAI_BASE_URL` | API 地址，如 `https://api.deepseek.com/v1` |
@@ -22,7 +22,7 @@
 ### 通知渠道（至少配置一个）
 
 | 变量 | 说明 |
-|------|------|
+| ---- | ---- |
 | `WECHAT_WEBHOOK_URL` | 企业微信 Webhook |
 | `FEISHU_WEBHOOK_URL` | 飞书 Webhook |
 | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Telegram |
@@ -34,7 +34,7 @@
 ### 搜索与数据
 
 | 变量 | 说明 |
-|------|------|
+| ---- | ---- |
 | `TAVILY_API_KEYS` | 新闻搜索（推荐） |
 | `BOCHA_API_KEYS` | 博查搜索（中文优化） |
 | `TUSHARE_TOKEN` | Tushare Pro（可选） |
@@ -42,7 +42,7 @@
 ### 其他
 
 | 变量 | 说明 | 默认 |
-|------|------|------|
+| ---- | ---- | ---- |
 | `REPORT_TYPE` | `simple` / `full` / `brief` | `simple` |
 | `PUSH_REPORT_TYPE` | 推送报告类型，不配置则同 REPORT_TYPE | - |
 | `NOTIFY_ENABLED` | 是否发送推送，本地可设 `false` | `true` |

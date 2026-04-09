@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **feat(picker)**: eod_buyback 策略重写为龙虾方案 — 使用 `ts.get_realtime_quotes()` 分批200只查询全市场实时行情，替代 efinance 全市场接口
+- **feat(picker)**: eod_buyback 补充 Tushare Pro `daily_basic` 数据（换手率、总市值）
+- **feat(picker)**: eod_buyback 添加盘后量比过滤（15:00后生效）和 VWAP 实时验证
+
+### Fixed
+- **fix(picker)**: 修复 `_filter_by_realtime()` NoneType 比较崩溃，添加 `_safe_float()` 防护
+- **fix(picker)**: eod_buyback 候选完整 bypass `_filter_by_realtime()`，避免双重过滤
+- **fix(data)**: 修复 Tushare `change_amount` 计算错误（`bid-ask` → `price-pre_close`）
+- **fix(data)**: 修复 Tushare 实时行情 9 个字段硬编码 0.0 改为 None
+- **fix(picker)**: 空筛选池三重防护 — 跳过LLM、后验证、提示词加严
+
+### Changed
+- **refactor(picker)**: 底部反转策略参数优化 — 启用缩量检查、量比0.7、60日上限-5%、B浪过滤0.618
+- **refactor(picker)**: 底部反转评分增强 — 60日跌幅深度加分、缩量→放量转折信号、反转K线形态加分
+- **refactor(picker)**: bottom_reversal `daily_change_min` 0.0→1.0，macd_golden_cross 0.0→0.5，实时验证更严格
+- **refactor(picker)**: 清理未使用的全市场实时路径死代码（fetch_realtime_market_data、get_realtime_all_spots）
+- **refactor(picker)**: 删除重复的 `_has_recent_limit_up` 函数
+- **perf**: 并发超时 10s→60s，eastmoney patch 超时 15s→30s
+
+### Added (previous)
 - Real-time filtering stage (Stage 1.5) for stock picker: After quantitative screening, filter candidates by live market conditions (limit-up/down, daily price range, volume spike). **Enables intraday picking & same-day trading**.
   - `PICKER_ENABLE_REALTIME_FILTER` (bool, default true): Main toggle
   - `PICKER_REALTIME_EXCLUDE_LIMIT_UP` (bool, default true): Exclude up-limit-locked stocks

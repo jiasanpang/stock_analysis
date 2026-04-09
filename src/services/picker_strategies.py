@@ -132,32 +132,32 @@ BREAKOUT_PARAMS = StrategyParams(
     volume_ratio_min=1.5,  # Stronger volume for breakout
 )
 
-# Bottom reversal: 60d -25% ~ 10%, stabilizing (expert-tuned: retracement relaxed)
+# Bottom reversal: 60d -25% ~ -5%, true bottom with volume shrink stabilisation
 BOTTOM_REVERSAL_PARAMS = StrategyParams(
     max_bias_pct=6.0,  # Stricter (near support)
     leader_bias_exempt_pct=0.0,  # No exemption: bottom stocks are not leaders
     pe_max=100,
     pe_ideal_low=8,
     pe_ideal_high=35,
-    daily_change_min=0.0,  # Stabilizing or slight up
+    daily_change_min=1.0,  # Must be rising today — confirms reversal signal
     daily_change_max=5.0,
     max_consecutive_up_days=3,
-    require_volume_shrink=False,
+    require_volume_shrink=True,  # Bottom must show volume contraction stabilisation
     require_ma_bullish=False,  # Bottom stocks often not MA bullish
-    max_retracement_pct=1.0,  # Effectively skip: at bottom retracement often 100%
+    max_retracement_pct=0.618,  # Fibonacci 61.8% B-wave rebound filter
     change_60d_min=-25.0,
-    change_60d_max=10.0,
-    volume_ratio_min=1.2,  # Some volume for confirmation
+    change_60d_max=-5.0,  # Only stocks still in decline — exclude already-rebounded
+    volume_ratio_min=0.7,  # Allow low volume ratio (stabilisation = shrinking volume)
 )
 
-# MACD golden cross: 60d -15% ~ 50%, daily 0% ~ 6%, volume confirmation
+# MACD golden cross: 60d -15% ~ 50%, daily 0.5% ~ 6%, volume confirmation
 MACD_GOLDEN_CROSS_PARAMS = StrategyParams(
     max_bias_pct=8.0,
     leader_bias_exempt_pct=0.0,  # No exemption: golden cross at inflection
     pe_max=100,
     pe_ideal_low=10,
     pe_ideal_high=35,
-    daily_change_min=0.0,
+    daily_change_min=0.5,  # Require positive momentum to confirm golden cross
     daily_change_max=6.0,
     max_consecutive_up_days=3,
     require_volume_shrink=False,
@@ -393,7 +393,17 @@ def score_breakout(row: Dict[str, Any], params: StrategyParams) -> float:
 
 
 def score_bottom_reversal(row: Dict[str, Any], params: StrategyParams) -> float:
-    """Score for bottom reversal: less negative 60d + volume + stabilizing."""
+    """Score for bottom reversal: deep 60d decline + volume transition + reversal candle.
+
+    Scoring components:
+        1. 60d decline depth: deeper decline = higher value at bottom  (0-25)
+        2. Momentum: slight up preferred (daily_change_min=1.0 enforced) (10-20)
+        3. Volume transition: shrink-then-expand breakout signal       (0-25)
+        4. Turnover                                                    (5-10)
+        5. PE simple                                                   (5-10)
+        6. Mid-cap bonus                                               (0-5)
+        7. Reversal candle pattern (bullish body / long lower shadow)  (0-10)
+    """
     pct_60d = float(row.get("60日涨跌幅", 0) or 0)
     change_pct = float(row.get("涨跌幅", 0) or 0)
     vol_ratio = float(row.get("量比", 0) or 0)
@@ -401,20 +411,60 @@ def score_bottom_reversal(row: Dict[str, Any], params: StrategyParams) -> float:
     pe = float(row.get("市盈率-动态", 0) or 0)
     total_mv = float(row.get("总市值", 0) or 0)
 
-    # Prefer stocks that have stopped falling (60d not too negative, or improving)
-    # -25% to 0: linear score 0-20; 0 to 10: 20-25
+    # --- 1. 60d decline depth scoring ---
+    # Deeper decline (-30% ~ -20%) = higher bottom value
     if pct_60d >= 0:
         trend = min(25.0, 20.0 + pct_60d * 0.5)
+    elif pct_60d >= -10:
+        # -10% ~ 0%: moderate value
+        trend = max(0.0, 20.0 + pct_60d * 0.8)  # -10 -> 12, 0 -> 20
+    elif pct_60d >= -30:
+        # -30% ~ -10%: deep bottom bonus — deeper = more value
+        trend = 15.0 + (-pct_60d - 10) * 0.5  # -10 -> 15, -20 -> 20, -30 -> 25
     else:
-        trend = max(0.0, 20.0 + pct_60d * 0.8)  # -25 -> 0, -10 -> 12
+        # Below -30%: cap at 25 (diminishing returns at extreme decline)
+        trend = 25.0
 
-    # Slight up or flat preferred
+    # --- 2. Momentum: slight up preferred (daily_change_min=1.0 enforced) ---
     mom = 20.0 if 0 <= change_pct <= 3 else (15.0 if 3 < change_pct <= 5 else 10.0)
-    vol = 20.0 if vol_ratio >= 1.5 else (10.0 if vol_ratio >= 1.2 else 0.0)
+
+    # --- 3. Volume transition: shrink-to-expand breakout signal ---
+    # Today's vol_ratio > 1.2 on a stabilising day = volume expansion after contraction
+    # (The 5d avg vol_ratio check requires daily data; here we use row-level proxy)
+    if vol_ratio > 1.5:
+        vol = 25.0  # Strong volume expansion — breakout signal
+    elif vol_ratio > 1.2:
+        vol = 20.0  # Moderate expansion — potential breakout
+    elif vol_ratio >= 0.7:
+        vol = 10.0  # Low volume — still in contraction phase, acceptable
+    else:
+        vol = 0.0
+
+    # --- 4. Turnover ---
     to = 10.0 if 1 <= turnover <= 10 else 5.0
+
+    # --- 5. PE ---
     pe_s = _score_pe_simple(pe, params)
+
+    # --- 6. Mid-cap bonus ---
     mid = _score_mid_cap(total_mv)
-    return trend + mom + vol + to + pe_s + mid
+
+    # --- 7. Reversal candle pattern ---
+    candle_bonus = 0.0
+    open_price = float(row.get("今开", 0) or row.get("开盘", 0) or 0)
+    close_price = float(row.get("最新价", 0) or row.get("收盘", 0) or 0)
+    low_price = float(row.get("最低", 0) or 0)
+    if open_price > 0 and close_price > 0:
+        # Bullish candle: close > open
+        if close_price > open_price:
+            candle_bonus += 5.0
+        # Long lower shadow: (open - low) > (close - open) indicates buying at bottom
+        body = abs(close_price - open_price)
+        lower_shadow = min(open_price, close_price) - low_price if low_price > 0 else 0
+        if lower_shadow > body and lower_shadow > 0:
+            candle_bonus += 5.0
+
+    return trend + mom + vol + to + pe_s + mid + candle_bonus
 
 
 def score_macd_golden_cross(row: Dict[str, Any], params: StrategyParams) -> float:
@@ -425,7 +475,7 @@ def score_macd_golden_cross(row: Dict[str, Any], params: StrategyParams) -> floa
     pe = float(row.get("市盈率-动态", 0) or 0)
     total_mv = float(row.get("总市值", 0) or 0)
 
-    # Moderate momentum preferred (0-6% daily)
+    # Moderate momentum preferred (0.5-6% daily)
     mom = 20.0 if 0 <= change_pct <= 3 else (15.0 if 3 < change_pct <= 5 else 10.0)
     vol = 20.0 if vol_ratio >= 1.5 else (10.0 if vol_ratio >= 1.0 else 0.0)
     to = 10.0 if 2 <= turnover <= 8 else (5.0 if 1 <= turnover < 2 else 0.0)

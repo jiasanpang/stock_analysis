@@ -84,7 +84,7 @@ PICKER_REALTIME_MAX_VOLUME_RATIO=0.0
 ## 四、配置项详解
 
 | 配置项 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
+| ---- | ---- | ---- | ---- |
 | `PICKER_ENABLE_REALTIME_FILTER` | bool | `true` | 整体开关 |
 | `PICKER_REALTIME_EXCLUDE_LIMIT_UP` | bool | `true` | 排除涨停（涨幅 ≥ 9.5% for 主板，≥ 20% for 创业板/科创板） |
 | `PICKER_REALTIME_EXCLUDE_LIMIT_DOWN` | bool | `true` | 排除跌停（跌幅 ≤ -9.5% or -20%） |
@@ -186,7 +186,7 @@ PICKER_ENABLE_REALTIME_FILTER=false
 ## 八、性能对比
 
 | 场景 | 无实时筛选 | 有实时筛选 | 改善 |
-|-----|---------|----------|-----|
+| ---- | ---- | ---- | ---- |
 | 选股运行时间 | ~30s | ~31s | +1s（可忽略） |
 | 候选池数量 | ~30 | ~25 | -17%（更精细） |
 | AI 精选耗时 | ~15s | ~14s | -7%（输入少） |

@@ -61,7 +61,7 @@ PICKER_REALTIME_MAX_VOLUME_RATIO=10.0
 ## 配置详解
 
 | 配置项 | 作用 | 常用值 |
-|-------|------|-------|
+| ---- | ---- | ---- |
 | `PICKER_REALTIME_EXCLUDE_LIMIT_UP` | 排除涨停 | `true` ✅ |
 | `PICKER_REALTIME_EXCLUDE_LIMIT_DOWN` | 排除跌停 | `true` ✅ |
 | `PICKER_REALTIME_DAILY_CHG_MIN` | 最小涨幅 | `-3` / `-2` / `0` / 空 |

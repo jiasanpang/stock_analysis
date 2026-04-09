@@ -78,7 +78,7 @@ Stage 2: AI 精选（LLM 推荐 1-5 只）
 ### 配置项
 
 | 环境变量 | 类型 | 默认 | 说明 |
-|---------|------|------|------|
+| -------- | ---- | ---- | ---- |
 | `PICKER_ENABLE_REALTIME_FILTER` | bool | `true` | 开关 |
 | `PICKER_REALTIME_EXCLUDE_LIMIT_UP` | bool | `true` | 排除涨停 |
 | `PICKER_REALTIME_EXCLUDE_LIMIT_DOWN` | bool | `true` | 排除跌停 |
@@ -121,7 +121,7 @@ PICKER_REALTIME_MAX_VOLUME_RATIO=10.0
 ## 📊 性能对比
 
 | 指标 | 无实时筛选 | 有实时筛选 | 改善 |
-|------|---------|----------|-----|
+| ----- | --------- | --------- | ----- |
 | 选股运行时间 | ~30s | ~31s | +1s（可忽略） |
 | 候选池数量 | ~30 | ~24 | -20%（更精细） |
 | AI 处理耗时 | ~15s | ~14s | -7%（输入少） |
