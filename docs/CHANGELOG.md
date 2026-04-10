@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **feat(picker)**: 板块强度过滤 — 选股前自动过滤弱势板块，仅从强势行业板块成分股中选股
+  - 按策略区分：buy_pullback/breakout/macd_golden_cross 启用，bottom_reversal 跳过
+  - 新增 `SectorStrengthService` 提供板块排名和成分股获取（AkShare数据源）
+  - 新增环境变量：`PICKER_SECTOR_FILTER`, `PICKER_SECTOR_TOP_PCT`
+- **feat(picker)**: MarketGuard 市场环境开关 — 沪指低于MA20超1%时自动限制选股策略
+  - 三档判断：strong / neutral（缓冲区0~1%）/ weak
+  - 新增 `get_index_daily_data()` 正确获取上证指数日线数据
+  - 新增环境变量：`PICKER_MARKET_GUARD`, `PICKER_WEAK_MARKET_ACTION`, `PICKER_WEAK_MARKET_STRATEGIES`
 - **feat(picker)**: buy_pullback 新增距20日高点最小距离过滤 (`min_pullback_from_high_pct=3.0`)，排除追高
 - **feat(picker)**: buy_pullback 新增 MA20 下跌通道防护 (`require_price_above_ma20`)，跌破 MA20 排除
 - **feat(picker)**: buy_pullback 新增 MA10 支撑位距离过滤 (`max_distance_above_ma10_pct=3.0`)，确认支撑位附近
@@ -23,8 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **fix(data)**: 修复 Tushare `change_amount` 计算错误（`bid-ask` → `price-pre_close`）
 - **fix(data)**: 修复 Tushare 实时行情 9 个字段硬编码 0.0 改为 None
 - **fix(picker)**: 空筛选池三重防护 — 跳过LLM、后验证、提示词加严
+- **fix(picker)**: MarketGuard 指数代码 bug — `get_daily_data("000001")` 返回平安银行而非上证指数
+- **fix(picker)**: MarketGuard limit 模式永久修改策略列表 — 改用 try/finally 恢复原始策略
 
 ### Changed
+- **refactor(picker)**: buy_pullback 策略参数优化 — 均线多头加0.5%容差，缩量条件放宽至1.3
+- **refactor(picker)**: buy_pullback 评分函数重写 — 量比评分奖励缩量，动量评分对齐入池范围
 - **refactor(picker)**: buy_pullback 策略参数全面收紧 — 启用缩量检查、量比0.7、乖离率5%、PE上限60、日涨幅上限2%、60日上限40%、回调限制0.4
 - **refactor(picker)**: buy_pullback 评分优化 — 缩量(0.5-0.9)最高分、深回踩(-3%~-1%)最高分、放量(>3.0)惩罚
 - **refactor(picker)**: 底部反转策略参数优化 — 启用缩量检查、量比0.7、60日上限-5%、B浪过滤0.618

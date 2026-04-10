@@ -278,6 +278,15 @@ class Config:
     # 实时行情筛选：排除异常放量（量比>此值），如 5.0 排除量比>5的（0表示无限制）
     picker_realtime_max_volume_ratio: float = 0.0
 
+    # Market guard: skip stock picking in weak market (SSE index < MA20)
+    picker_market_guard: bool = True
+    picker_weak_market_action: str = "limit"  # skip=no picking, limit=only allowed strategies
+    picker_weak_market_strategies: str = "bottom_reversal"  # Comma-separated strategies allowed in weak market
+
+    # Sector strength filter: only pick stocks from strong sectors
+    picker_sector_filter: bool = True           # Enable/disable sector strength filter
+    picker_sector_top_pct: int = 30             # Top N% sectors considered "strong" (default: 30%)
+
     # === 日志配置 ===
     log_dir: str = "./logs"  # 日志文件目录
     log_level: str = "INFO"  # 日志级别
@@ -748,6 +757,11 @@ class Config:
             picker_realtime_daily_chg_min=float(os.getenv('PICKER_REALTIME_DAILY_CHG_MIN', '')) if os.getenv('PICKER_REALTIME_DAILY_CHG_MIN') else None,
             picker_realtime_daily_chg_max=float(os.getenv('PICKER_REALTIME_DAILY_CHG_MAX', '')) if os.getenv('PICKER_REALTIME_DAILY_CHG_MAX') else None,
             picker_realtime_max_volume_ratio=float(os.getenv('PICKER_REALTIME_MAX_VOLUME_RATIO', '0.0')),
+            picker_market_guard=os.getenv('PICKER_MARKET_GUARD', 'true').lower() == 'true',
+            picker_weak_market_action=os.getenv('PICKER_WEAK_MARKET_ACTION', 'limit').strip().lower(),
+            picker_weak_market_strategies=os.getenv('PICKER_WEAK_MARKET_STRATEGIES', 'bottom_reversal').strip(),
+            picker_sector_filter=os.getenv('PICKER_SECTOR_FILTER', 'true').lower() == 'true',
+            picker_sector_top_pct=int(os.getenv('PICKER_SECTOR_TOP_PCT', '30')),
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             max_workers=int(os.getenv('MAX_WORKERS', '3')),

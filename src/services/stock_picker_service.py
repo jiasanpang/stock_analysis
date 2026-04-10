@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple  # noqa: F401 - Dict used in screen()
+from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: F401 - Dict used in screen()
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -73,6 +73,16 @@ B_WAVE_RETRACE_LO = 0.35    # Fibonacci B-wave zone: 38.2% retracement
 B_WAVE_RETRACE_HI = 0.65    # 61.8% retracement
 B_WAVE_LOW_DAYS_AGO_MIN = 2  # Low must be at least 2 days ago (we've bounced)
 B_WAVE_LOW_DAYS_AGO_MAX = 14  # Low not more than 14 days ago (recent drop)
+
+
+@dataclass
+class MarketEnvironment:
+    """Market environment assessment based on SSE index vs MA20."""
+    is_strong: bool          # True=bullish (strong/neutral), False=bearish (weak)
+    index_price: float       # SSE index current close
+    index_ma20: float        # SSE index 20-day MA
+    diff_pct: float          # (price - ma20) / ma20 * 100
+    regime: str = "strong"   # "strong" / "neutral" / "weak"
 
 
 def _resolve_fallback_trade_date(china_now: datetime) -> str:
@@ -410,6 +420,66 @@ class StockScreener:
     # eod_buyback uses a dedicated realtime full-market path and does NOT need daily data.
     DAILY_DATA_STRATEGIES = {"buy_pullback", "breakout", "bottom_reversal", "macd_golden_cross"}
 
+    # Strategies that benefit from sector strength filtering
+    SECTOR_FILTER_STRATEGIES = {"buy_pullback", "breakout", "macd_golden_cross"}
+
+    def _check_market_environment(self) -> Optional[MarketEnvironment]:
+        """Check SSE index vs MA20 to determine market regime.
+
+        Returns MarketEnvironment or None if data unavailable.
+        """
+        if not self._data_manager:
+            return None
+        try:
+            # Use SSE composite index (000001.SH) via dedicated index API
+            df, source = self._data_manager.get_index_daily_data(
+                index_code="000001.SH", days=25, end_date=self._as_of_date,
+            )
+            if df is None or len(df) < 20:
+                logger.warning("[MarketGuard] SSE index data insufficient (<20 bars)")
+                return None
+
+            close_col = self._first_col(df, "close", "收盘")
+            if close_col is None:
+                return None
+
+            close_series = pd.to_numeric(df[close_col], errors="coerce").dropna()
+            if len(close_series) < 20:
+                return None
+
+            close_series = close_series.tail(20)
+            ma20 = float(close_series.mean())
+            current = float(close_series.iloc[-1])
+            diff_pct = (current - ma20) / ma20 * 100 if ma20 > 0 else 0.0
+            logger.debug("[MarketGuard] SSE index data: %d bars, latest close=%.1f", len(df), current)
+
+            # Buffer zone: within 1% below MA20 is considered neutral (not weak)
+            MARKET_GUARD_BUFFER_PCT = 1.0
+
+            if current > ma20:
+                regime = "strong"
+            elif (ma20 - current) / ma20 * 100 <= MARKET_GUARD_BUFFER_PCT:
+                regime = "neutral"  # Within buffer zone
+            else:
+                regime = "weak"
+
+            env = MarketEnvironment(
+                is_strong=regime != "weak",  # strong and neutral both pass
+                index_price=current,
+                index_ma20=ma20,
+                diff_pct=diff_pct,
+                regime=regime,
+            )
+            logger.info(
+                "[MarketGuard] SSE %.1f %s MA20 %.1f (diff %+.2f%%) -> %s",
+                current, ">" if current > ma20 else "<", ma20, diff_pct,
+                regime.upper(),
+            )
+            return env
+        except Exception as e:
+            logger.warning("[MarketGuard] Market check failed: %s", e)
+            return None
+
     def screen(self, trade_date: Optional[str] = None) -> Tuple[List[ScreenedStock], ScreenStats, Dict[str, List[ScreenedStock]]]:
         """Run the full screening pipeline. Returns (candidates, stats, candidates_per_strategy).
         When trade_date is provided (YYYYMMDD), run historical screening (Tushare only).
@@ -417,103 +487,187 @@ class StockScreener:
         stats = ScreenStats()
         self._as_of_date = self._trade_date_to_iso(trade_date) if trade_date else None
 
-        # Determine which strategies need daily data vs realtime-only path
-        daily_strategies = [s for s in self._picker_strategies if s in self.DAILY_DATA_STRATEGIES]
-        realtime_only_strategies = [s for s in self._picker_strategies if s not in self.DAILY_DATA_STRATEGIES]
-        needs_daily = len(daily_strategies) > 0
+        # Preserve original strategies — restored in finally block
+        original_strategies = list(self._picker_strategies)
 
-        if daily_strategies:
-            logger.info(f"[Screener] Daily-data strategies: {daily_strategies}")
-        if realtime_only_strategies:
-            logger.info(f"[Screener] Realtime-only strategies (skip daily fetch): {realtime_only_strategies}")
+        try:
+            # -- Market environment guard --
+            cfg = get_config()
+            if getattr(cfg, "picker_market_guard", True):
+                market_env = self._check_market_environment()
+                if market_env and not market_env.is_strong:
+                    raw_action = getattr(cfg, "picker_weak_market_action", "limit")
+                    action = (raw_action or "limit").strip().lower()
+                    if action not in ("skip", "limit"):
+                        logger.warning(
+                            "[MarketGuard] Invalid picker_weak_market_action=%r, fallback to 'limit'",
+                            raw_action,
+                        )
+                        action = "limit"
+                    logger.warning(
+                        "[MarketGuard] Weak market (regime=%s), action=%s",
+                        market_env.regime, action,
+                    )
+                    if action == "skip":
+                        logger.warning(
+                            "[MarketGuard] Weak market detected, skipping all strategies"
+                        )
+                        return [], stats, {}
+                    elif action == "limit":
+                        allowed_str = getattr(cfg, "picker_weak_market_strategies", "bottom_reversal")
+                        allowed = [s.strip() for s in allowed_str.split(",") if s.strip()]
+                        original = list(self._picker_strategies)
+                        self._picker_strategies = [s for s in self._picker_strategies if s in allowed]
+                        if not self._picker_strategies:
+                            logger.warning(
+                                "[MarketGuard] Weak market, no allowed strategies remain "
+                                "(original: %s, allowed: %s)", original, allowed,
+                            )
+                            return [], stats, {}
+                        logger.warning(
+                            "[MarketGuard] Weak market, limiting to strategies: %s",
+                            self._picker_strategies,
+                        )
 
-        from src.services.picker_strategies import (
-            get_strategy_params,
-            filter_momentum,
-            filter_volume,
-            score_and_rank,
-            merge_candidates_by_code,
-            MACD_GOLDEN_CROSS,
-        )
+            # Determine which strategies need daily data vs realtime-only path
+            daily_strategies = [s for s in self._picker_strategies if s in self.DAILY_DATA_STRATEGIES]
+            realtime_only_strategies = [s for s in self._picker_strategies if s not in self.DAILY_DATA_STRATEGIES]
+            needs_daily = len(daily_strategies) > 0
 
-        candidates_per_strategy: Dict[str, List[ScreenedStock]] = {}
+            if daily_strategies:
+                logger.info(f"[Screener] Daily-data strategies: {daily_strategies}")
+            if realtime_only_strategies:
+                logger.info(f"[Screener] Realtime-only strategies (skip daily fetch): {realtime_only_strategies}")
 
-        # --- Daily-data pipeline: only fetch spot data when at least one strategy needs it ---
-        if needs_daily:
-            df = self._fetch_spot_data(trade_date)
-            if df is None or df.empty:
-                logger.warning("[Screener] No spot data available for daily strategies")
-                # Daily strategies cannot proceed, but realtime strategies may still run below
-                df = None
-            else:
-                stats.total_stocks = len(df)
-                logger.info(
-                    f"[Screener] Starting daily pipeline with {stats.total_stocks} stocks, "
-                    f"strategies={daily_strategies}"
-                )
+            from src.services.picker_strategies import (
+                get_strategy_params,
+                filter_momentum,
+                filter_volume,
+                score_and_rank,
+                merge_candidates_by_code,
+                MACD_GOLDEN_CROSS,
+            )
 
-                # Layer 1: Basic quality filter (shared, pe_max=100)
-                df = self._filter_basic_for_strategies(df)
-                stats.after_basic = len(df)
-                logger.info(f"[Screener] After basic filter: {len(df)}")
+            candidates_per_strategy: Dict[str, List[ScreenedStock]] = {}
 
-                # Run each daily-data strategy
-                for strategy_id in daily_strategies:
-                    params = get_strategy_params(strategy_id)
-                    df_s = filter_momentum(df.copy(), params)
-                    stats.after_momentum = len(df_s)
-                    df_s = filter_volume(df_s, params)
-                    stats.after_volume = len(df_s)
-
-                    logger.debug(
-                        f"[Screener] {strategy_id}: after filter_momentum={stats.after_momentum}, "
-                        f"after filter_volume={stats.after_volume}"
+            # --- Daily-data pipeline: only fetch spot data when at least one strategy needs it ---
+            if needs_daily:
+                df = self._fetch_spot_data(trade_date)
+                if df is None or df.empty:
+                    logger.warning("[Screener] No spot data available for daily strategies")
+                    # Daily strategies cannot proceed, but realtime strategies may still run below
+                    df = None
+                else:
+                    stats.total_stocks = len(df)
+                    logger.info(
+                        f"[Screener] Starting daily pipeline with {stats.total_stocks} stocks, "
+                        f"strategies={daily_strategies}"
                     )
 
-                    cands = score_and_rank(df_s, strategy_id, params, top_n=PICKER_TOP_N_PER_STRATEGY)
-                    cands = self._filter_by_bias(
-                        cands,
-                        max_bias_pct=params.max_bias_pct,
-                        leader_bias_exempt_pct=getattr(params, "leader_bias_exempt_pct", 0.0),
-                    )
-                    cands = self._filter_limit_up_streak(cands)
-                    cands = self._filter_consecutive_up_days(cands, max_up_days=params.max_consecutive_up_days)
-                    cands = self._filter_healthy_pullback(cands, params=params)
-                    if strategy_id == MACD_GOLDEN_CROSS:
-                        cands = self._filter_macd_golden_cross(cands, lookback_days=MACD_LOOKBACK_DAYS)
-                    if self._enable_b_wave_filter:
-                        cands = self._filter_b_wave_risk(cands)
+                    # Layer 1: Basic quality filter (shared, pe_max=100)
+                    df = self._filter_basic_for_strategies(df)
+                    stats.after_basic = len(df)
+                    logger.info(f"[Screener] After basic filter: {len(df)}")
 
-                    if cands:
-                        candidates_per_strategy[strategy_id] = cands
-                        logger.info(f"[Screener] {strategy_id}: {len(cands)} candidates")
-                        if logger.isEnabledFor(10):  # DEBUG level
-                            top5 = cands[:5]
-                            top5_str = ", ".join(f"{c.code}({c.score:.1f})" for c in top5)
-                            logger.debug(f"[Screener] {strategy_id} top-5: {top5_str}")
-        else:
-            logger.info("[Screener] Skipping daily data fetch (only realtime strategies selected)")
+                    # Layer 1.5: Prepare sector strength data
+                    _sector_strong_codes: Set[str] = set()
+                    if getattr(cfg, "picker_sector_filter", True):
+                        try:
+                            from src.services.sector_strength_service import SectorStrengthService
+                            sector_svc = SectorStrengthService()
+                            sector_top_pct = getattr(cfg, "picker_sector_top_pct", 30) / 100.0
+                            _sector_strong_codes = sector_svc.get_strong_sector_codes(
+                                top_pct=sector_top_pct,
+                                trade_date=trade_date,
+                            )
+                            if _sector_strong_codes:
+                                logger.info(
+                                    "[Screener] Sector data ready: %d codes from top %.0f%% sectors",
+                                    len(_sector_strong_codes), sector_top_pct * 100,
+                                )
+                            else:
+                                logger.warning("[Screener] Sector filter: no sector data available")
+                        except Exception as e:
+                            logger.warning("[Screener] Sector filter error: %s", e)
 
-        # --- eod_buyback: dedicated realtime full-market screening path ---
-        if "eod_buyback" in self._picker_strategies and self._data_manager:
-            logger.info("[Screener] Running eod_buyback via realtime full-market screening...")
-            eod_rt_cands = self._screen_eod_buyback_realtime()
-            if eod_rt_cands:
-                candidates_per_strategy["eod_buyback"] = eod_rt_cands
-                logger.info(f"[Screener] eod_buyback (realtime path): {len(eod_rt_cands)} candidates")
+                    # Run each daily-data strategy
+                    for strategy_id in daily_strategies:
+                        params = get_strategy_params(strategy_id)
+
+                        # Apply sector filter for applicable strategies
+                        df_s = df.copy()
+                        if _sector_strong_codes and strategy_id in self.SECTOR_FILTER_STRATEGIES:
+                            code_col = None
+                            for col in ['code', '代码', 'ts_code']:
+                                if col in df_s.columns:
+                                    code_col = col
+                                    break
+                            if code_col:
+                                before_sector = len(df_s)
+                                df_s_codes = df_s[code_col].astype(str).str[:6]
+                                df_s = df_s[df_s_codes.isin(_sector_strong_codes)]
+                                logger.info(
+                                    "[Screener] %s: sector filter %d -> %d",
+                                    strategy_id, before_sector, len(df_s),
+                                )
+
+                        df_s = filter_momentum(df_s, params)
+                        stats.after_momentum = len(df_s)
+                        df_s = filter_volume(df_s, params)
+                        stats.after_volume = len(df_s)
+
+                        logger.debug(
+                            f"[Screener] {strategy_id}: after filter_momentum={stats.after_momentum}, "
+                            f"after filter_volume={stats.after_volume}"
+                        )
+
+                        cands = score_and_rank(df_s, strategy_id, params, top_n=PICKER_TOP_N_PER_STRATEGY)
+                        cands = self._filter_by_bias(
+                            cands,
+                            max_bias_pct=params.max_bias_pct,
+                            leader_bias_exempt_pct=getattr(params, "leader_bias_exempt_pct", 0.0),
+                        )
+                        cands = self._filter_limit_up_streak(cands)
+                        cands = self._filter_consecutive_up_days(cands, max_up_days=params.max_consecutive_up_days)
+                        cands = self._filter_healthy_pullback(cands, params=params)
+                        if strategy_id == MACD_GOLDEN_CROSS:
+                            cands = self._filter_macd_golden_cross(cands, lookback_days=MACD_LOOKBACK_DAYS)
+                        if self._enable_b_wave_filter:
+                            cands = self._filter_b_wave_risk(cands)
+
+                        if cands:
+                            candidates_per_strategy[strategy_id] = cands
+                            logger.info(f"[Screener] {strategy_id}: {len(cands)} candidates")
+                            if logger.isEnabledFor(10):  # DEBUG level
+                                top5 = cands[:5]
+                                top5_str = ", ".join(f"{c.code}({c.score:.1f})" for c in top5)
+                                logger.debug(f"[Screener] {strategy_id} top-5: {top5_str}")
             else:
-                candidates_per_strategy.pop("eod_buyback", None)
-                logger.info("[Screener] eod_buyback (realtime path): 0 candidates")
+                logger.info("[Screener] Skipping daily data fetch (only realtime strategies selected)")
 
-        if not candidates_per_strategy:
-            stats.final_pool = 0
-            logger.warning("[Screener] No candidates from any strategy")
-            return [], stats, {}
+            # --- eod_buyback: dedicated realtime full-market screening path ---
+            if "eod_buyback" in self._picker_strategies and self._data_manager:
+                logger.info("[Screener] Running eod_buyback via realtime full-market screening...")
+                eod_rt_cands = self._screen_eod_buyback_realtime()
+                if eod_rt_cands:
+                    candidates_per_strategy["eod_buyback"] = eod_rt_cands
+                    logger.info(f"[Screener] eod_buyback (realtime path): {len(eod_rt_cands)} candidates")
+                else:
+                    candidates_per_strategy.pop("eod_buyback", None)
+                    logger.info("[Screener] eod_buyback (realtime path): 0 candidates")
 
-        candidates = merge_candidates_by_code(candidates_per_strategy)
-        stats.final_pool = len(candidates)
-        logger.info(f"[Screener] Merged {stats.final_pool} candidates from {len(candidates_per_strategy)} strategies")
-        return candidates, stats, candidates_per_strategy
+            if not candidates_per_strategy:
+                stats.final_pool = 0
+                logger.warning("[Screener] No candidates from any strategy")
+                return [], stats, {}
+
+            candidates = merge_candidates_by_code(candidates_per_strategy)
+            stats.final_pool = len(candidates)
+            logger.info(f"[Screener] Merged {stats.final_pool} candidates from {len(candidates_per_strategy)} strategies")
+            return candidates, stats, candidates_per_strategy
+        finally:
+            # Always restore original strategies after this call
+            self._picker_strategies = original_strategies
 
     def screen_as_of(self, trade_date: str) -> Tuple[List[ScreenedStock], ScreenStats, Dict[str, List[ScreenedStock]]]:
         """Run screening as of a specific trade date (YYYYMMDD). For backtest use."""
@@ -1072,22 +1226,27 @@ class StockScreener:
             df_daily = df_daily.sort_values(date_col).tail(lookback_days).reset_index(drop=True)
             close_series = pd.to_numeric(df_daily[close_col], errors="coerce").fillna(0)
 
-            # Check 1: Volume shrink (if required)
-            if mode_params.require_volume_shrink and s.volume_ratio >= 1.0:
-                # Pullback day should have volume_ratio < 1.0 (less selling pressure)
-                # Only exclude if today is actually a down/flat day
-                if s.change_pct <= 0:
-                    logger.debug(f"[Screener] Exclude {s.code}: pullback but volume_ratio={s.volume_ratio:.2f} >= 1.0")
-                    continue
+            # Check 1: Volume shrink or mild expansion (1.0-1.3 acceptable for healthy pullback)
+            VOLUME_SHRINK_LIMIT = 1.3  # Allow mild expansion as valid pullback signal
+            if mode_params.require_volume_shrink and s.change_pct <= 0 and s.volume_ratio >= VOLUME_SHRINK_LIMIT:
+                logger.debug(
+                    "[Screener] Exclude %s %s: volume_ratio %.2f >= %.1f on pullback day",
+                    s.code, s.name, s.volume_ratio, VOLUME_SHRINK_LIMIT,
+                )
+                continue
 
-            # Check 2: MA bullish alignment (MA5 > MA10 > MA20)
+            # Check 2: MA bullish alignment with tolerance for convergence
+            MA_TOLERANCE = 0.005  # 0.5% tolerance for MA convergence (accumulation signal)
             if mode_params.require_ma_bullish and len(close_series) >= 20:
                 ma5 = float(close_series.tail(5).mean())
                 ma10 = float(close_series.tail(10).mean())
                 ma20 = float(close_series.tail(20).mean())
-                if not (ma5 > ma10 > ma20):
+                if not (ma5 >= ma10 * (1 - MA_TOLERANCE) and ma10 >= ma20 * (1 - MA_TOLERANCE)):
                     logger.debug(
-                        f"[Screener] Exclude {s.code}: MA not bullish (MA5={ma5:.2f}, MA10={ma10:.2f}, MA20={ma20:.2f})"
+                        "[Screener] Exclude %s %s: MA not bullish "
+                        "(MA5=%.2f, MA10=%.2f, MA20=%.2f, gap=%.2f%%)",
+                        s.code, s.name, ma5, ma10, ma20,
+                        (ma5 - ma10) / ma10 * 100 if ma10 > 0 else 0,
                     )
                     continue
 

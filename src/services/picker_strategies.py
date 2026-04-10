@@ -109,15 +109,15 @@ BUY_PULLBACK_PARAMS = StrategyParams(
     pe_ideal_high=30,                # Tighter ideal PE ceiling
     daily_change_min=-2.0,           # Precise pullback range: mild dip
     daily_change_max=2.0,            # Prevent chasing intraday rallies
-    max_consecutive_up_days=2,       # Conservative: avoid overextended runs
+    max_consecutive_up_days=3,       # Normal consolidation after 2-3 day rally
     require_volume_shrink=True,      # Core: healthy pullback = shrinking volume
     require_ma_bullish=True,         # MA alignment confirms uptrend
     max_retracement_pct=0.4,         # Stricter retracement limit
     change_60d_min=5.0,              # Require established uptrend
-    change_60d_max=40.0,             # Avoid post-surge pullbacks
+    change_60d_max=50.0,             # Don't miss strong stock pullbacks
     volume_ratio_min=0.7,            # Allow shrinking volume to pass
-    min_pullback_from_high_pct=3.0,  # Must be >=3% below 20d high for valid pullback
-    max_distance_above_ma10_pct=3.0,  # Must be within 3% above MA10 (near support zone)
+    min_pullback_from_high_pct=2.0,  # 1-3% pullback is valid entry
+    max_distance_above_ma10_pct=5.0,  # Wider support zone tolerance
     require_price_above_ma20=True,     # Below MA20 = downtrend, reject
 )
 

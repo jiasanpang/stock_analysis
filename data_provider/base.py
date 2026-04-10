@@ -1150,4 +1150,87 @@ class DataFetcherManager:
                 continue
         return [], []
 
+    def get_index_daily_data(
+        self,
+        index_code: str = "000001.SH",
+        days: int = 25,
+        end_date: Optional[str] = None,
+    ) -> Tuple[Optional[pd.DataFrame], str]:
+        """Get index daily OHLCV data (e.g. SSE index 000001.SH).
+
+        Uses Tushare index_daily API. Returns (DataFrame, source_name) or
+        (None, "") when data is unavailable.
+        """
+        from datetime import timedelta
+
+        if end_date is None:
+            end_date_dt = datetime.now()
+        else:
+            end_date_dt = datetime.strptime(end_date, "%Y-%m-%d")
+
+        start_date_dt = end_date_dt - timedelta(days=days * 2)
+        ts_end = end_date_dt.strftime("%Y%m%d")
+        ts_start = start_date_dt.strftime("%Y%m%d")
+
+        # --- Attempt 1: Tushare index_daily ---
+        for fetcher in self._fetchers:
+            if fetcher.name != "TushareFetcher":
+                continue
+            if not fetcher.is_available():
+                logger.debug("[get_index_daily_data] TushareFetcher not available, skipping")
+                break
+            try:
+                fetcher._check_rate_limit()
+                df = fetcher._api.index_daily(
+                    ts_code=index_code,
+                    start_date=ts_start,
+                    end_date=ts_end,
+                )
+                if df is not None and not df.empty:
+                    df = df.rename(columns={"trade_date": "date", "vol": "volume"})
+                    df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
+                    if "volume" in df.columns:
+                        df["volume"] = df["volume"] * 100
+                    if "amount" in df.columns:
+                        df["amount"] = df["amount"] * 1000
+                    df = df.sort_values("date", ascending=True).reset_index(drop=True)
+                    logger.info(
+                        "[get_index_daily_data] Tushare index_daily OK: %s, rows=%d",
+                        index_code, len(df),
+                    )
+                    return df, "TushareFetcher"
+            except Exception as e:
+                logger.warning("[get_index_daily_data] Tushare index_daily failed: %s", e)
+            break
+
+        # --- Attempt 2: AkShare index data ---
+        for fetcher in self._fetchers:
+            if fetcher.name != "AkshareFetcher":
+                continue
+            try:
+                import akshare as ak
+
+                # akshare uses pure numeric code "000001" for SSE index
+                ak_code = index_code.split(".")[0]
+                ak_start = start_date_dt.strftime("%Y%m%d")
+                ak_end = end_date_dt.strftime("%Y%m%d")
+                df = ak.stock_zh_index_daily(symbol=f"sh{ak_code}")
+                if df is not None and not df.empty:
+                    df = df.rename(columns={"date": "date"})
+                    df["date"] = pd.to_datetime(df["date"])
+                    df = df[(df["date"] >= pd.Timestamp(start_date_dt)) & (df["date"] <= pd.Timestamp(end_date_dt))]
+                    df = df.sort_values("date", ascending=True).reset_index(drop=True)
+                    if not df.empty:
+                        logger.info(
+                            "[get_index_daily_data] AkShare OK: %s, rows=%d",
+                            index_code, len(df),
+                        )
+                        return df, "AkshareFetcher"
+            except Exception as e:
+                logger.warning("[get_index_daily_data] AkShare index failed: %s", e)
+            break
+
+        logger.warning("[get_index_daily_data] All sources failed for %s", index_code)
+        return None, ""
+
 
