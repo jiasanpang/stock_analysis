@@ -1,34 +1,32 @@
-name: 每日股票分析
+name: AI Stock Picker
 
 on:
-  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  # Schedule: Beijing time 14:30 (UTC 06:30), Monday to Friday
   schedule:
-    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+    - cron: '30 6 * * 1-5'
 
-  # 手动触发
+  # Manual trigger with strategy selection
   workflow_dispatch:
     inputs:
-      mode:
-        description: '运行模式'
+      strategy:
+        description: '运行策略'
         required: true
-        default: 'full'
+        default: 'all'
         type: choice
         options:
-          - full           # 完整分析（大盘+股票 双任务并行）
-          - market-only    # 仅大盘复盘
-          - stocks-only    # 仅股票分析
+          - all              # 全部策略并行
+          - buy_pullback     # 仅回踩策略
+          - eod_buyback      # 仅尾盘买入策略
       force_run:
         description: '强制运行（跳过交易日检查）'
         required: false
         default: false
         type: boolean
 
-# 并发控制：同一时间只运行一个分析任务
 concurrency:
-  group: stock-analysis
+  group: stock-picker
   cancel-in-progress: false
 
-# 共享环境变量（各 job 复用）
 env:
   LITELLM_CONFIG: ${{ vars.LITELLM_CONFIG || secrets.LITELLM_CONFIG }}
   LITELLM_CONFIG_YAML: ${{ vars.LITELLM_CONFIG_YAML || secrets.LITELLM_CONFIG_YAML }}
@@ -84,11 +82,6 @@ env:
   SERVERCHAN3_SENDKEY: ${{ secrets.SERVERCHAN3_SENDKEY }}
   STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST || '600519' }}
   MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'cn' }}
-  REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'simple' }}
-  PUSH_REPORT_TYPE: ${{ vars.PUSH_REPORT_TYPE || secrets.PUSH_REPORT_TYPE || 'brief' }}
-  SINGLE_STOCK_NOTIFY: ${{ vars.SINGLE_STOCK_NOTIFY || secrets.SINGLE_STOCK_NOTIFY || 'false' }}
-  MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || secrets.MARKET_REVIEW_ENABLED || 'true' }}
-  ANALYSIS_DELAY: ${{ vars.ANALYSIS_DELAY || secrets.ANALYSIS_DELAY || '0' }}
   TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || secrets.TRADING_DAY_CHECK_ENABLED || 'true' }}
   LOG_LEVEL: INFO
   MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '1' }}
@@ -96,30 +89,35 @@ env:
   REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
 
 jobs:
-  # 任务1: 大盘复盘
-  market-review:
+  # Job 1: buy_pullback strategy (回踩)
+  picker-pullback:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    if: github.event_name == 'schedule' || github.event.inputs.mode == 'full' || github.event.inputs.mode == 'market-only'
+    if: github.event_name == 'schedule' || github.event.inputs.strategy == 'all' || github.event.inputs.strategy == 'buy_pullback'
     steps:
-      - name: 随机延迟（避免固定时间访问）
+      - name: 随机延迟（避免 API 并发限流）
         run: sleep $((RANDOM % 60))
+
       - name: 检出代码
         uses: actions/checkout@v4
+
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
+
       - name: 安装依赖
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+
       - name: 创建必要目录
         run: mkdir -p data logs reports
-      - name: 执行大盘复盘
+
+      - name: 执行 AI 选股（回踩策略）
         env:
-          PICKER_ENABLED: 'false'
+          PICKER_STRATEGIES: buy_pullback
         run: |
           if [ -n "$LITELLM_CONFIG_YAML" ] && [ -n "$LITELLM_CONFIG" ]; then
             mkdir -p "$(dirname "$LITELLM_CONFIG")"
@@ -127,42 +125,48 @@ jobs:
           fi
           FORCE_RUN_ARG=""
           [ "${{ github.event.inputs.force_run }}" = "true" ] && FORCE_RUN_ARG="--force-run"
-          echo "📈 任务: 大盘复盘"
-          python main.py --market-review $FORCE_RUN_ARG
+          echo "🎯 任务: AI 智能选股 (策略: buy_pullback)"
+          python main.py --picker-only $FORCE_RUN_ARG
+
       - name: 上传报告
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: analysis-market-${{ github.run_number }}
+          name: picker-pullback-${{ github.run_number }}
           path: |
             reports/
             logs/
           retention-days: 30
 
-  # 任务2: 股票分析（不含选股）
-  stocks:
+  # Job 2: eod_buyback strategy (尾盘买入)
+  picker-eod:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    if: github.event_name == 'schedule' || github.event.inputs.mode == 'full' || github.event.inputs.mode == 'stocks-only'
+    timeout-minutes: 45
+    if: github.event_name == 'schedule' || github.event.inputs.strategy == 'all' || github.event.inputs.strategy == 'eod_buyback'
     steps:
-      - name: 随机延迟
+      - name: 随机延迟（避免 API 并发限流）
         run: sleep $((RANDOM % 60))
+
       - name: 检出代码
         uses: actions/checkout@v4
+
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
+
       - name: 安装依赖
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+
       - name: 创建必要目录
         run: mkdir -p data logs reports
-      - name: 执行股票分析
+
+      - name: 执行 AI 选股（尾盘买入策略）
         env:
-          PICKER_ENABLED: 'false'
+          PICKER_STRATEGIES: eod_buyback
         run: |
           if [ -n "$LITELLM_CONFIG_YAML" ] && [ -n "$LITELLM_CONFIG" ]; then
             mkdir -p "$(dirname "$LITELLM_CONFIG")"
@@ -170,15 +174,15 @@ jobs:
           fi
           FORCE_RUN_ARG=""
           [ "${{ github.event.inputs.force_run }}" = "true" ] && FORCE_RUN_ARG="--force-run"
-          echo "📊 任务: 股票分析"
-          python main.py --no-market-review $FORCE_RUN_ARG
+          echo "🎯 任务: AI 智能选股 (策略: eod_buyback)"
+          python main.py --picker-only $FORCE_RUN_ARG
+
       - name: 上传报告
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: analysis-stocks-${{ github.run_number }}
+          name: picker-eod-${{ github.run_number }}
           path: |
             reports/
             logs/
           retention-days: 30
-
