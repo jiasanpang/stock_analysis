@@ -1,8 +1,9 @@
 """Sector strength service for identifying strong industry sectors."""
 
 import logging
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -29,8 +30,11 @@ class SectorStrengthService:
     _MEMBERS_TTL = 86400         # 24 hours for sector members (quarterly changes)
     _PRELOAD_TTL = 86400         # 24 hours for preloaded history
 
+    # Class-level shared cache so preloaded data is accessible across all instances
+    _cache: Dict[str, Tuple[float, object]] = {}
+    _cache_lock = threading.Lock()
+
     def __init__(self):
-        self._cache: Dict[str, Tuple[float, object]] = {}  # key -> (timestamp, data)
         self._cache_ttl = self._DEFAULT_TTL
 
     # ------------------------------------------------------------------ cache helpers
@@ -42,16 +46,20 @@ class SectorStrengthService:
             key: Cache key.
             ttl: Custom TTL in seconds. Falls back to self._cache_ttl if None.
         """
-        if key in self._cache:
-            ts, data = self._cache[key]
-            effective_ttl = ttl if ttl is not None else self._cache_ttl
-            if time.time() - ts < effective_ttl:
-                return data
+        with self._cache_lock:
+            entry = self._cache.get(key)
+        if not entry:
+            return None
+        ts, data = entry
+        effective_ttl = ttl if ttl is not None else self._cache_ttl
+        if time.time() - ts < effective_ttl:
+            return data
         return None
 
     def _set_cached(self, key: str, data):
-        """Store data in cache."""
-        self._cache[key] = (time.time(), data)
+        """Store data in cache (thread-safe write)."""
+        with self._cache_lock:
+            self._cache[key] = (time.time(), data)
 
     # ------------------------------------------------------------------ public API
 
@@ -98,14 +106,17 @@ class SectorStrengthService:
 
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(_fetch_members, s): s for s in strong_sectors}
-            for future in as_completed(futures):
-                try:
-                    name, codes = future.result()
-                    all_codes.update(codes)
-                except Exception as e:
-                    failed += 1
-                    if failed <= 3:
-                        logger.debug("[SectorStrength] Failed to get members: %s", e)
+            try:
+                for future in as_completed(futures, timeout=300):
+                    try:
+                        name, codes = future.result(timeout=10)
+                        all_codes.update(codes)
+                    except Exception as e:
+                        failed += 1
+                        if failed <= 3:
+                            logger.debug("[SectorStrength] Failed to get members: %s", e)
+            except FuturesTimeout:
+                logger.warning("[SectorStrength] Member fetch timed out after 300s, returning partial results")
 
         logger.info(
             "[SectorStrength] Strong sector codes: %d stocks from %d sectors (%d failed)",
@@ -129,9 +140,23 @@ class SectorStrengthService:
 
         try:
             logger.info("[SectorStrength] Fetching industry sector rankings from AkShare...")
-            df = ak.stock_board_industry_name_em()
+            # Fetch sector rankings with retry (East Money API can be flaky)
+            df = None
+            for attempt in range(3):
+                try:
+                    df = ak.stock_board_industry_name_em()
+                    if df is not None and not df.empty:
+                        break
+                except Exception as e:
+                    wait = (attempt + 1) * 5  # 5s, 10s, 15s
+                    logger.warning(
+                        "[SectorStrength] Sector ranking fetch attempt %d/3 failed: %s, retrying in %ds",
+                        attempt + 1, e, wait,
+                    )
+                    time.sleep(wait)
+
             if df is None or df.empty:
-                logger.warning("[SectorStrength] No sector data returned")
+                logger.warning("[SectorStrength] All 3 attempts to fetch sector rankings failed")
                 return []
 
             # Normalize column names
@@ -179,9 +204,23 @@ class SectorStrengthService:
 
         import akshare as ak
 
-        # Get all sector names
-        df_names = ak.stock_board_industry_name_em()
+        # Get all sector names with retry (East Money API can be flaky)
+        df_names = None
+        for attempt in range(3):
+            try:
+                df_names = ak.stock_board_industry_name_em()
+                if df_names is not None and not df_names.empty:
+                    break
+            except Exception as e:
+                wait = (attempt + 1) * 5  # 5s, 10s, 15s
+                logger.warning(
+                    "[SectorStrength] Preload sector names attempt %d/3 failed: %s, retrying in %ds",
+                    attempt + 1, e, wait,
+                )
+                time.sleep(wait)
+
         if df_names is None or df_names.empty:
+            logger.warning("[SectorStrength] All 3 attempts to fetch sector names for preload failed")
             return {}
 
         sector_names = df_names['板块名称'].tolist()
@@ -210,13 +249,19 @@ class SectorStrengthService:
         completed = 0
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(_fetch_one, name): name for name in sector_names}
-            for future in as_completed(futures):
-                name, hist = future.result()
-                if hist is not None:
-                    sector_hist[name] = hist
-                completed += 1
-                if completed % 100 == 0:
-                    logger.info("[SectorStrength] Preloaded %d/%d sectors...", completed, len(sector_names))
+            try:
+                for future in as_completed(futures, timeout=300):
+                    name, hist = future.result()
+                    if hist is not None:
+                        sector_hist[name] = hist
+                    completed += 1
+                    if completed % 100 == 0:
+                        logger.info("[SectorStrength] Preloaded %d/%d sectors...", completed, len(sector_names))
+            except FuturesTimeout:
+                logger.warning(
+                    "[SectorStrength] Preload timed out after 300s, got %d/%d sectors",
+                    completed, len(sector_names),
+                )
 
         logger.info("[SectorStrength] Preloaded %d sectors with history data", len(sector_hist))
         self._set_cached(cache_key, sector_hist)
@@ -295,6 +340,45 @@ class SectorStrengthService:
 
     # ------------------------------------------------------------------ sector members
 
+    def preload_realtime(self, top_pct: float = 0.3) -> None:
+        """Preload sector ranking and member stocks in background.
+
+        Call at server startup to warm the cache so user requests are instant.
+        """
+        try:
+            logger.info("[SectorStrength] Background preload started (top_pct=%.0f%%)", top_pct * 100)
+            t0 = time.time()
+            codes = self.get_strong_sector_codes(top_pct=top_pct)
+            elapsed = time.time() - t0
+            logger.info("[SectorStrength] Background preload completed: %d codes in %.1fs", len(codes), elapsed)
+        except Exception as e:
+            logger.warning("[SectorStrength] Background preload failed: %s", e)
+
+    def start_periodic_refresh(self, top_pct: float = 0.3, interval_seconds: int = 3600) -> None:
+        """Start a background thread that periodically refreshes sector data.
+
+        Args:
+            top_pct: Top percentage of sectors to consider strong.
+            interval_seconds: Refresh interval in seconds (default: 1 hour).
+        """
+        def _refresh_loop():
+            while True:
+                time.sleep(interval_seconds)
+                try:
+                    logger.info("[SectorStrength] Periodic refresh started (top_pct=%.0f%%)", top_pct * 100)
+                    t0 = time.time()
+                    codes = self.get_strong_sector_codes(top_pct=top_pct)
+                    elapsed = time.time() - t0
+                    logger.info("[SectorStrength] Periodic refresh completed: %d codes in %.1fs", len(codes), elapsed)
+                except Exception as e:
+                    logger.warning("[SectorStrength] Periodic refresh failed: %s", e)
+
+        t = threading.Thread(target=_refresh_loop, daemon=True, name="sector-refresh")
+        t.start()
+        logger.info("[SectorStrength] Periodic refresh scheduled every %ds", interval_seconds)
+
+    # ------------------------------------------------------------------ sector members
+
     def _get_sector_members(self, sector_name: str) -> Set[str]:
         """Get member stock codes for a sector, with persistent cache.
 
@@ -308,15 +392,21 @@ class SectorStrengthService:
 
         import akshare as ak
 
-        try:
-            df = ak.stock_board_industry_cons_em(symbol=sector_name)
-            if df is not None and not df.empty:
-                code_col = '代码' if '代码' in df.columns else 'code'
-                if code_col in df.columns:
-                    codes = set(df[code_col].astype(str).str.zfill(6).tolist())
-                    self._set_cached(cache_key, codes)
-                    return codes
-            time.sleep(0.02)  # Rate limiting
-        except Exception:
-            pass
+        for attempt in range(2):
+            try:
+                df = ak.stock_board_industry_cons_em(symbol=sector_name)
+                if df is not None and not df.empty:
+                    code_col = '代码' if '代码' in df.columns else 'code'
+                    if code_col in df.columns:
+                        codes = set(df[code_col].astype(str).str.zfill(6).tolist())
+                        self._set_cached(cache_key, codes)
+                        return codes
+                    break
+                time.sleep(0.02)  # Rate limiting
+            except Exception as e:
+                if attempt < 1:
+                    logger.debug("[SectorStrength] Sector members fetch attempt %d/2 failed: %s, retrying", attempt + 1, e)
+                    time.sleep(3)
+                    continue
+                pass
         return set()

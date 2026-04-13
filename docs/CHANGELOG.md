@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+- **perf(sector)**: Background preload of sector ranking & member data at startup via FastAPI lifespan
+- **perf(sector)**: Periodic background refresh every 50 minutes (before 1-hour cache TTL)
+- **perf(sector)**: Class-level shared cache across all service instances (preloaded data reusable by requests)
+- **perf(sector)**: Concurrent member fetch with 10 workers and 300s timeout
+
+### Fixed
+- **fix(sector)**: Correct `TimeoutError` type for `concurrent.futures.as_completed` (`FuturesTimeout`)
+- **fix(sector)**: Thread-safe cache reads with `_cache_lock`
+- **fix(sector)**: Preload moved from `server.py` to `api/app.py` lifespan to work with all startup methods
+- **fix(ci)**: Add `LLM_MINIMAX_*` env vars to `daily_analysis.yml` workflow
+
+### Improved
+- **improve(sector)**: AkShare retry logic (3 attempts with 5/10/15s backoff) for flaky East Money API
+- **improve(picker)**: 180s timeout wrapper for sector code fetch with graceful degradation
+
 ### Added
 - **feat(picker)**: 板块强度过滤 — 选股前自动过滤弱势板块，仅从强势行业板块成分股中选股
   - 按策略区分：buy_pullback/breakout/macd_golden_cross 启用，bottom_reversal 跳过

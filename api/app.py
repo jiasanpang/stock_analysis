@@ -15,8 +15,11 @@ FastAPI 应用工厂模块
     app = create_app()
 """
 
+import logging
 import mimetypes
 import os
+import threading
+import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -34,10 +37,33 @@ from api.v1.schemas.common import HealthResponse
 from src.services.system_config_service import SystemConfigService
 
 
+def _preload_sector_data():
+    """Background task to preload sector strength data at startup."""
+    _logger = logging.getLogger(__name__)
+    _logger.info("[SectorPreload] Background preload thread started")
+    try:
+        from src.services.sector_strength_service import SectorStrengthService
+        from src.config import get_config
+        cfg = get_config()
+        if getattr(cfg, "picker_sector_filter", True):
+            svc = SectorStrengthService()
+            top_pct = getattr(cfg, "picker_sector_top_pct", 30) / 100.0
+            _logger.info("[SectorPreload] Starting preload with top_pct=%.0f%%", top_pct * 100)
+            svc.preload_realtime(top_pct=top_pct)
+            # Start periodic background refresh (every 50 minutes, before 1-hour cache expires)
+            svc.start_periodic_refresh(top_pct=top_pct, interval_seconds=3000)
+        else:
+            _logger.info("[SectorPreload] Sector filter disabled, skipping preload")
+    except Exception as e:
+        _logger.error("[SectorPreload] Preload failed: %s\n%s", e, traceback.format_exc())
+
+
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
     app.state.system_config_service = SystemConfigService()
+    # Start sector data preload in background (non-blocking)
+    threading.Thread(target=_preload_sector_data, daemon=True, name="sector-preload").start()
     try:
         yield
     finally:

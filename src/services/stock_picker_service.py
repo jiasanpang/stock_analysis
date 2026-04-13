@@ -576,10 +576,22 @@ class StockScreener:
                             from src.services.sector_strength_service import SectorStrengthService
                             sector_svc = SectorStrengthService()
                             sector_top_pct = getattr(cfg, "picker_sector_top_pct", 30) / 100.0
-                            _sector_strong_codes = sector_svc.get_strong_sector_codes(
-                                top_pct=sector_top_pct,
-                                trade_date=trade_date,
-                            )
+                            # Wrap sector fetch with timeout to prevent blocking
+                            from concurrent.futures import ThreadPoolExecutor as _TPE
+                            with _TPE(max_workers=1) as _executor:
+                                _future = _executor.submit(
+                                    sector_svc.get_strong_sector_codes,
+                                    top_pct=sector_top_pct,
+                                    trade_date=trade_date,
+                                )
+                                try:
+                                    _sector_strong_codes = _future.result(timeout=180)
+                                except Exception as _te:
+                                    logger.warning(
+                                        "[Screener] Sector codes fetch timed out or failed (%s), skipping sector filter",
+                                        _te,
+                                    )
+                                    _sector_strong_codes = set()
                             if _sector_strong_codes:
                                 logger.info(
                                     "[Screener] Sector data ready: %d codes from top %.0f%% sectors",
