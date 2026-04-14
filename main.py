@@ -286,6 +286,26 @@ def _format_picker_report(result_dict: dict) -> str:
             if len((p.get("reason", "") or "")) > 60:
                 reason = reason.rstrip() + "..."
             parts.append(f"{dot} {name}({code}) {reason}")
+    # Append candidate pool grouped by strategy
+    strategy_pool = result_dict.get("screened_pool_by_strategy") or {}
+    if strategy_pool:
+        strategy_label = {
+            "buy_pullback": "回踩买入",
+            "eod_buyback": "尾盘买入",
+        }
+        total = sum(len(v) for v in strategy_pool.values())
+        pool_lines = [f"\n📋 候选池（共{total}只）"]
+        for strat, stocks in strategy_pool.items():
+            label = strategy_label.get(strat, strat)
+            cnt = len(stocks)
+            display = stocks[:10]
+            items = [f"{s.get('code', '')} {s.get('name', '')}({s.get('score', 0):.1f})" for s in display]
+            line = f"▸ {label}({cnt}只): {', '.join(items)}"
+            if cnt > 10:
+                line += f" 等{cnt}只"
+            pool_lines.append(line)
+        parts.extend(pool_lines)
+
     if result_dict.get("sectors_to_watch"):
         parts.append(f"\n板块: {', '.join(result_dict['sectors_to_watch'][:5])}")
     if result_dict.get("risk_warning"):
