@@ -833,7 +833,8 @@ class StockScreener:
                     trade_date_str = trade_day.strftime("%Y%m%d")
                     tushare_fetcher._check_rate_limit()
                     df_basic = tushare_fetcher._api.daily_basic(
-                        trade_date=trade_date_str, fields="ts_code,turnover_rate,total_mv"
+                        trade_date=trade_date_str,
+                        fields="ts_code,turnover_rate,total_mv,pe_ttm,pb",
                     )
                     if df_basic is not None and not df_basic.empty:
                         # Convert ts_code (e.g. "000001.SZ") to plain code ("000001")
@@ -841,7 +842,7 @@ class StockScreener:
                         # total_mv from Tushare Pro is in 万元, convert to 亿
                         df_basic["total_mv_yi"] = df_basic["total_mv"] / 1e4
                         df = df.merge(
-                            df_basic[["code", "turnover_rate", "total_mv_yi"]],
+                            df_basic[["code", "turnover_rate", "total_mv_yi", "pe_ttm", "pb"]],
                             on="code", how="left",
                         )
                         logger.info(
@@ -957,6 +958,9 @@ class StockScreener:
         now_sh = datetime.now(ZoneInfo("Asia/Shanghai"))
         is_after_close = now_sh.hour >= 15
 
+        # Store computed volume ratios for later use in ScreenedStock
+        vol_ratio_map: Dict[str, float] = {}
+
         if is_after_close and "volume" in df_filtered.columns:
             logger.info("[EOD-RT] Post-close mode: computing volume ratio from 5-day avg")
             rt_vol = pd.to_numeric(df_filtered["volume"], errors="coerce")
@@ -983,6 +987,7 @@ class StockScreener:
                         keep_idx.append(idx)
                         continue
                     vol_ratio = today_vol / avg_5d
+                    vol_ratio_map[code] = vol_ratio
                     if 2.0 <= vol_ratio <= 5.0:
                         keep_idx.append(idx)
                     else:
@@ -1003,7 +1008,55 @@ class StockScreener:
         if df_filtered.empty:
             return []
 
-        # Step 5: Build ScreenedStock list
+        # Step 5: Compute 60d change for candidate stocks
+        change_60d_map: Dict[str, float] = {}
+        tushare_api = self._get_tushare_api()
+        if tushare_api:
+            try:
+                candidate_codes = [str(row.get("code", "")) for _, row in df_filtered.iterrows()]
+                # Fetch close prices from 60 trading days ago for all candidates
+                from src.core.trading_calendar import get_last_trading_day as _get_ltd_60
+
+                now_sh_60 = datetime.now(ZoneInfo("Asia/Shanghai"))
+                td_60 = _get_ltd_60("cn", now_sh_60.date())
+                if td_60 is not None:
+                    td_str = td_60.strftime("%Y%m%d")
+                    start_60 = (pd.Timestamp(td_str) - pd.Timedelta(days=120)).strftime("%Y%m%d")
+                    df_cal = tushare_api.trade_cal(exchange="SSE", start_date=start_60, end_date=td_str)
+                    if df_cal is not None and not df_cal.empty:
+                        df_cal.columns = [c.lower() for c in df_cal.columns]
+                        df_cal = df_cal[df_cal["is_open"] == 1].sort_values("cal_date")
+                        dates_60 = df_cal["cal_date"].tolist()
+                        if td_str in dates_60:
+                            idx_60 = dates_60.index(td_str)
+                        else:
+                            idx_60 = len(dates_60) - 1
+                        if idx_60 >= 60:
+                            date_60d_ago = dates_60[idx_60 - 60]
+                            df_60d = tushare_api.daily(trade_date=date_60d_ago)
+                            if df_60d is not None and not df_60d.empty:
+                                df_60d.columns = [c.lower() for c in df_60d.columns]
+                                close_60d_lookup = dict(
+                                    zip(
+                                        df_60d["ts_code"].str.split(".").str[0],
+                                        pd.to_numeric(df_60d["close"], errors="coerce"),
+                                    )
+                                )
+                                for _, row in df_filtered.iterrows():
+                                    code = str(row.get("code", ""))
+                                    cur_price = float(row.get("price", 0) or 0)
+                                    old_close = close_60d_lookup.get(code)
+                                    if old_close and old_close > 0 and cur_price > 0:
+                                        change_60d_map[code] = (cur_price - old_close) / old_close * 100
+                                logger.info(
+                                    f"[EOD-RT] 60d change computed for {len(change_60d_map)} candidates"
+                                )
+                        else:
+                            logger.debug("[EOD-RT] Not enough trading days for 60d change")
+            except Exception as e:
+                logger.warning(f"[EOD-RT] Failed to compute 60d change: {e}")
+
+        # Step 5b: Build ScreenedStock list
         candidates_pre: list = []
         for _, row in df_filtered.iterrows():
             code = str(row.get("code", ""))
@@ -1022,11 +1075,16 @@ class StockScreener:
 
             candidates_pre.append(ScreenedStock(
                 code=code, name=name, price=price,
-                change_pct=chg, volume_ratio=0.0, turnover_rate=turnover_val,
-                pe=0.0, pb=0.0,
+                change_pct=chg,
+                volume_ratio=vol_ratio_map.get(code, 0.0),
+                turnover_rate=turnover_val,
+                pe=float(pd.to_numeric(row.get("pe_ttm"), errors="coerce") or 0)
+                if "pe_ttm" in df_filtered.columns else 0.0,
+                pb=float(pd.to_numeric(row.get("pb"), errors="coerce") or 0)
+                if "pb" in df_filtered.columns else 0.0,
                 market_cap=mktcap_val,
                 amount=amount_val / 1e8 if amount_val else 0.0,
-                change_pct_60d=0.0,
+                change_pct_60d=change_60d_map.get(code, 0.0),
                 score=0.0,
                 strategies=["eod_buyback"],
             ))
@@ -1047,7 +1105,17 @@ class StockScreener:
                 logger.debug(f"[EOD-RT] limit-up check error for {s.code}: {e}")
 
         logger.info(f"[EOD-RT] Final eod_buyback candidates: {len(final)}")
-        return final
+
+        # Deduplicate by code, keeping the first occurrence
+        seen_codes: set = set()
+        deduped: list = []
+        for s in final:
+            if s.code not in seen_codes:
+                seen_codes.add(s.code)
+                deduped.append(s)
+        if len(deduped) < len(final):
+            logger.info(f"[EOD-RT] Deduplicated: {len(final)} -> {len(deduped)} candidates")
+        return deduped
 
     def _has_recent_limit_up_check(self, code: str, days: int = 20) -> bool:
         """Check if stock had limit-up within recent N trading days. Used by eod_buyback screener."""
