@@ -571,7 +571,9 @@ class StockScreener:
 
                     # Layer 1.5: Prepare sector strength data
                     _sector_strong_codes: Set[str] = set()
-                    if getattr(cfg, "picker_sector_filter", True):
+                    # Only fetch sector data when at least one selected strategy needs it
+                    _need_sector = any(s in self.SECTOR_FILTER_STRATEGIES for s in daily_strategies)
+                    if getattr(cfg, "picker_sector_filter", True) and _need_sector:
                         try:
                             from src.services.sector_strength_service import SectorStrengthService
                             sector_svc = SectorStrengthService()
@@ -601,6 +603,10 @@ class StockScreener:
                                 logger.warning("[Screener] Sector filter: no sector data available")
                         except Exception as e:
                             logger.warning("[Screener] Sector filter error: %s", e)
+                    elif not _need_sector:
+                        logger.info(
+                            "[Screener] No strategy requires sector filter, skipping sector data fetch"
+                        )
 
                     # Run each daily-data strategy
                     for strategy_id in daily_strategies:
