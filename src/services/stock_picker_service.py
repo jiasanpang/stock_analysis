@@ -2071,6 +2071,10 @@ class StockPickerService:
                     )
                     for s in candidates[:10]
                 ]
+                # Fill fields normally populated by LLM to prevent frontend errors
+                result.sectors_to_watch = []
+                result.risk_warning = "LLM 服务异常，仅返回量化筛选结果，请谨慎参考。"
+                result.generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
                 result.success = True
                 result.elapsed_seconds = time.time() - start
                 return result

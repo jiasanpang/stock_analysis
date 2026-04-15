@@ -324,7 +324,7 @@ const HistoryRow: React.FC<{ item: PickerHistoryItem; onSelect: (id: number) => 
         </svg>
       </div>
 
-      {item.picks_preview.length > 0 && (
+      {(item.picks_preview?.length ?? 0) > 0 && (
         <div className="flex flex-wrap gap-1.5 ml-12">
           {item.picks_preview.map((p) => {
             const cfg = ATTENTION_CFG[p.attention] || ATTENTION_CFG.medium;
@@ -373,8 +373,9 @@ const PIPELINE_STEPS = [
 
 /* ── Result detail view ──────────────────────────────────────── */
 const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({ result, onBack }) => {
-  const highPicks = result.picks.filter(p => p.attention === 'high');
-  const otherPicks = result.picks.filter(p => p.attention !== 'high');
+  const picks = result.picks ?? [];
+  const highPicks = picks.filter(p => p.attention === 'high');
+  const otherPicks = picks.filter(p => p.attention !== 'high');
   const hasStrategy = result.picker_strategies && result.picker_strategies.length > 0;
   const strategyLabel = hasStrategy
     ? result.picker_strategies!.map((s) => STRATEGY_LABELS[s] ?? s).join('、')
@@ -431,7 +432,7 @@ const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({
         </div>
       )}
 
-      {result.sectors_to_watch.length > 0 && (
+      {(result.sectors_to_watch?.length ?? 0) > 0 && (
         <div>
           <h2 className="text-sm font-semibold text-primary mb-4 flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-purple/10 flex items-center justify-center">
@@ -442,7 +443,7 @@ const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({
             关注板块
           </h2>
           <div className="flex flex-wrap gap-2.5">
-            {result.sectors_to_watch.map((s) => <SectorPill key={s} name={s} />)}
+            {result.sectors_to_watch!.map((s) => <SectorPill key={s} name={s} />)}
           </div>
         </div>
       )}
@@ -482,7 +483,7 @@ const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({
         </div>
       )}
 
-      {result.screened_pool.length > 0 && (
+      {(result.screened_pool?.length ?? 0) > 0 && (
         <ScreenedPoolSection
           screenedPool={result.screened_pool}
           screenedPoolByStrategy={result.screened_pool_by_strategy}
@@ -504,7 +505,7 @@ const ResultView: React.FC<{ result: PickerResponse; onBack?: () => void }> = ({
       )}
 
       <div className="flex items-center justify-between text-sm text-muted py-4 border-t border-border">
-        <span>共 {result.picks.length} 只推荐 · 耗时 {result.elapsed_seconds}s</span>
+        <span>共 {picks.length} 只推荐 · 耗时 {result.elapsed_seconds}s</span>
         <span>以上内容由 AI 生成，仅供参考，不构成投资建议</span>
       </div>
     </div>
