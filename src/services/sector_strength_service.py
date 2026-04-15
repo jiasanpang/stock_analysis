@@ -104,19 +104,19 @@ class SectorStrengthService:
             """Fetch member codes for a single sector."""
             return sector["name"], self._get_sector_members(sector["name"])
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=25) as executor:
             futures = {executor.submit(_fetch_members, s): s for s in strong_sectors}
             try:
-                for future in as_completed(futures, timeout=300):
+                for future in as_completed(futures, timeout=180):
                     try:
-                        name, codes = future.result(timeout=10)
+                        name, codes = future.result(timeout=8)
                         all_codes.update(codes)
                     except Exception as e:
                         failed += 1
                         if failed <= 3:
                             logger.debug("[SectorStrength] Failed to get members: %s", e)
             except FuturesTimeout:
-                logger.warning("[SectorStrength] Member fetch timed out after 300s, returning partial results")
+                logger.warning("[SectorStrength] Member fetch timed out after 180s, returning partial results")
 
         logger.info(
             "[SectorStrength] Strong sector codes: %d stocks from %d sectors (%d failed)",

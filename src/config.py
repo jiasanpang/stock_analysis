@@ -285,7 +285,7 @@ class Config:
 
     # Sector strength filter: only pick stocks from strong sectors
     picker_sector_filter: bool = True           # Enable/disable sector strength filter
-    picker_sector_top_pct: int = 30             # Top N% sectors considered "strong" (default: 30%)
+    picker_sector_top_pct: int = 15             # Top N% sectors considered "strong" (default: 15%)
 
     # === 日志配置 ===
     log_dir: str = "./logs"  # 日志文件目录
@@ -761,7 +761,7 @@ class Config:
             picker_weak_market_action=os.getenv('PICKER_WEAK_MARKET_ACTION', 'limit').strip().lower(),
             picker_weak_market_strategies=os.getenv('PICKER_WEAK_MARKET_STRATEGIES', 'bottom_reversal').strip(),
             picker_sector_filter=os.getenv('PICKER_SECTOR_FILTER', 'true').lower() == 'true',
-            picker_sector_top_pct=int(os.getenv('PICKER_SECTOR_TOP_PCT', '30')),
+            picker_sector_top_pct=int(os.getenv('PICKER_SECTOR_TOP_PCT', '15')),
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             max_workers=int(os.getenv('MAX_WORKERS', '3')),

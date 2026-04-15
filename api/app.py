@@ -47,7 +47,7 @@ def _preload_sector_data():
         cfg = get_config()
         if getattr(cfg, "picker_sector_filter", True):
             svc = SectorStrengthService()
-            top_pct = getattr(cfg, "picker_sector_top_pct", 30) / 100.0
+            top_pct = getattr(cfg, "picker_sector_top_pct", 15) / 100.0
             _logger.info("[SectorPreload] Starting preload with top_pct=%.0f%%", top_pct * 100)
             svc.preload_realtime(top_pct=top_pct)
             # Start periodic background refresh (every 50 minutes, before 1-hour cache expires)
