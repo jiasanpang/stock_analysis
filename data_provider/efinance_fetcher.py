@@ -25,6 +25,7 @@ import os
 import random
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -176,6 +177,9 @@ class EfinanceFetcher(BaseFetcher):
     name = "EfinanceFetcher"
     priority = int(os.getenv("EFINANCE_PRIORITY", "0"))  # 最高优先级，排在 AkshareFetcher 之前
     
+    # Wall-clock timeout for blocking efinance network calls (seconds)
+    _EFINANCE_CALL_TIMEOUT = 10
+
     def __init__(self, sleep_min: float = 1.5, sleep_max: float = 3.0):
         """
         初始化 EfinanceFetcher
@@ -243,6 +247,28 @@ class EfinanceFetcher(BaseFetcher):
         # 执行随机 jitter 休眠
         self.random_sleep(self.sleep_min, self.sleep_max)
         self._last_request_time = time.time()
+    
+    def _run_with_timeout(self, fn, label: str, timeout: float = None):
+        """Execute *fn* in a thread with a wall-clock timeout.
+
+        Returns the result of *fn* on success, or raises DataFetchError /
+        original exception on timeout / failure so the caller can handle it.
+        """
+        timeout = timeout or self._EFINANCE_CALL_TIMEOUT
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ef_timeout")
+        fut = pool.submit(fn)
+        try:
+            return fut.result(timeout=timeout)
+        except FuturesTimeout:
+            fut.cancel()
+            logger.warning(
+                f"[efinance] {label} timed out after {timeout}s"
+            )
+            raise DataFetchError(
+                f"efinance {label} timed out after {timeout}s"
+            )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
     
     @retry(
         stop=stop_after_attempt(1),  # 减少到1次，避免触发限流
@@ -315,12 +341,15 @@ class EfinanceFetcher(BaseFetcher):
             # 调用 efinance 获取 A 股日线数据
             # klt=101 获取日线数据
             # fqt=1 获取前复权数据
-            df = ef.stock.get_quote_history(
-                stock_codes=stock_code,
-                beg=beg_date,
-                end=end_date_fmt,
-                klt=101,  # 日线
-                fqt=1     # 前复权
+            df = self._run_with_timeout(
+                lambda: ef.stock.get_quote_history(
+                    stock_codes=stock_code,
+                    beg=beg_date,
+                    end=end_date_fmt,
+                    klt=101,  # 日线
+                    fqt=1     # 前复权
+                ),
+                f"get_quote_history({stock_code})",
             )
             
             api_elapsed = time.time() - api_start
@@ -401,12 +430,15 @@ class EfinanceFetcher(BaseFetcher):
         api_start = time.time()
         try:
             # ETFs are exchange-traded securities; use the stock API to get full OHLCV data
-            df = ef.stock.get_quote_history(
-                stock_codes=stock_code,
-                beg=beg_date,
-                end=end_date_fmt,
-                klt=101,  # daily
-                fqt=1     # forward-adjusted
+            df = self._run_with_timeout(
+                lambda: ef.stock.get_quote_history(
+                    stock_codes=stock_code,
+                    beg=beg_date,
+                    end=end_date_fmt,
+                    klt=101,  # daily
+                    fqt=1     # forward-adjusted
+                ),
+                f"get_quote_history_etf({stock_code})",
             )
 
             api_elapsed = time.time() - api_start
@@ -547,8 +579,11 @@ class EfinanceFetcher(BaseFetcher):
                 import time as _time
                 api_start = _time.time()
                 
-                # efinance 的实时行情 API
-                df = ef.stock.get_realtime_quotes()
+                # efinance 的实时行情 API (with timeout protection)
+                df = self._run_with_timeout(
+                    lambda: ef.stock.get_realtime_quotes(),
+                    "get_realtime_quotes()",
+                )
                 
                 api_elapsed = _time.time() - api_start
                 logger.info(f"[API返回] ef.stock.get_realtime_quotes 成功: 返回 {len(df)} 只股票, 耗时 {api_elapsed:.2f}s")
@@ -649,7 +684,10 @@ class EfinanceFetcher(BaseFetcher):
                 logger.info("[API调用] ef.stock.get_realtime_quotes(['ETF']) 获取ETF实时行情...")
                 import time as _time
                 api_start = _time.time()
-                df = ef.stock.get_realtime_quotes(['ETF'])
+                df = self._run_with_timeout(
+                    lambda: ef.stock.get_realtime_quotes(['ETF']),
+                    "get_realtime_quotes(['ETF'])",
+                )
                 api_elapsed = _time.time() - api_start
 
                 if df is not None and not df.empty:
@@ -737,7 +775,10 @@ class EfinanceFetcher(BaseFetcher):
             logger.info("[API调用] ef.stock.get_realtime_quotes(['沪深系列指数']) 获取指数行情...")
             import time as _time
             api_start = _time.time()
-            df = ef.stock.get_realtime_quotes(['沪深系列指数'])
+            df = self._run_with_timeout(
+                lambda: ef.stock.get_realtime_quotes(['沪深系列指数']),
+                "get_realtime_quotes(['沪深系列指数'])",
+            )
             api_elapsed = _time.time() - api_start
 
             if df is None or df.empty:
@@ -808,7 +849,10 @@ class EfinanceFetcher(BaseFetcher):
                 df = _realtime_cache['data']
             else:
                 logger.info("[API调用] ef.stock.get_realtime_quotes() 获取市场统计...")
-                df = ef.stock.get_realtime_quotes()
+                df = self._run_with_timeout(
+                    lambda: ef.stock.get_realtime_quotes(),
+                    "get_realtime_quotes() [market_stats]",
+                )
                 _realtime_cache['data'] = df
                 _realtime_cache['timestamp'] = current_time
 
@@ -921,7 +965,10 @@ class EfinanceFetcher(BaseFetcher):
             self._enforce_rate_limit()
 
             logger.info("[API调用] ef.stock.get_realtime_quotes(['行业板块']) 获取板块行情...")
-            df = ef.stock.get_realtime_quotes(['行业板块'])
+            df = self._run_with_timeout(
+                lambda: ef.stock.get_realtime_quotes(['行业板块']),
+                "get_realtime_quotes(['行业板块'])",
+            )
             if df is None or df.empty:
                 logger.warning("[efinance] 板块行情数据为空")
                 return None
@@ -973,7 +1020,10 @@ class EfinanceFetcher(BaseFetcher):
             import time as _time
             api_start = _time.time()
             
-            info = ef.stock.get_base_info(stock_code)
+            info = self._run_with_timeout(
+                lambda: ef.stock.get_base_info(stock_code),
+                f"get_base_info({stock_code})",
+            )
             
             api_elapsed = _time.time() - api_start
             logger.info(f"[API返回] ef.stock.get_base_info 成功, 耗时 {api_elapsed:.2f}s")
@@ -1018,7 +1068,10 @@ class EfinanceFetcher(BaseFetcher):
             import time as _time
             api_start = _time.time()
             
-            df = ef.stock.get_belong_board(stock_code)
+            df = self._run_with_timeout(
+                lambda: ef.stock.get_belong_board(stock_code),
+                f"get_belong_board({stock_code})",
+            )
             
             api_elapsed = _time.time() - api_start
             

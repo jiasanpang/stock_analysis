@@ -2038,10 +2038,41 @@ class StockPickerService:
             intel = self._gather_market_intel()
             chip_map = self._fetch_chip_for_candidates(candidates)
             prompt = self._build_prompt(intel, candidates, chip_map)
-            llm_output = self._call_llm(prompt)
+
+            try:
+                llm_output = self._call_llm(prompt)
+            except Exception as llm_exc:
+                logger.warning(
+                    "[StockPicker] LLM call raised exception, "
+                    "degrading to quantitative results: %s", llm_exc,
+                )
+                llm_output = None
 
             if not llm_output:
-                result.error = "LLM returned empty response"
+                # Graceful degradation: return Stage-1 quantitative candidates
+                # instead of failing the entire pipeline.
+                logger.warning(
+                    "[StockPicker] LLM unavailable, returning quantitative "
+                    "screening results without AI analysis"
+                )
+                result.market_summary = (
+                    "AI 分析暂不可用（LLM 服务异常），以下为量化筛选结果，仅供参考。"
+                )
+                result.picks = [
+                    StockPick(
+                        code=s.code,
+                        name=s.name,
+                        sector=s.sector,
+                        reason=f"量化评分 {s.score:.1f}（换手率 {s.turnover_rate:.1f}%，"
+                               f"涨跌 {s.change_pct:+.1f}%）",
+                        catalyst="",
+                        attention="medium",
+                        risk_note="仅量化筛选，未经 AI 深度分析",
+                    )
+                    for s in candidates[:10]
+                ]
+                result.success = True
+                result.elapsed_seconds = time.time() - start
                 return result
 
             self._parse_result(llm_output, result)
@@ -2298,7 +2329,7 @@ class StockPickerService:
     # EOD buyback helpers
     # ------------------------------------------------------------------
 
-    _INTEL_ITEM_TIMEOUT = 15  # wall-clock timeout per market intel fetch (efinance may retry ~5s before fail, then akshare needs time)
+    _INTEL_ITEM_TIMEOUT = 30  # wall-clock timeout per market intel fetch (efinance may retry ~5s before fail, then akshare needs time)
 
     def _gather_market_intel(self) -> Dict[str, Any]:
         """Gather macro market data from multiple sources with per-call timeouts."""
