@@ -2330,20 +2330,37 @@ class StockPickerService:
     # ------------------------------------------------------------------
 
     _INTEL_ITEM_TIMEOUT = 30  # wall-clock timeout per market intel fetch (efinance may retry ~5s before fail, then akshare needs time)
+    _INTEL_TOTAL_TIMEOUT = 60  # overall wall-clock cap for the entire _gather_market_intel
 
     def _gather_market_intel(self) -> Dict[str, Any]:
-        """Gather macro market data from multiple sources with per-call timeouts."""
+        """Gather macro market data from multiple sources with per-call timeouts.
+
+        An overall wall-clock cap (_INTEL_TOTAL_TIMEOUT) prevents cascading
+        fallback retries from exceeding a reasonable budget.  If the cap is
+        reached, the method returns whatever data has been collected so far.
+        """
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
         intel: Dict[str, Any] = {}
+        gather_start = time.time()
+
+        def _remaining() -> float:
+            """Seconds left before the overall cap is hit."""
+            return max(0.0, self._INTEL_TOTAL_TIMEOUT - (time.time() - gather_start))
 
         def _timed_call(label, fn):
             """Run fn in a thread with wall-clock timeout. Return result or None."""
+            remaining = _remaining()
+            if remaining <= 0:
+                logger.warning(f"[StockPicker] {label} skipped – overall intel timeout reached")
+                return None
+            # Use the smaller of per-item timeout and remaining budget
+            effective_timeout = min(self._INTEL_ITEM_TIMEOUT, remaining)
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="intel") as pool:
                 try:
                     fut = pool.submit(fn)
-                    return fut.result(timeout=self._INTEL_ITEM_TIMEOUT)
+                    return fut.result(timeout=effective_timeout)
                 except FuturesTimeout:
-                    logger.warning(f"[StockPicker] {label} timed out after {self._INTEL_ITEM_TIMEOUT}s")
+                    logger.warning(f"[StockPicker] {label} timed out after {effective_timeout:.1f}s")
                     fut.cancel()
                 except Exception as e:
                     logger.warning(f"[StockPicker] {label} failed: {e}")
@@ -2363,6 +2380,13 @@ class StockPickerService:
             if top_sectors:
                 intel["top_sectors"] = top_sectors
                 intel["bottom_sectors"] = bottom_sectors
+
+        elapsed = time.time() - gather_start
+        if elapsed >= self._INTEL_TOTAL_TIMEOUT:
+            logger.warning(
+                f"[StockPicker] _gather_market_intel hit overall timeout ({self._INTEL_TOTAL_TIMEOUT}s), "
+                f"returning partial data: {list(intel.keys())}"
+            )
 
         if self._search_service and self._search_service._providers:
             all_news: List[Dict] = []

@@ -1602,15 +1602,26 @@ class AkshareFetcher(BaseFetcher):
         except Exception as e:
             logger.warning(f"[Akshare] 东财接口获取市场统计失败: {e}，尝试新浪接口")
 
-        # 东财失败后，尝试新浪接口
+        # 东财失败后，尝试新浪接口 (with 10s wall-clock cap to avoid
+        # cascading timeouts when called inside _gather_market_intel)
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutTimeout
         try:
             self._set_random_user_agent()
             self._enforce_rate_limit()
 
             logger.info("[API调用] ak.stock_zh_a_spot() 获取市场统计(新浪)...")
-            df = ak.stock_zh_a_spot()
+
+            def _sina_fetch():
+                return ak.stock_zh_a_spot()
+
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="sina_stats") as pool:
+                fut = pool.submit(_sina_fetch)
+                df = fut.result(timeout=10)
+
             if df is not None and not df.empty:
                 return self._calc_market_stats(df)
+        except _FutTimeout:
+            logger.warning("[Akshare] 新浪接口获取市场统计超时(10s)")
         except Exception as e:
             logger.error(f"[Akshare] 新浪接口获取市场统计也失败: {e}")
 
