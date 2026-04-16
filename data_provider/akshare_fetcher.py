@@ -69,22 +69,40 @@ USER_AGENTS = [
 ]
 
 
-# 缓存实时行情数据（避免重复请求）
-# TTL 设为 20 分钟 (1200秒)：
-# - 批量分析场景：通常 30 只股票在 5 分钟内分析完，20 分钟足够覆盖
-# - 实时性要求：股票分析不需要秒级实时数据，20 分钟延迟可接受
-# - 防封禁：减少 API 调用频率
+# ---------------------------------------------------------------------------
+# Realtime cache with dynamic TTL: 60s during trading hours, 1200s after-hours.
+# ---------------------------------------------------------------------------
+_INTRADAY_TTL = 60     # 1 min — keep data fresh during trading
+_AFTERHOURS_TTL = 1200  # 20 min — relax after market close
+
+
+def _get_realtime_ttl() -> int:
+    """Return cache TTL based on current A-share trading session.
+
+    Trading window: weekdays 09:15 – 15:05 (CST).  Outside this window
+    the data is static so a longer TTL is safe.
+    """
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    # Weekends
+    if now.weekday() >= 5:
+        return _AFTERHOURS_TTL
+    t = now.hour * 100 + now.minute  # e.g. 0930, 1505
+    if 915 <= t <= 1505:
+        return _INTRADAY_TTL
+    return _AFTERHOURS_TTL
+
+
+# Cache dicts — ttl is computed dynamically via _get_realtime_ttl().
 _realtime_cache: Dict[str, Any] = {
     'data': None,
     'timestamp': 0,
-    'ttl': 1200  # 20分钟缓存有效期
 }
 
-# ETF 实时行情缓存
+# ETF realtime cache
 _etf_realtime_cache: Dict[str, Any] = {
     'data': None,
     'timestamp': 0,
-    'ttl': 1200  # 20分钟缓存有效期
 }
 
 
@@ -834,11 +852,12 @@ class AkshareFetcher(BaseFetcher):
         try:
             # Check cache (skip when force_refresh is requested)
             current_time = time.time()
+            ttl = _get_realtime_ttl()
             if (not force_refresh and _realtime_cache['data'] is not None and
-                current_time - _realtime_cache['timestamp'] < _realtime_cache['ttl']):
+                current_time - _realtime_cache['timestamp'] < ttl):
                 df = _realtime_cache['data']
                 cache_age = int(current_time - _realtime_cache['timestamp'])
-                logger.debug(f"[缓存命中] A股实时行情(东财) - 缓存年龄 {cache_age}s/{_realtime_cache['ttl']}s")
+                logger.debug(f"[缓存命中] A股实时行情(东财) - 缓存年龄 {cache_age}s/{ttl}s")
             else:
                 # 触发全量刷新
                 logger.info(f"[缓存未命中] 触发全量刷新 A股实时行情(东财)")
@@ -872,7 +891,7 @@ class AkshareFetcher(BaseFetcher):
                     df = pd.DataFrame()
                 _realtime_cache['data'] = df
                 _realtime_cache['timestamp'] = current_time
-                logger.info(f"[缓存更新] A股实时行情(东财) 缓存已刷新，TTL={_realtime_cache['ttl']}s")
+                logger.info(f"[缓存更新] A股实时行情(东财) 缓存已刷新，TTL={ttl}s")
 
             if df is None or df.empty:
                 logger.warning(f"[实时行情] A股实时行情数据为空，跳过 {stock_code}")
@@ -1243,7 +1262,7 @@ class AkshareFetcher(BaseFetcher):
             # Check cache (skip when force_refresh is requested)
             current_time = time.time()
             if (not force_refresh and _etf_realtime_cache['data'] is not None and
-                current_time - _etf_realtime_cache['timestamp'] < _etf_realtime_cache['ttl']):
+                current_time - _etf_realtime_cache['timestamp'] < _get_realtime_ttl()):
                 df = _etf_realtime_cache['data']
                 logger.debug(f"[缓存命中] 使用缓存的ETF实时行情数据")
             else:

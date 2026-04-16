@@ -35,9 +35,13 @@ def _get_db():
 # ============================================================
 
 def _handle_get_realtime_quote(stock_code: str) -> dict:
-    """Get real-time stock quote."""
+    """Get real-time stock quote.
+
+    Always uses force_refresh=True so the agent (/ask) scenario
+    never serves stale cached data.
+    """
     manager = _get_fetcher_manager()
-    quote = manager.get_realtime_quote(stock_code)
+    quote = manager.get_realtime_quote(stock_code, force_refresh=True)
     if quote is None:
         return {"error": f"No realtime quote available for {stock_code}"}
 
