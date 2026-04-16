@@ -22,7 +22,6 @@ const STRATEGY_OPTIONS: { value: PickerStrategy; label: string }[] = [
   { value: 'buy_pullback', label: '买回踩' },
   { value: 'breakout', label: '突破' },
   { value: 'bottom_reversal', label: '底部反转' },
-  { value: 'macd_golden_cross', label: 'MACD金叉' },
   { value: 'eod_buyback', label: '尾盘买入' },
 ];
 
@@ -593,34 +592,35 @@ const BacktestPage: React.FC = () => {
           <p className="text-xs text-muted mb-4">
             选股回测需逐日调用 Tushare 等数据源，日期较多时可能需 5–15 分钟，请耐心等待。
           </p>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-4 items-end">
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted">开始</label>
-              <input
-                type="date"
-                value={pickerStartDate}
-                onChange={(e) => setPickerStartDate(e.target.value)}
-                disabled={pickerRunning}
-                className="w-full px-3 py-2.5 rounded-lg bg-card border border-border
-                           text-sm text-primary
-                           focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted">结束</label>
-              <input
-                type="date"
-                value={pickerEndDate}
-                onChange={(e) => setPickerEndDate(e.target.value)}
-                disabled={pickerRunning}
-                className="w-full px-3 py-2.5 rounded-lg bg-card border border-border
-                           text-sm text-primary
-                           focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted">持仓天数</label>
-              <div className="flex items-center gap-1.5">
+          <div className="flex flex-col gap-3.5">
+            {/* Row 1: Date & numeric parameters — 4 columns */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-5 gap-y-3">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium text-muted">开始日期</label>
+                <input
+                  type="date"
+                  value={pickerStartDate}
+                  onChange={(e) => setPickerStartDate(e.target.value)}
+                  disabled={pickerRunning}
+                  className="w-full px-3 py-2 rounded-lg bg-card border border-border
+                             text-sm text-primary
+                             focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium text-muted">结束日期</label>
+                <input
+                  type="date"
+                  value={pickerEndDate}
+                  onChange={(e) => setPickerEndDate(e.target.value)}
+                  disabled={pickerRunning}
+                  className="w-full px-3 py-2 rounded-lg bg-card border border-border
+                             text-sm text-primary
+                             focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium text-muted">持仓天数(天)</label>
                 <input
                   type="number"
                   min={1}
@@ -628,16 +628,13 @@ const BacktestPage: React.FC = () => {
                   value={pickerHoldDays}
                   onChange={(e) => setPickerHoldDays(e.target.value)}
                   disabled={pickerRunning}
-                  className="flex-1 px-3 py-2.5 rounded-lg bg-card border border-border
+                  className="w-full px-3 py-2 rounded-lg bg-card border border-border
                              text-sm text-primary text-center
                              focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
                 />
-                <span className="text-xs text-muted shrink-0">天</span>
               </div>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted">每日只数</label>
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium text-muted">每日只数(只)</label>
                 <input
                   type="number"
                   min={1}
@@ -645,52 +642,52 @@ const BacktestPage: React.FC = () => {
                   value={pickerTopN}
                   onChange={(e) => setPickerTopN(e.target.value)}
                   disabled={pickerRunning}
-                  className="flex-1 px-3 py-2.5 rounded-lg bg-card border border-border
+                  className="w-full px-3 py-2 rounded-lg bg-card border border-border
                              text-sm text-primary text-center
                              focus:outline-none focus:border-cyan/50 focus:ring-2 focus:ring-cyan/20 transition-all"
                 />
-                <span className="text-xs text-muted shrink-0">只</span>
               </div>
             </div>
-            <div className="flex flex-col gap-1.5 sm:col-span-2">
-              <label className="text-xs font-medium text-muted">选股策略</label>
-              <div className="flex flex-wrap gap-2">
-                {STRATEGY_OPTIONS.map((o) => {
-                  const selected = pickerStrategies.includes(o.value);
-                  return (
-                    <button
-                      key={o.value}
-                      type="button"
-                      onClick={() => {
-                        if (selected) {
-                          const next = pickerStrategies.filter((s) => s !== o.value);
-                          setPickerStrategies(next.length > 0 ? next : ['buy_pullback']);
-                        } else {
-                          setPickerStrategies([...pickerStrategies, o.value]);
-                        }
-                      }}
-                      disabled={pickerRunning}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all
-                        ${selected
-                          ? 'bg-cyan text-white shadow-glow-cyan'
-                          : 'bg-elevated text-secondary border border-border hover:bg-surface-hover hover:border-cyan/20'}
-                        disabled:opacity-60 disabled:cursor-not-allowed`}
-                    >
-                      {o.label}
-                    </button>
-                  );
-                })}
+
+            {/* Row 2: Strategy chips (left) + run button (right) */}
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <label className="text-xs font-medium text-muted shrink-0">选股策略</label>
+                <div className="flex gap-2">
+                  {STRATEGY_OPTIONS.map((o) => {
+                    const selected = pickerStrategies.includes(o.value);
+                    return (
+                      <button
+                        key={o.value}
+                        type="button"
+                        onClick={() => {
+                          if (selected) {
+                            const next = pickerStrategies.filter((s) => s !== o.value);
+                            setPickerStrategies(next.length > 0 ? next : ['buy_pullback']);
+                          } else {
+                            setPickerStrategies([...pickerStrategies, o.value]);
+                          }
+                        }}
+                        disabled={pickerRunning}
+                        className={`px-3.5 py-1.5 rounded-full text-xs font-medium transition-all
+                          ${selected
+                            ? 'bg-cyan text-white shadow-glow-cyan'
+                            : 'bg-elevated text-secondary border border-border hover:bg-surface-hover hover:border-cyan/20'}
+                          disabled:opacity-60 disabled:cursor-not-allowed`}
+                      >
+                        {o.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted invisible">操作</label>
               <button
                 type="button"
                 onClick={handleRunPicker}
                 disabled={pickerRunning}
-                className="w-full min-h-[42px] px-5 py-2.5 bg-cyan text-white text-sm font-semibold rounded-lg
+                className="px-6 py-2 bg-cyan text-white text-sm font-semibold rounded-lg
                            hover:opacity-95 disabled:opacity-60 disabled:cursor-not-allowed
-                           transition-all shadow-glow-cyan flex items-center justify-center gap-2 whitespace-nowrap"
+                           transition-all shadow-glow-cyan flex items-center justify-center gap-2 whitespace-nowrap shrink-0"
               >
                 {pickerRunning ? (
                   <>

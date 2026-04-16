@@ -17,7 +17,6 @@ const STRATEGY_OPTIONS: { value: PickerStrategy; label: string }[] = [
   { value: 'buy_pullback', label: '买回踩' },
   { value: 'breakout', label: '突破' },
   { value: 'bottom_reversal', label: '底部反转' },
-  { value: 'macd_golden_cross', label: 'MACD金叉' },
   { value: 'eod_buyback', label: '尾盘买入' },
 ];
 
@@ -524,6 +523,7 @@ const PickerPage: React.FC = () => {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [viewingHistoryId, setViewingHistoryId] = useState<number | null>(null);
+  const [historyVisibleCount, setHistoryVisibleCount] = useState(10);
 
   const loadHistory = async () => {
     setHistoryLoading(true);
@@ -669,7 +669,7 @@ const PickerPage: React.FC = () => {
             </button>
           </div>
           <p className="text-xs text-muted text-center mt-4">
-            买回踩 · 突破 · 底部反转 · MACD金叉 · 尾盘买入 — 多策略并行，按需组合
+            买回踩 · 突破 · 底部反转 · 尾盘买入 — 多策略并行，按需组合
           </p>
         </div>
 
@@ -724,34 +724,6 @@ const PickerPage: React.FC = () => {
         {/* ─── Empty state ─── */}
         {showEmptyState && (
           <div className="space-y-12">
-
-            {/* History list */}
-            {history.length > 0 && (
-              <div>
-                <div className="flex items-center gap-2 mb-4">
-                  <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center">
-                    <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                    </svg>
-                  </div>
-                  <h2 className="text-sm font-semibold text-primary">
-                    历史筛选记录
-                    <span className="text-muted font-normal ml-1">({historyTotal})</span>
-                  </h2>
-                </div>
-                {historyLoading ? (
-                  <div className="flex justify-center py-8">
-                    <Spinner size="md" />
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {history.map((item) => (
-                      <HistoryRow key={item.id} item={item} onSelect={handleViewHistory} />
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
 
             {/* Pipeline visualization */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -811,6 +783,44 @@ const PickerPage: React.FC = () => {
             <p className="text-center text-sm text-muted">
               点击上方按钮，开始两阶段智能选股分析
             </p>
+
+            {/* History list — placed at bottom, show 10 at a time */}
+            {history.length > 0 && (
+              <div>
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center">
+                    <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                  </div>
+                  <h2 className="text-sm font-semibold text-primary">
+                    历史筛选记录
+                    <span className="text-muted font-normal ml-1">({historyTotal})</span>
+                  </h2>
+                </div>
+                {historyLoading ? (
+                  <div className="flex justify-center py-8">
+                    <Spinner size="md" />
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {history.slice(0, historyVisibleCount).map((item) => (
+                      <HistoryRow key={item.id} item={item} onSelect={handleViewHistory} />
+                    ))}
+                    {history.length > historyVisibleCount && (
+                      <button
+                        onClick={() => setHistoryVisibleCount((c) => c + 10)}
+                        className="w-full py-3 text-sm text-cyan hover:text-cyan/80
+                                   border border-border rounded-xl font-medium
+                                   hover:border-cyan/30 transition-colors"
+                      >
+                        加载更多（还有 {history.length - historyVisibleCount} 条）↓
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
