@@ -33,12 +33,23 @@ from tenacity import (
 )
 
 from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code
-from .realtime_types import UnifiedRealtimeQuote, ChipDistribution, safe_float
+from .realtime_types import UnifiedRealtimeQuote, ChipDistribution, safe_float, safe_int
 from src.config import get_config
 import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Module-level cache for ts.realtime_list() full-market snapshot.
+# realtime_list returns ~5000 rows; cache 30s to avoid hammering the crawler.
+# ---------------------------------------------------------------------------
+_realtime_list_cache: Dict[str, Any] = {
+    'data': None,
+    'timestamp': 0.0,
+    'ttl': 30,  # seconds
+}
 
 
 # ETF code prefixes by exchange
@@ -606,53 +617,144 @@ class TushareFetcher(BaseFetcher):
             logger.warning(f"[筹码分布] Tushare 获取 {stock_code} 失败: {e}")
             return None
 
-    def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+    # ------------------------------------------------------------------
+    # realtime_list full-market snapshot (cached, with wall-clock timeout)
+    # ------------------------------------------------------------------
+    def _fetch_realtime_list(self, timeout: float = 10.0) -> Optional[pd.DataFrame]:
         """
-        获取实时行情
+        Fetch full-market realtime snapshot via ts.realtime_list(src='dc').
 
-        策略（优先级）：
-        1. 优先用 realtime_quote (0积分爬虫接口，无限制)
-        2. 降级到旧版接口 ts.get_realtime_quotes
-        3. 最后尝试 Pro 接口（需要积分）
-
-        Args:
-            stock_code: 股票代码
+        Features:
+        - Module-level cache (TTL 30s) to avoid hammering the crawler endpoint.
+        - Wall-clock timeout (default 10s) via ThreadPoolExecutor.
+        - Rate-limit safe: realtime_list is a 0-credit crawler API.
 
         Returns:
-            UnifiedRealtimeQuote 对象，失败返回 None
+            DataFrame with ~5000 rows, or None on failure / timeout.
+        """
+        current_time = time.time()
+
+        # --- cache check ---
+        if (
+            _realtime_list_cache['data'] is not None
+            and current_time - _realtime_list_cache['timestamp'] < _realtime_list_cache['ttl']
+        ):
+            cache_age = int(current_time - _realtime_list_cache['timestamp'])
+            logger.debug(
+                f"[realtime_list] cache hit, age {cache_age}s / {_realtime_list_cache['ttl']}s"
+            )
+            return _realtime_list_cache['data']
+
+        # --- fetch with timeout (explicit pool to avoid shutdown(wait=True) blocking) ---
+        import tushare as ts
+
+        def _call():
+            return ts.realtime_list(src='dc')
+
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ts_realtime_list")
+        future = pool.submit(_call)
+        try:
+            df = future.result(timeout=timeout)
+
+            if df is not None and not df.empty:
+                _realtime_list_cache['data'] = df
+                _realtime_list_cache['timestamp'] = time.time()
+                logger.info(
+                    f"[realtime_list] fetched {len(df)} rows, cache refreshed (TTL={_realtime_list_cache['ttl']}s)"
+                )
+                return df
+            else:
+                logger.warning("[realtime_list] returned empty DataFrame")
+                return None
+
+        except FuturesTimeoutError:
+            logger.warning(f"[realtime_list] wall-clock timeout ({timeout}s)")
+            return None
+        except Exception as e:
+            logger.warning(f"[realtime_list] failed: {e}")
+            return None
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """
+        Get realtime quote for a single stock.
+
+        Strategy (priority order):
+        1. ts.realtime_list(src='dc') – 0-credit crawler, full-market snapshot
+           with 30s cache.  Rich fields: price, pct_change, volume, amount,
+           open, high, low, pre_close, etc.
+        2. ts.realtime_quote() – 0-credit crawler, per-stock (legacy)
+        3. ts.get_realtime_quotes() – old Sina-based API (legacy)
+        4. Pro quotation API (requires credits)
+
+        Args:
+            stock_code: Stock code (6-digit or with exchange suffix)
+
+        Returns:
+            UnifiedRealtimeQuote object, or None on failure
         """
         if self._api is None:
             return None
 
-        from .realtime_types import (
-            RealtimeSource,
-            safe_float, safe_int
-        )
+        from .realtime_types import RealtimeSource
 
-        # 速率限制检查（仅对付费接口）
-        # self._check_rate_limit()  # 因为 realtime_quote 无限制，不需要检查
+        code_6 = stock_code.split('.')[0] if '.' in stock_code else stock_code
 
-        # === 策略 1: ts.realtime_quote() - 0积分爬虫接口（最优） ===
+        # === Strategy 1: realtime_list (full-market, cached) ===
+        df_all = self._fetch_realtime_list()
+        if df_all is not None and not df_all.empty:
+            try:
+                # realtime_list returns ts_code like '000001.SZ'
+                ts_code_full = self._convert_stock_code(stock_code)
+                row = df_all[df_all['ts_code'] == ts_code_full]
+                if row.empty:
+                    # Also try matching by pure 6-digit code prefix
+                    row = df_all[df_all['ts_code'].str.startswith(code_6)]
+                if not row.empty:
+                    row = row.iloc[0]
+                    _price = safe_float(row.get('price'))
+                    _pre = safe_float(row.get('pre_close'))
+                    _change_amt = safe_float(row.get('change'))
+                    if _change_amt is None and _price is not None and _pre is not None and _pre != 0:
+                        _change_amt = round(_price - _pre, 4)
+
+                    logger.debug(f"[RealTime] {stock_code} via realtime_list (cached full-market)")
+                    return UnifiedRealtimeQuote(
+                        code=stock_code,
+                        name=str(row.get('name', '')),
+                        source=RealtimeSource.TUSHARE,
+                        price=_price,
+                        change_pct=safe_float(row.get('pct_change')),
+                        change_amount=_change_amt,
+                        volume=safe_int(row.get('volume')),
+                        amount=safe_float(row.get('amount')),
+                        high=safe_float(row.get('high')),
+                        low=safe_float(row.get('low')),
+                        open_price=safe_float(row.get('open')),
+                        pre_close=_pre,
+                        turnover_rate=None,
+                        pe_ratio=None,
+                        pb_ratio=None,
+                        total_mv=None,
+                    )
+            except Exception as e:
+                logger.debug(f"[RealTime] realtime_list lookup failed for {stock_code}: {e}")
+
+        # === Strategy 2: ts.realtime_quote() – 0-credit crawler (per stock) ===
         try:
             import tushare as ts
-            code_6 = stock_code.split('.')[0] if '.' in stock_code else stock_code
-            
-            # realtime_quote 使用 6 位代码
             df = ts.realtime_quote(code_6)
-            
+
             if df is not None and not df.empty:
                 row = df.iloc[0]
-                logger.debug(f"[RealTime] {stock_code} via realtime_quote (0积分爬虫接口)")
-                
-                # 字段映射：realtime_quote 的列名可能不同，需要检查
-                # 通常包括: code, name, price, bid, ask, volume, time, date, changepercent 等
+                logger.debug(f"[RealTime] {stock_code} via realtime_quote (0-credit crawler)")
                 change_pct = safe_float(row.get('changepercent')) or safe_float(row.get('change_pct'))
-                
-                # Compute change_amount = price - pre_close
                 _price = safe_float(row.get('price'))
                 _pre = safe_float(row.get('pre_close')) or safe_float(row.get('settlement'))
-                _change_amount = (_price - _pre) if (_price is not None and _pre is not None and _pre != 0) else None
-
+                _change_amount = (
+                    (_price - _pre) if (_price is not None and _pre is not None and _pre != 0) else None
+                )
                 return UnifiedRealtimeQuote(
                     code=stock_code,
                     name=str(row.get('name', '')),
@@ -661,53 +763,44 @@ class TushareFetcher(BaseFetcher):
                     change_pct=change_pct,
                     change_amount=_change_amount,
                     volume=safe_int(row.get('volume')),
-                    amount=None,  # not provided by realtime_quote
-                    high=None,  # not provided by realtime_quote
-                    low=None,  # not provided by realtime_quote
-                    open_price=None,  # not provided by realtime_quote
-                    pre_close=_pre,  # not provided by realtime_quote
-                    turnover_rate=None,  # not provided by realtime_quote
-                    pe_ratio=None,  # not provided by realtime_quote
-                    pb_ratio=None,  # not provided by realtime_quote
-                    total_mv=None,  # not provided by realtime_quote
+                    amount=None,
+                    high=None,
+                    low=None,
+                    open_price=None,
+                    pre_close=_pre,
+                    turnover_rate=None,
+                    pe_ratio=None,
+                    pb_ratio=None,
+                    total_mv=None,
                 )
         except Exception as e:
-            logger.debug(f"[RealTime] realtime_quote 失败: {e}")
+            logger.debug(f"[RealTime] realtime_quote failed: {e}")
 
-        # === 策略 2: 降级到旧版接口 ts.get_realtime_quotes ===
+        # === Strategy 3: legacy ts.get_realtime_quotes (Sina-based) ===
         try:
             import tushare as ts
-
-            # Tushare 旧版接口使用 6 位代码
-            code_6 = stock_code.split('.')[0] if '.' in stock_code else stock_code
-
-            # 特殊处理指数代码：旧版接口需要前缀 (sh000001, sz399001)
-            # 简单的指数判断逻辑
-            if code_6 == '000001':  # 上证指数
+            if code_6 == '000001':
                 symbol = 'sh000001'
-            elif code_6 == '399001':  # 深证成指
+            elif code_6 == '399001':
                 symbol = 'sz399001'
-            elif code_6 == '399006':  # 创业板指
+            elif code_6 == '399006':
                 symbol = 'sz399006'
-            elif code_6 == '000300':  # 沪深300
+            elif code_6 == '000300':
                 symbol = 'sh000300'
-            elif is_bse_code(code_6):  # 北交所
+            elif is_bse_code(code_6):
                 symbol = f"bj{code_6}"
             else:
                 symbol = code_6
 
-            # 调用旧版实时接口 (ts.get_realtime_quotes)
             df = ts.get_realtime_quotes(symbol)
-            
             if df is not None and not df.empty:
                 row = df.iloc[0]
-                logger.debug(f"[RealTime] {stock_code} via get_realtime_quotes (旧版接口)")
-                
-                # Compute change_amount = price - pre_close
+                logger.debug(f"[RealTime] {stock_code} via get_realtime_quotes (legacy)")
                 _price = safe_float(row.get('price'))
                 _pre = safe_float(row.get('pre_close')) or safe_float(row.get('settlement'))
-                _change_amount = (_price - _pre) if (_price is not None and _pre is not None and _pre != 0) else None
-
+                _change_amount = (
+                    (_price - _pre) if (_price is not None and _pre is not None and _pre != 0) else None
+                )
                 return UnifiedRealtimeQuote(
                     code=stock_code,
                     name=str(row.get('name', '')),
@@ -716,36 +809,33 @@ class TushareFetcher(BaseFetcher):
                     change_pct=safe_float(row.get('changepercent')),
                     change_amount=_change_amount,
                     volume=safe_int(row.get('volume')),
-                    amount=None,  # not provided by get_realtime_quotes
-                    high=None,  # not provided by get_realtime_quotes
-                    low=None,  # not provided by get_realtime_quotes
-                    open_price=None,  # not provided by get_realtime_quotes
-                    pre_close=_pre,  # not provided by get_realtime_quotes
-                    turnover_rate=None,  # not provided by get_realtime_quotes
-                    pe_ratio=None,  # not provided by get_realtime_quotes
-                    pb_ratio=None,  # not provided by get_realtime_quotes
-                    total_mv=None,  # not provided by get_realtime_quotes
+                    amount=None,
+                    high=None,
+                    low=None,
+                    open_price=None,
+                    pre_close=_pre,
+                    turnover_rate=None,
+                    pe_ratio=None,
+                    pb_ratio=None,
+                    total_mv=None,
                 )
         except Exception as e:
-            logger.debug(f"[RealTime] get_realtime_quotes 失败: {e}")
-        
-        # === 策略 3: Pro 接口（备选，需要积分） ===
+            logger.debug(f"[RealTime] get_realtime_quotes failed: {e}")
+
+        # === Strategy 4: Pro quotation API (requires credits) ===
         try:
             self._check_rate_limit()
             ts_code = self._convert_stock_code(stock_code)
-            # 尝试调用 Pro 实时接口 (需要积分)
             df = self._api.quotation(ts_code=ts_code)
-
             if df is not None and not df.empty:
                 row = df.iloc[0]
                 logger.debug(f"[RealTime] {stock_code} via Pro quotation API")
-
                 return UnifiedRealtimeQuote(
                     code=stock_code,
                     name=str(row.get('name', '')),
                     source=RealtimeSource.TUSHARE,
                     price=safe_float(row.get('price')),
-                    change_pct=safe_float(row.get('pct_chg')),  # Pro 接口通常直接返回涨跌幅
+                    change_pct=safe_float(row.get('pct_chg')),
                     change_amount=safe_float(row.get('change')),
                     volume=safe_int(row.get('vol')),
                     amount=safe_float(row.get('amount')),
@@ -759,9 +849,8 @@ class TushareFetcher(BaseFetcher):
                     total_mv=safe_float(row.get('total_mv')),
                 )
         except Exception as e:
-            logger.debug(f"[RealTime] Pro quotation API 失败: {e}")
-        
-        # 所有策略都失败，返回 None
+            logger.debug(f"[RealTime] Pro quotation API failed: {e}")
+
         logger.warning(f"[RealTime] Unable to fetch realtime quote for {stock_code}")
         return None
 
@@ -860,53 +949,54 @@ class TushareFetcher(BaseFetcher):
 
     def get_market_stats(self) -> Optional[dict]:
         """
-        获取市场涨跌统计 (Tushare Pro)
-        2000积分 每天访问该接口 ts.pro_api().rt_k 两次
-        接口限制见：https://tushare.pro/document/1?doc_id=108
+        Get market up/down statistics.
+
+        Strategy (priority order):
+        1. During trading hours: use realtime_list (0-credit crawler) for live
+           statistics. This is much more timely than daily() which only has
+           post-market data.
+        2. Fallback to daily() Pro API (works both intraday and post-market).
         """
         if self._api is None:
             return None
 
         try:
             self._check_rate_limit()
-            logger.info("[API调用] ts.pro_api() 获取市场统计...")
-            
-            # 获取当前中国时间，判断是否在交易时间内
+            logger.info("[API] Tushare get_market_stats...")
+
             china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
             china_now_str = china_now.strftime("%H:%M")
             current_date = china_now.strftime("%Y%m%d")
 
             start_date = (datetime.now() - pd.Timedelta(days=20)).strftime('%Y%m%d')
             df_cal = self._api.trade_cal(exchange='SSE', start_date=start_date, end_date=current_date)
-
-            # 过滤出 is_open == 1 (开市) 的日期，并转换为列表
             date_list = df_cal[df_cal['is_open'] == 1]['cal_date'].tolist()
 
-            if current_date in date_list:
-                if china_now_str < '09:30' or china_now_str > '16:30':
-                    use_realtime = False
-                else:
-                    use_realtime = True
-            else:
-                use_realtime = False
+            is_trading_day = current_date in date_list
+            use_realtime = is_trading_day and '09:25' <= china_now_str <= '16:30'
 
-            # Determine the target date for daily() query.
-            # During trading hours we now attempt daily() instead of skipping,
-            # so Tushare can serve as fallback for overseas users where
-            # efinance/akshare timeout.  We avoid rt_k (rate-limited).
+            # === Strategy 1: realtime_list during trading hours ===
             if use_realtime:
-                # Trading hours: try today first; if empty fall back to prev day
+                rl_stats = self._market_stats_from_realtime_list()
+                if rl_stats is not None:
+                    rl_stats["data_date"] = china_now.strftime("%Y-%m-%d")
+                    logger.info("[Tushare] market_stats from realtime_list (live)")
+                    return rl_stats
+                logger.debug("[Tushare] realtime_list unavailable, falling back to daily()")
+
+            # === Strategy 2: daily() Pro API ===
+            if use_realtime:
                 target_date = current_date
                 fallback_date = date_list[1] if len(date_list) > 1 else None
-                logger.info("[Tushare] Trading hours detected, attempting daily() for market stats")
+                logger.info("[Tushare] Trading hours, attempting daily() for market stats")
             else:
                 fallback_date = None
                 if current_date not in date_list:
-                    target_date = date_list[0]  # latest trading day
+                    target_date = date_list[0]
                 elif china_now_str < '09:30':
                     target_date = date_list[1] if len(date_list) > 1 else date_list[0]
-                else:  # post-market (> 16:30)
-                    target_date = date_list[0]  # today's closed data
+                else:
+                    target_date = date_list[0]
 
             try:
                 df = self._api.daily(
@@ -914,7 +1004,6 @@ class TushareFetcher(BaseFetcher):
                     start_date=target_date, end_date=target_date,
                 )
 
-                # If trading-hours query returned empty, fall back to previous trading day
                 if (df is None or df.empty) and fallback_date:
                     logger.info(
                         f"[Tushare] daily() empty for {target_date}, "
@@ -927,24 +1016,20 @@ class TushareFetcher(BaseFetcher):
                     )
 
                 if df is not None and not df.empty:
-                    # Normalize column names to lowercase
                     df.columns = [col.lower() for col in df.columns]
-
-                    # Merge stock basic info (code + name)
                     df_basic = self._api.stock_basic(fields='ts_code,name')
                     df = pd.merge(df, df_basic, on='ts_code', how='left')
-                    # Convert amount from 千元 to 元 to align with other sources
                     if 'amount' in df.columns:
                         df['amount'] = df['amount'] * 1000
 
                     logger.info(
-                        f"[Tushare] market_stats from daily() date={target_date}, "
-                        f"rows={len(df)}"
+                        f"[Tushare] market_stats from daily() date={target_date}, rows={len(df)}"
                     )
                     stats = self._calc_market_stats(df)
                     if stats is not None:
-                        # Annotate with actual data date so callers know freshness
-                        stats["data_date"] = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:8]}"
+                        stats["data_date"] = (
+                            f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:8]}"
+                        )
                     return stats
                 else:
                     logger.warning(
@@ -954,11 +1039,108 @@ class TushareFetcher(BaseFetcher):
             except Exception as e:
                 logger.error(f"[Tushare] ts.pro_api().daily failed: {e}")
 
-            
         except Exception as e:
-            logger.error(f"[Tushare] 获取市场统计失败: {e}")
+            logger.error(f"[Tushare] get_market_stats failed: {e}")
 
         return None
+
+    def _market_stats_from_realtime_list(self) -> Optional[Dict[str, Any]]:
+        """
+        Compute market statistics directly from realtime_list snapshot.
+
+        This avoids consuming Pro API credits and provides truly live data
+        during trading hours.
+
+        Returns:
+            dict with up_count, down_count, flat_count, limit_up_count,
+            limit_down_count, total_amount; or None on failure.
+        """
+        df = self._fetch_realtime_list()
+        if df is None or df.empty:
+            return None
+
+        try:
+            # realtime_list columns: ts_code, name, price, pct_change, change,
+            # volume, amount, open, high, low, pre_close, ...
+            required = {'ts_code', 'price', 'pre_close'}
+            if not required.issubset(set(df.columns)):
+                logger.warning(f"[realtime_list] missing required columns: {required - set(df.columns)}")
+                return None
+
+            # Filter to A-share stocks only (SH/SZ/BJ main boards)
+            df = df[df['ts_code'].str.match(r'^(0|3|6|9)\d{5}\.(SZ|SH|BJ)$', na=False)].copy()
+            if df.empty:
+                return None
+
+            df['price'] = pd.to_numeric(df['price'], errors='coerce')
+            df['pre_close'] = pd.to_numeric(df['pre_close'], errors='coerce')
+
+            # Drop rows with missing / zero prices or suspended stocks
+            amount_col = 'amount' if 'amount' in df.columns else None
+            if amount_col:
+                df[amount_col] = pd.to_numeric(df[amount_col], errors='coerce')
+                df = df[(df['price'] > 0) & (df['pre_close'] > 0) & (df[amount_col] > 0)]
+            else:
+                df = df[(df['price'] > 0) & (df['pre_close'] > 0)]
+
+            up_count = 0
+            down_count = 0
+            flat_count = 0
+            limit_up_count = 0
+            limit_down_count = 0
+
+            name_col = 'name' if 'name' in df.columns else None
+
+            for _, row in df.iterrows():
+                ts_code = str(row['ts_code'])
+                pure_code = ts_code.split('.')[0]
+                stock_name = str(row.get('name', '')) if name_col else ''
+                cur = float(row['price'])
+                pre = float(row['pre_close'])
+
+                if is_bse_code(pure_code):
+                    ratio = 0.30
+                elif is_kc_cy_stock(pure_code):
+                    ratio = 0.20
+                elif is_st_stock(stock_name):
+                    ratio = 0.05
+                else:
+                    ratio = 0.10
+
+                limit_up_price = np.floor(pre * (1 + ratio) * 100 + 0.5) / 100.0
+                limit_down_price = np.floor(pre * (1 - ratio) * 100 + 0.5) / 100.0
+                lu_tol = round(abs(pre * (1 + ratio) - limit_up_price), 10)
+                ld_tol = round(abs(pre * (1 - ratio) - limit_down_price), 10)
+
+                if abs(cur - limit_up_price) <= lu_tol:
+                    limit_up_count += 1
+                if abs(cur - limit_down_price) <= ld_tol:
+                    limit_down_count += 1
+
+                if cur > pre:
+                    up_count += 1
+                elif cur < pre:
+                    down_count += 1
+                else:
+                    flat_count += 1
+
+            total_amount = 0.0
+            if amount_col and amount_col in df.columns:
+                # realtime_list amount is in yuan; convert to 亿
+                total_amount = df[amount_col].sum() / 1e8
+
+            return {
+                'up_count': up_count,
+                'down_count': down_count,
+                'flat_count': flat_count,
+                'limit_up_count': limit_up_count,
+                'limit_down_count': limit_down_count,
+                'total_amount': total_amount,
+            }
+
+        except Exception as e:
+            logger.warning(f"[realtime_list] market stats computation failed: {e}")
+            return None
     
     def _calc_market_stats(
             self,

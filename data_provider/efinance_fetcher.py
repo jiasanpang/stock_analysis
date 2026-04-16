@@ -177,8 +177,11 @@ class EfinanceFetcher(BaseFetcher):
     name = "EfinanceFetcher"
     priority = int(os.getenv("EFINANCE_PRIORITY", "0"))  # 最高优先级，排在 AkshareFetcher 之前
     
-    # Wall-clock timeout for blocking efinance network calls (seconds)
-    _EFINANCE_CALL_TIMEOUT = 10
+    # Wall-clock timeout for blocking efinance network calls (seconds).
+    # Reduced from 10s to 5s: in overseas environments Eastmoney APIs
+    # (push2.eastmoney.com) almost always time out; 5s lets us fail fast
+    # and fall through to the Tushare/AkShare degradation chain sooner.
+    _EFINANCE_CALL_TIMEOUT = 5
 
     def __init__(self, sleep_min: float = 1.5, sleep_max: float = 3.0):
         """

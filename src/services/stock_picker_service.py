@@ -710,10 +710,13 @@ class StockScreener:
         self,
         requests: List[Tuple[str, Optional[str], Optional[str], int]],
         max_workers: int = 5,
+        total_timeout: float = 120.0,
     ) -> Dict[Tuple[str, str, str, int], Tuple[pd.DataFrame, str]]:
         """Fetch get_daily_data for multiple (code, start, end, days) in parallel.
         Deduplicates requests by key. Returns {(code, start, end, days): (df, source)}.
-        Failed fetches are omitted."""
+        Failed fetches are omitted.  A total_timeout (default 120s) prevents
+        the batch from blocking the pipeline indefinitely."""
+        from concurrent.futures import as_completed, TimeoutError as FuturesTimeout
         if not self._data_manager or not requests:
             return {}
 
@@ -734,10 +737,27 @@ class StockScreener:
 
         unique_requests = list(dict.fromkeys(requests))
         results: Dict[Tuple[str, str, str, int], Tuple[pd.DataFrame, str]] = {}
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="screener_fetch") as pool:
-            for res in pool.map(_fetch, unique_requests):
+        # Explicit pool management: avoid `with` which calls shutdown(wait=True) and blocks on timeout
+        pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="screener_fetch")
+        futures = {pool.submit(_fetch, req): req for req in unique_requests}
+        try:
+            for future in as_completed(futures, timeout=total_timeout):
+                try:
+                    res = future.result()  # already done, no extra timeout needed
+                except Exception as e:
+                    code = futures[future][0]
+                    logger.debug(f"[Screener] Batch fetch future error {code}: {e}")
+                    continue
                 if res:
                     results[res[0]] = res[1]
+        except FuturesTimeout:
+            pending = [futures[f][0] for f in futures if not f.done()]
+            logger.warning(
+                f"[Screener] _fetch_daily_batch global timeout ({total_timeout}s), "
+                f"{len(pending)} pending: {pending[:10]}"
+            )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         return results
 
     def _screen_eod_buyback_realtime(self) -> List[ScreenedStock]:
@@ -2333,57 +2353,73 @@ class StockPickerService:
     # EOD buyback helpers
     # ------------------------------------------------------------------
 
-    _INTEL_ITEM_TIMEOUT = 30  # wall-clock timeout per market intel fetch (efinance may retry ~5s before fail, then akshare needs time)
-    _INTEL_TOTAL_TIMEOUT = 60  # overall wall-clock cap for the entire _gather_market_intel
+    _INTEL_ITEM_TIMEOUT = 20  # wall-clock timeout per market intel fetch (reduced: Tushare is fast, efinance 5s fail-fast)
+    _INTEL_TOTAL_TIMEOUT = 45  # overall wall-clock cap for the entire _gather_market_intel (was 60)
 
     def _gather_market_intel(self) -> Dict[str, Any]:
         """Gather macro market data from multiple sources with per-call timeouts.
 
-        An overall wall-clock cap (_INTEL_TOTAL_TIMEOUT) prevents cascading
-        fallback retries from exceeding a reasonable budget.  If the cap is
-        reached, the method returns whatever data has been collected so far.
+        All three data fetches (indices, market_stats, sector_rankings) run in
+        **parallel** via a shared ThreadPoolExecutor.  An overall wall-clock cap
+        (_INTEL_TOTAL_TIMEOUT) prevents cascading fallback retries from exceeding
+        a reasonable budget.  If the cap is reached, the method returns whatever
+        data has been collected so far.
         """
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
         intel: Dict[str, Any] = {}
         gather_start = time.time()
 
-        def _remaining() -> float:
-            """Seconds left before the overall cap is hit."""
-            return max(0.0, self._INTEL_TOTAL_TIMEOUT - (time.time() - gather_start))
+        def _safe_call(label, fn):
+            """Wrapper that catches exceptions and returns (label, result/None)."""
+            try:
+                result = fn()
+                return (label, result)
+            except Exception as e:
+                logger.warning(f"[StockPicker] {label} failed: {e}")
+                return (label, None)
 
-        def _timed_call(label, fn):
-            """Run fn in a thread with wall-clock timeout. Return result or None."""
-            remaining = _remaining()
-            if remaining <= 0:
-                logger.warning(f"[StockPicker] {label} skipped – overall intel timeout reached")
-                return None
-            # Use the smaller of per-item timeout and remaining budget
-            effective_timeout = min(self._INTEL_ITEM_TIMEOUT, remaining)
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="intel") as pool:
-                try:
-                    fut = pool.submit(fn)
-                    return fut.result(timeout=effective_timeout)
-                except FuturesTimeout:
-                    logger.warning(f"[StockPicker] {label} timed out after {effective_timeout:.1f}s")
-                    fut.cancel()
-                except Exception as e:
-                    logger.warning(f"[StockPicker] {label} failed: {e}")
-            return None
+        # Explicit pool management: avoid `with` which calls shutdown(wait=True) and blocks on timeout
+        pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="intel")
+        try:
+            fut_indices = pool.submit(
+                _safe_call, "indices", lambda: self._data_manager.get_main_indices("cn")
+            )
+            fut_stats = pool.submit(
+                _safe_call, "market_stats", lambda: self._data_manager.get_market_stats()
+            )
+            fut_sectors = pool.submit(
+                _safe_call, "sector_rankings", lambda: self._data_manager.get_sector_rankings(10)
+            )
 
-        indices = _timed_call("indices", lambda: self._data_manager.get_main_indices("cn"))
-        if indices:
-            intel["indices"] = indices
+            all_futures = {fut_indices: "indices", fut_stats: "market_stats", fut_sectors: "sector_rankings"}
 
-        stats = _timed_call("market_stats", lambda: self._data_manager.get_market_stats())
-        if stats:
-            intel["stats"] = stats
+            try:
+                for future in as_completed(all_futures, timeout=self._INTEL_TOTAL_TIMEOUT):
+                    label_key = all_futures[future]
+                    try:
+                        label, result = future.result()  # already done, no extra timeout needed
+                    except Exception as e:
+                        logger.warning(f"[StockPicker] {label_key} future error: {e}")
+                        continue
 
-        sector_result = _timed_call("sector_rankings", lambda: self._data_manager.get_sector_rankings(10))
-        if sector_result:
-            top_sectors, bottom_sectors = sector_result
-            if top_sectors:
-                intel["top_sectors"] = top_sectors
-                intel["bottom_sectors"] = bottom_sectors
+                    if label == "indices" and result:
+                        intel["indices"] = result
+                    elif label == "market_stats" and result:
+                        intel["stats"] = result
+                    elif label == "sector_rankings" and result:
+                        top_sectors, bottom_sectors = result
+                        if top_sectors:
+                            intel["top_sectors"] = top_sectors
+                            intel["bottom_sectors"] = bottom_sectors
+            except FuturesTimeout:
+                # Overall timeout reached — collect whatever finished so far
+                timed_out = [lbl for f, lbl in all_futures.items() if not f.done()]
+                logger.warning(
+                    f"[StockPicker] _gather_market_intel global timeout ({self._INTEL_TOTAL_TIMEOUT}s), "
+                    f"unfinished: {timed_out}"
+                )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         elapsed = time.time() - gather_start
         if elapsed >= self._INTEL_TOTAL_TIMEOUT:
