@@ -1,6 +1,6 @@
 # 选股策略详细说明
 
-> 本文档描述 AI 智能选股模块的量化筛选策略体系，包括四类策略的参数、评分逻辑、过滤流程及配置方式。
+> 本文档描述 AI 智能选股模块的量化筛选策略体系，包括各策略的参数、评分逻辑、过滤流程及配置方式。
 
 ---
 
@@ -29,7 +29,7 @@
 ```
 全市场 → 基本面(PE/ST/停牌) → [按策略分叉]
     ↓
-    ├─ 策略A: 动量 → 量价 → 打分Top30 → 乖离率 → 连板 → 连涨 → 健康回踩 → [MACD金叉] → B浪
+    ├─ 策略A: 动量 → 量价 → 打分Top30 → 乖离率 → 连板 → 连涨 → 健康回踩 → B浪
     ├─ 策略B:  ...
     ├─ 策略C:  ...
     └─ 策略D:  ...
@@ -61,12 +61,11 @@
 | **连板** | 近 5 日 2+ 次涨停排除（主板 9.5%、创业板/科创板 19%） |
 | **连涨** | 连续上涨天数 > max_consecutive_up_days 排除 |
 | **健康回踩** | 6 层过滤：缩量检查、均线多头、回调幅度、距20日高点≥3%、价格在MA20之上、距MA10≤3% |
-| **MACD 金叉** | 仅 MACD 策略：DIF 上穿 DEA（最近 2 日） |
 | **B 浪风险** | 可选：疑似 B 浪反弹（反弹 35–65%，低点 2–14 日前）排除 |
 
 ---
 
-## 三、四类策略详解
+## 三、策略详解
 
 ### 3.1 买回踩 (buy_pullback)
 
@@ -152,54 +151,26 @@
 
 ---
 
-### 3.4 MACD 金叉 (macd_golden_cross)
-
-**策略逻辑**：MACD 金叉作为趋势拐点信号。
-
-| 参数 | 值 | 说明 |
-| ---- | - | ---- |
-| 60日涨跌幅 | -15% ~ 50% | 覆盖反转与延续 |
-| 当日涨幅 | 0% ~ 6% | 中性或小幅上涨 |
-| 量比 | > 1.3（1.0–1.3 视为轻微放量，仍可接受） | 基础量能 |
-| 乖离率 | ≤ 8% | 严进 |
-| 均线 | 不要求 | 由 MACD 体现趋势 |
-| 最大回调 | 80% | 金叉常在拐点附近 |
-| 连涨天数 | ≤ 3 | 不追连涨 |
-
-**专属过滤**：DIF 上穿 DEA（最近 2 日），使用 `pandas-ta-classic`，MACD 参数 fast=12, slow=26, signal=9。
-
-> **回测提示**：MACD 金叉为稀有信号，单策略回测时「有候选」天数可能很少。建议多选策略（如 买回踩 + MACD金叉）以增加样本量。
-
-**评分逻辑**（量能 + 动量 + PE + 市值，无趋势分）：
-
-- **动量**：0–3% 最高 20 分；3–5% 15 分；5%+ 10 分
-- **量比**：≥ 1.5 满分；≥ 1.3 部分分（1.0–1.3 视为轻微放量，仍可接受）
-- **换手**：2–8% 满分；1–2% 部分分
-- **PE**：10–35 满分；5–10 或 35–80 部分分
-- **市值**：50–500 亿 加 5 分
-
----
-
 ## 四、策略参数对照表
 
-| 参数 | 买回踩 | 突破 | 底部反转 | MACD金叉 |
-| ---- | ---- | ---- | ---- | ---- |
-| change_60d_min | 5% | -10% | -25% | -15% |
-| change_60d_max | **40%** | 80% | **-5%** | 50% |
-| daily_change_min | **-2.0%** | 2% | **1%** | **0.5%** |
-| daily_change_max | **2%** | 10% | 5% | 6% |
-| volume_ratio_min | **0.7** | 1.5 | **0.7** | 1.0 |
-| max_bias_pct | **5%** | 12% | 6% | 8% |
-| pe_max | **60** | 100 | 100 | 100 |
-| pe_ideal_low | 10 | 15 | 8 | 10 |
-| pe_ideal_high | **30** | 50 | 35 | 35 |
-| max_consecutive_up_days | **2** | 4 | 3 | 3 |
-| require_ma_bullish | ✓ | ✗ | ✗ | ✗ |
-| require_volume_shrink | **✓** | ✗ | **✓** | ✗ |
-| max_retracement_pct | **40%** | 61.8% | **61.8%** | 80% |
-| min_pullback_from_high_pct | **3.0** | 0 (disabled) | 0 (disabled) | 0 (disabled) |
-| require_price_above_ma20 | **True** | False | False | False |
-| max_distance_above_ma10_pct | **3.0** | 0 (disabled) | 0 (disabled) | 0 (disabled) |
+| 参数 | 买回踩 | 突破 | 底部反转 |
+| ---- | ---- | ---- | ---- |
+| change_60d_min | 5% | -10% | -25% |
+| change_60d_max | **40%** | 80% | **-5%** |
+| daily_change_min | **-2.0%** | 2% | **1%** |
+| daily_change_max | **2%** | 10% | 5% |
+| volume_ratio_min | **0.7** | 1.5 | **0.7** |
+| max_bias_pct | **5%** | 12% | 6% |
+| pe_max | **60** | 100 | 100 |
+| pe_ideal_low | 10 | 15 | 8 |
+| pe_ideal_high | **30** | 50 | 35 |
+| max_consecutive_up_days | **2** | 4 | 3 |
+| require_ma_bullish | ✓ | ✗ | ✗ |
+| require_volume_shrink | **✓** | ✗ | **✓** |
+| max_retracement_pct | **40%** | 61.8% | **61.8%** |
+| min_pullback_from_high_pct | **3.0** | 0 (disabled) | 0 (disabled) |
+| require_price_above_ma20 | **True** | False | False |
+| max_distance_above_ma10_pct | **3.0** | 0 (disabled) | 0 (disabled) |
 
 ### 板块强度过滤（Sector Strength Filter）
 
@@ -218,7 +189,6 @@
 |------|---------|------|
 | buy_pullback | 启用 | 强势板块回踩反弹概率更高 |
 | breakout | 启用 | 强势板块突破更有持续性 |
-| macd_golden_cross | 启用 | 趋势信号在强势板块更可靠 |
 | bottom_reversal | 跳过 | 超跌反弹可出现在任意板块 |
 
 **配置参数**：
@@ -303,7 +273,7 @@
 
 ```bash
 # 选股策略，逗号分隔，默认 buy_pullback
-PICKER_STRATEGIES=buy_pullback,breakout,bottom_reversal,macd_golden_cross
+PICKER_STRATEGIES=buy_pullback,breakout,bottom_reversal
 
 # 是否允许亏损股
 PICKER_ALLOW_LOSS=false
@@ -348,7 +318,7 @@ Content-Type: application/json
 | 市场环境 | 推荐策略 |
 | ---- | ---- |
 | 趋势上行 | 买回踩、突破 |
-| 震荡筑底 | 底部反转、MACD 金叉 |
+| 震荡筑底 | 底部反转 |
 | 趋势不明 | 多策略并行，对比结果 |
 
 ---

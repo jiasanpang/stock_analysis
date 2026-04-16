@@ -17,6 +17,7 @@ TushareFetcher - 备用数据源 1 (Priority 2)
 import json as _json
 import logging
 import re
+import threading
 import time
 from datetime import datetime
 from typing import Optional, Tuple, List, Dict, Any
@@ -50,6 +51,15 @@ _realtime_list_cache: Dict[str, Any] = {
     'timestamp': 0.0,
     'ttl': 30,  # seconds
 }
+
+# Lock to prevent concurrent cache stampede (22 parallel threads all miss cache)
+_realtime_list_lock = threading.Lock()
+
+# Circuit breaker: disable realtime_list temporarily after consecutive failures
+_realtime_list_fail_count = 0
+_realtime_list_disabled_until = 0.0
+_REALTIME_LIST_MAX_FAILURES = 3
+_REALTIME_LIST_COOLDOWN = 60.0  # seconds
 
 
 # ETF code prefixes by exchange
@@ -626,15 +636,28 @@ class TushareFetcher(BaseFetcher):
 
         Features:
         - Module-level cache (TTL 30s) to avoid hammering the crawler endpoint.
+        - Double-check locking: only ONE thread fetches when cache expires;
+          other concurrent threads wait and reuse the refreshed cache.
+        - Circuit breaker: after 3 consecutive failures, skip for 60s.
         - Wall-clock timeout (default 10s) via ThreadPoolExecutor.
         - Rate-limit safe: realtime_list is a 0-credit crawler API.
 
         Returns:
             DataFrame with ~5000 rows, or None on failure / timeout.
         """
+        global _realtime_list_fail_count, _realtime_list_disabled_until
+
         current_time = time.time()
 
-        # --- cache check ---
+        # --- circuit breaker: skip if recently failed multiple times ---
+        if current_time < _realtime_list_disabled_until:
+            logger.debug(
+                "[realtime_list] circuit breaker active, %.0fs remaining",
+                _realtime_list_disabled_until - current_time,
+            )
+            return None
+
+        # --- fast path: cache hit (no lock needed) ---
         if (
             _realtime_list_cache['data'] is not None
             and current_time - _realtime_list_cache['timestamp'] < _realtime_list_cache['ttl']
@@ -645,36 +668,70 @@ class TushareFetcher(BaseFetcher):
             )
             return _realtime_list_cache['data']
 
-        # --- fetch with timeout (explicit pool to avoid shutdown(wait=True) blocking) ---
-        import tushare as ts
+        # --- slow path: acquire lock, double-check, then fetch ---
+        with _realtime_list_lock:
+            # Double-check after acquiring lock (another thread may have refreshed)
+            current_time = time.time()
+            if (
+                _realtime_list_cache['data'] is not None
+                and current_time - _realtime_list_cache['timestamp'] < _realtime_list_cache['ttl']
+            ):
+                logger.debug("[realtime_list] cache hit after lock (another thread refreshed)")
+                return _realtime_list_cache['data']
 
-        def _call():
-            return ts.realtime_list(src='dc')
-
-        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ts_realtime_list")
-        future = pool.submit(_call)
-        try:
-            df = future.result(timeout=timeout)
-
-            if df is not None and not df.empty:
-                _realtime_list_cache['data'] = df
-                _realtime_list_cache['timestamp'] = time.time()
-                logger.info(
-                    f"[realtime_list] fetched {len(df)} rows, cache refreshed (TTL={_realtime_list_cache['ttl']}s)"
-                )
-                return df
-            else:
-                logger.warning("[realtime_list] returned empty DataFrame")
+            # Also re-check circuit breaker inside lock
+            if current_time < _realtime_list_disabled_until:
                 return None
 
-        except FuturesTimeoutError:
-            logger.warning(f"[realtime_list] wall-clock timeout ({timeout}s)")
-            return None
-        except Exception as e:
-            logger.warning(f"[realtime_list] failed: {e}")
-            return None
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+            # --- fetch with timeout (explicit pool to avoid shutdown(wait=True) blocking) ---
+            import tushare as ts
+
+            def _call():
+                return ts.realtime_list(src='dc')
+
+            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ts_realtime_list")
+            future = pool.submit(_call)
+            try:
+                df = future.result(timeout=timeout)
+
+                if df is not None and not df.empty:
+                    _realtime_list_cache['data'] = df
+                    _realtime_list_cache['timestamp'] = time.time()
+                    _realtime_list_fail_count = 0  # reset on success
+                    logger.info(
+                        f"[realtime_list] fetched {len(df)} rows, cache refreshed "
+                        f"(TTL={_realtime_list_cache['ttl']}s)"
+                    )
+                    return df
+                else:
+                    logger.warning("[realtime_list] returned empty DataFrame")
+                    self._record_realtime_list_failure()
+                    return None
+
+            except FuturesTimeoutError:
+                logger.warning(f"[realtime_list] wall-clock timeout ({timeout}s)")
+                self._record_realtime_list_failure()
+                return None
+            except Exception as e:
+                logger.warning(f"[realtime_list] failed: {e}")
+                self._record_realtime_list_failure()
+                return None
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+    @staticmethod
+    def _record_realtime_list_failure():
+        """Increment failure counter and activate circuit breaker if threshold reached."""
+        global _realtime_list_fail_count, _realtime_list_disabled_until
+        _realtime_list_fail_count += 1
+        if _realtime_list_fail_count >= _REALTIME_LIST_MAX_FAILURES:
+            _realtime_list_disabled_until = time.time() + _REALTIME_LIST_COOLDOWN
+            logger.warning(
+                "[realtime_list] circuit breaker activated: disabled for %.0fs "
+                "after %d consecutive failures",
+                _REALTIME_LIST_COOLDOWN,
+                _realtime_list_fail_count,
+            )
 
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """

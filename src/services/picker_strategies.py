@@ -2,7 +2,7 @@
 """
 Picker strategies: each strategy has its own screening logic and fixed params.
 
-Strategies: buy_pullback, breakout, bottom_reversal, macd_golden_cross
+Strategies: buy_pullback, breakout, bottom_reversal
 No intensity modes (defensive/balanced/offensive) — each strategy has one set of params.
 """
 
@@ -27,14 +27,13 @@ from src.services.stock_picker_service import (
 BUY_PULLBACK = "buy_pullback"
 BREAKOUT = "breakout"
 BOTTOM_REVERSAL = "bottom_reversal"
-MACD_GOLDEN_CROSS = "macd_golden_cross"
 EOD_BUYBACK = "eod_buyback"  # 尾盘买入法 (End-of-Day Buyback)
 
 # Default strategy when PICKER_STRATEGIES not set
 DEFAULT_STRATEGIES = [BUY_PULLBACK]
 
 # All available strategies
-ALL_STRATEGIES = [BUY_PULLBACK, BREAKOUT, BOTTOM_REVERSAL, MACD_GOLDEN_CROSS, EOD_BUYBACK]
+ALL_STRATEGIES = [BUY_PULLBACK, BREAKOUT, BOTTOM_REVERSAL, EOD_BUYBACK]
 
 def is_mainboard_stock(code: str) -> bool:
     """Check if a stock is listed on the main board (SSE/SZSE main).
@@ -59,7 +58,6 @@ STRATEGY_DISPLAY_NAMES: Dict[str, str] = {
     BUY_PULLBACK: "买回踩",
     BREAKOUT: "突破",
     BOTTOM_REVERSAL: "底部反转",
-    MACD_GOLDEN_CROSS: "MACD金叉",
     EOD_BUYBACK: "尾盘买入",
 }
 
@@ -98,6 +96,9 @@ class StrategyParams:
     min_pullback_from_high_pct: float = 0.0
     max_distance_above_ma10_pct: float = 0.0  # Max % price can be above MA10 (0=disabled); ensures near support
     require_price_above_ma20: bool = False     # Reject if price below MA20 (entering downtrend)
+    # Breakout-specific: fake breakout filter
+    breakout_lookback_days: int = 20             # Lookback period for resistance level identification
+    max_upper_shadow_ratio: float = 2.0          # Max upper shadow to body ratio (fake breakout filter)
 
 
 # Buy pullback: 60d > 5%, MA bullish, shrinking-volume pullback entry
@@ -123,20 +124,22 @@ BUY_PULLBACK_PARAMS = StrategyParams(
 
 # Breakout: price breaks N-day high, volume confirmation
 BREAKOUT_PARAMS = StrategyParams(
-    max_bias_pct=12.0,  # Allow higher bias (breakout = chasing strength)
-    leader_bias_exempt_pct=14.0,  # Leaders breaking out can have higher bias
+    max_bias_pct=8.0,  # Tightened bias to reduce chasing (was 12.0)
+    leader_bias_exempt_pct=10.0,  # Leader exemption also tightened (was 14.0)
     pe_max=100,
     pe_ideal_low=15,
     pe_ideal_high=50,
     daily_change_min=2.0,  # Must be up
     daily_change_max=10.0,  # Not limit-up chase
-    max_consecutive_up_days=4,
+    max_consecutive_up_days=2,  # Stricter: avoid late-stage chasing (was 4)
     require_volume_shrink=False,
     require_ma_bullish=False,  # Breakout may not have MA aligned yet
     max_retracement_pct=0.618,
     change_60d_min=-10.0,  # Allow some downtrend before breakout
-    change_60d_max=80.0,  # Avoid parabolic
-    volume_ratio_min=1.5,  # Stronger volume for breakout
+    change_60d_max=50.0,  # Tightened to avoid parabolic (was 80.0)
+    volume_ratio_min=2.0,  # Raised threshold to filter false breakouts (was 1.5)
+    breakout_lookback_days=20,       # 20-day resistance level lookback
+    max_upper_shadow_ratio=2.0,      # Upper shadow > 2x body = fake breakout
 )
 
 # Bottom reversal: 60d -25% ~ -5%, true bottom with volume shrink stabilisation
@@ -155,24 +158,6 @@ BOTTOM_REVERSAL_PARAMS = StrategyParams(
     change_60d_min=-25.0,
     change_60d_max=-5.0,  # Only stocks still in decline — exclude already-rebounded
     volume_ratio_min=0.7,  # Allow low volume ratio (stabilisation = shrinking volume)
-)
-
-# MACD golden cross: 60d -15% ~ 50%, daily 0.5% ~ 6%, volume confirmation
-MACD_GOLDEN_CROSS_PARAMS = StrategyParams(
-    max_bias_pct=8.0,
-    leader_bias_exempt_pct=0.0,  # No exemption: golden cross at inflection
-    pe_max=100,
-    pe_ideal_low=10,
-    pe_ideal_high=35,
-    daily_change_min=0.5,  # Require positive momentum to confirm golden cross
-    daily_change_max=6.0,
-    max_consecutive_up_days=3,
-    require_volume_shrink=False,
-    require_ma_bullish=False,  # MACD captures trend
-    max_retracement_pct=0.8,  # Relaxed: golden cross often at inflection
-    change_60d_min=-15.0,
-    change_60d_max=50.0,
-    volume_ratio_min=1.0,
 )
 
 # EOD buyback (尾盘买入法): 七条铁律
@@ -210,7 +195,6 @@ _STRATEGY_PARAMS: Dict[str, StrategyParams] = {
     BUY_PULLBACK: BUY_PULLBACK_PARAMS,
     BREAKOUT: BREAKOUT_PARAMS,
     BOTTOM_REVERSAL: BOTTOM_REVERSAL_PARAMS,
-    MACD_GOLDEN_CROSS: MACD_GOLDEN_CROSS_PARAMS,
     EOD_BUYBACK: EOD_BUYBACK_PARAMS,
 }
 
@@ -225,7 +209,7 @@ _SCORERS: Dict[str, Any] = {}
 
 
 def _score_pe(pe: float, params: StrategyParams) -> float:
-    """PE score: ideal 10, partial range 5, else 0 (for pullback/MACD)."""
+    """PE score: ideal 10, partial range 5, else 0 (for pullback)."""
     if params.pe_ideal_low < pe < params.pe_ideal_high:
         return 10.0
     if 5 < pe <= params.pe_ideal_low or params.pe_ideal_high <= pe < PE_SCORE_PARTIAL_MAX:
@@ -408,10 +392,24 @@ def score_breakout(row: Dict[str, Any], params: StrategyParams) -> float:
     pe = float(row.get("市盈率-动态", 0) or 0)
     total_mv = float(row.get("总市值", 0) or 0)
 
-    # Higher change = better for breakout
-    mom = min(25.0, change_pct * 3) if change_pct > 0 else 0.0
-    # Volume critical
-    vol = 25.0 if vol_ratio >= 2.0 else (15.0 if vol_ratio >= 1.5 else 5.0)
+    # Momentum: favor moderate breakout (2-4%), penalize chasing (>7%)
+    if 2.0 <= change_pct <= 4.0:
+        mom = 25.0   # Healthy breakout range
+    elif 4.0 < change_pct <= 7.0:
+        mom = 15.0   # Acceptable but higher risk
+    elif 7.0 < change_pct <= 10.0:
+        mom = 5.0    # Chasing risk, heavily penalized
+    else:
+        mom = 0.0
+    # Volume: require strong confirmation (min 2.0x after param change)
+    if vol_ratio >= 3.0:
+        vol = 25.0   # Very strong volume confirmation
+    elif vol_ratio >= 2.5:
+        vol = 20.0   # Strong volume
+    elif vol_ratio >= 2.0:
+        vol = 15.0   # Standard breakout volume (new minimum)
+    else:
+        vol = 5.0    # Below threshold, should be filtered by params
     # Trend: moderate positive preferred
     trend = min(15.0, max(0, pct_60d)) if 0 <= pct_60d <= 50 else 5.0
     to = 10.0 if 2 <= turnover <= 10 else 5.0
@@ -495,23 +493,6 @@ def score_bottom_reversal(row: Dict[str, Any], params: StrategyParams) -> float:
     return trend + mom + vol + to + pe_s + mid + candle_bonus
 
 
-def score_macd_golden_cross(row: Dict[str, Any], params: StrategyParams) -> float:
-    """Score for MACD golden cross: volume + momentum + PE; trend neutral (MACD captures it)."""
-    change_pct = float(row.get("涨跌幅", 0) or 0)
-    vol_ratio = float(row.get("量比", 0) or 0)
-    turnover = float(row.get("换手率", 0) or 0)
-    pe = float(row.get("市盈率-动态", 0) or 0)
-    total_mv = float(row.get("总市值", 0) or 0)
-
-    # Moderate momentum preferred (0.5-6% daily)
-    mom = 20.0 if 0 <= change_pct <= 3 else (15.0 if 3 < change_pct <= 5 else 10.0)
-    vol = 20.0 if vol_ratio >= 1.5 else (10.0 if vol_ratio >= 1.0 else 0.0)
-    to = 10.0 if 2 <= turnover <= 8 else (5.0 if 1 <= turnover < 2 else 0.0)
-    pe_s = _score_pe(pe, params)
-    mid = _score_mid_cap(total_mv)
-    return mom + vol + to + pe_s + mid
-
-
 def score_eod_buyback(
     row: Dict[str, Any], params: StrategyParams, *, has_recent_limit_up: bool = False,
 ) -> float:
@@ -561,7 +542,6 @@ _SCORERS.update({
     BUY_PULLBACK: score_buy_pullback,
     BREAKOUT: score_breakout,
     BOTTOM_REVERSAL: score_bottom_reversal,
-    MACD_GOLDEN_CROSS: score_macd_golden_cross,
     EOD_BUYBACK: score_eod_buyback,
 })
 

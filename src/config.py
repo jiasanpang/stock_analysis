@@ -1128,7 +1128,7 @@ class Config:
     @classmethod
     def _parse_picker_strategies(cls, value: str) -> List[str]:
         """Parse PICKER_STRATEGIES (comma-separated). Default [buy_pullback] when empty."""
-        valid = ('buy_pullback', 'breakout', 'bottom_reversal', 'macd_golden_cross', 'eod_buyback')
+        valid = ('buy_pullback', 'breakout', 'bottom_reversal', 'eod_buyback')
         if not value or not value.strip():
             return ['buy_pullback']
         parts = [p.strip().lower() for p in value.split(',') if p.strip()]

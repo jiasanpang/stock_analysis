@@ -15,7 +15,7 @@ class PickerBacktestRunRequest(BaseModel):
     top_n: int = Field(5, ge=1, le=20, description="Number of picks per day by score")
     picker_strategies: Optional[List[str]] = Field(
         None,
-        description="Strategies to use: buy_pullback, breakout, bottom_reversal, macd_golden_cross",
+        description="Strategies to use: buy_pullback, breakout, bottom_reversal, eod_buyback",
     )
 
 

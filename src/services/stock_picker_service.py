@@ -63,8 +63,6 @@ PE_SCORE_PARTIAL_MAX = 80
 
 # Per-strategy top N before merge
 PICKER_TOP_N_PER_STRATEGY = 30
-# MACD golden cross filter lookback (need ~30 days for MACD warmup)
-MACD_LOOKBACK_DAYS = 35
 
 # B-wave risk (波浪 ABC): exclude stocks likely in B-wave bounce (fake recovery before C-wave down)
 B_WAVE_LOOKBACK_DAYS = 20
@@ -418,10 +416,10 @@ class StockScreener:
 
     # Strategies that require daily spot data (fetched via _fetch_spot_data).
     # eod_buyback uses a dedicated realtime full-market path and does NOT need daily data.
-    DAILY_DATA_STRATEGIES = {"buy_pullback", "breakout", "bottom_reversal", "macd_golden_cross"}
+    DAILY_DATA_STRATEGIES = {"buy_pullback", "breakout", "bottom_reversal"}
 
     # Strategies that benefit from sector strength filtering
-    SECTOR_FILTER_STRATEGIES = {"buy_pullback", "breakout", "macd_golden_cross"}
+    SECTOR_FILTER_STRATEGIES = {"buy_pullback", "breakout"}
 
     def _check_market_environment(self) -> Optional[MarketEnvironment]:
         """Check SSE index vs MA20 to determine market regime.
@@ -545,7 +543,6 @@ class StockScreener:
                 filter_volume,
                 score_and_rank,
                 merge_candidates_by_code,
-                MACD_GOLDEN_CROSS,
             )
 
             candidates_per_strategy: Dict[str, List[ScreenedStock]] = {}
@@ -647,9 +644,7 @@ class StockScreener:
                         )
                         cands = self._filter_limit_up_streak(cands)
                         cands = self._filter_consecutive_up_days(cands, max_up_days=params.max_consecutive_up_days)
-                        cands = self._filter_healthy_pullback(cands, params=params)
-                        if strategy_id == MACD_GOLDEN_CROSS:
-                            cands = self._filter_macd_golden_cross(cands, lookback_days=MACD_LOOKBACK_DAYS)
+                        cands = self._filter_healthy_pullback(cands, params=params, strategy_id=strategy_id)
                         if self._enable_b_wave_filter:
                             cands = self._filter_b_wave_risk(cands)
 
@@ -1294,6 +1289,7 @@ class StockScreener:
         candidates: List[ScreenedStock],
         lookback_days: int = 20,
         params: Optional[Any] = None,
+        strategy_id: Optional[str] = None,
     ) -> List[ScreenedStock]:
         """Filter for healthy pullback confirmation to distinguish from trend reversal.
 
@@ -1304,6 +1300,8 @@ class StockScreener:
         4. Min distance from 20d high: must be >=X% below high (距高点距离)
         5. Price above MA20: reject if below MA20 (下跌通道排除)
         6. Near MA10 support: price within X% above MA10 (支撑位确认)
+        7. [breakout] Long upper shadow filter: fake breakout signal (假突破过滤)
+        8. [breakout] Resistance breakout confirmation: close >= 20d high (阻力位突破确认)
         """
         if not self._data_manager or not candidates:
             return candidates
@@ -1331,6 +1329,41 @@ class StockScreener:
 
             df_daily = df_daily.sort_values(date_col).tail(lookback_days).reset_index(drop=True)
             close_series = pd.to_numeric(df_daily[close_col], errors="coerce").fillna(0)
+
+            # --- Breakout-specific checks (7 & 8): fake breakout filter ---
+            if strategy_id == "breakout":
+                open_col = self._first_col(df_daily, "open", "开盘")
+                # Check 7: Long upper shadow filter (fake breakout signal)
+                max_shadow_ratio = getattr(mode_params, 'max_upper_shadow_ratio', 2.0)
+                if high_col and open_col and close_col:
+                    latest = df_daily.iloc[-1]
+                    h = float(pd.to_numeric(latest.get(high_col, 0), errors="coerce") or 0)
+                    c = float(pd.to_numeric(latest.get(close_col, 0), errors="coerce") or 0)
+                    o = float(pd.to_numeric(latest.get(open_col, 0), errors="coerce") or 0)
+                    body = abs(c - o)
+                    upper_shadow = h - max(c, o)
+                    if body > 0 and upper_shadow / body > max_shadow_ratio:
+                        logger.debug(
+                            "[Screener] %s excluded: long upper shadow (ratio=%.1f > %.1f), fake breakout",
+                            s.code, upper_shadow / body, max_shadow_ratio,
+                        )
+                        continue
+
+                # Check 8: Resistance breakout confirmation (close must >= N-day high excluding today)
+                bk_lookback = getattr(mode_params, 'breakout_lookback_days', 20)
+                if high_col and len(df_daily) >= 2:
+                    high_series_bk = pd.to_numeric(df_daily[high_col], errors="coerce").fillna(0)
+                    # Use up to bk_lookback days, but always exclude today (last row)
+                    window = min(bk_lookback, len(df_daily) - 1)
+                    # Lookback high excluding today
+                    high_nd = float(high_series_bk.iloc[-(window + 1):-1].max())
+                    current_close = s.price
+                    if high_nd > 0 and current_close < high_nd * 0.995:
+                        logger.debug(
+                            "[Screener] %s excluded: close %.2f below %dd high %.2f, not a true breakout",
+                            s.code, current_close, bk_lookback, high_nd,
+                        )
+                        continue
 
             # Check 1: Volume shrink or mild expansion (1.0-1.3 acceptable for healthy pullback)
             VOLUME_SHRINK_LIMIT = 1.3  # Allow mild expansion as valid pullback signal
@@ -1422,61 +1455,6 @@ class StockScreener:
                         continue
 
             filtered.append(s)
-
-        return filtered
-
-    def _filter_macd_golden_cross(
-        self,
-        candidates: List[ScreenedStock],
-        lookback_days: int = MACD_LOOKBACK_DAYS,
-    ) -> List[ScreenedStock]:
-        """Filter for MACD golden cross: DIF crosses above DEA in last 2 days.
-        Uses pandas_ta_classic for MACD (fast=12, slow=26, signal=9)."""
-        if not self._data_manager or not candidates:
-            return candidates
-
-        try:
-            import pandas_ta_classic as ta
-        except ImportError:
-            logger.warning("[Screener] pandas_ta_classic not installed, skip MACD golden cross filter")
-            return candidates
-
-        end_date = self._as_of_date
-        requests = [(s.code, None, end_date, lookback_days + 5) for s in candidates]
-        batch = self._fetch_daily_batch(requests)
-
-        filtered = []
-        for s in candidates:
-            df_daily, _ = batch.get((s.code, "", end_date or "", lookback_days + 5), (None, ""))
-            if df_daily is None or len(df_daily) < 30:
-                continue
-
-            close_col = self._first_col(df_daily, "close", "收盘")
-            if close_col is None:
-                continue
-
-            date_col = self._first_col(df_daily, "date", "日期") or df_daily.columns[0]
-            df_daily = df_daily.sort_values(date_col).tail(lookback_days).reset_index(drop=True)
-            close = pd.to_numeric(df_daily[close_col], errors="coerce").fillna(0)
-
-            macd_df = ta.macd(close, fast=12, slow=26, signal=9)
-            if macd_df is None or (isinstance(macd_df, pd.DataFrame) and macd_df.empty):
-                continue
-
-            # pandas_ta_classic returns DataFrame: col0=MACD line (DIF), col1=Signal (DEA), col2=Histogram
-            if isinstance(macd_df, pd.DataFrame) and len(macd_df.columns) >= 2:
-                dif = pd.to_numeric(macd_df.iloc[:, 0], errors="coerce").fillna(0)
-                dea = pd.to_numeric(macd_df.iloc[:, 1], errors="coerce").fillna(0)
-            else:
-                continue
-            if len(dif) < 2 or len(dea) < 2:
-                continue
-
-            prev_dif, curr_dif = float(dif.iloc[-2]), float(dif.iloc[-1])
-            prev_dea, curr_dea = float(dea.iloc[-2]), float(dea.iloc[-1])
-            # Golden cross: prev DIF < prev DEA and curr DIF > curr DEA
-            if prev_dif < prev_dea and curr_dif > curr_dea:
-                filtered.append(s)
 
         return filtered
 
@@ -2146,6 +2124,22 @@ class StockPickerService:
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
         
         is_kccy = is_kc_cy_stock
+
+        # Pre-warm realtime_list cache so parallel individual queries all hit cache
+        # instead of 22 threads simultaneously triggering network requests.
+        try:
+            from data_provider.tushare_fetcher import TushareFetcher
+            if self._data_manager:
+                for fetcher in getattr(self._data_manager, '_fetchers', []):
+                    if isinstance(fetcher, TushareFetcher) and fetcher.is_available():
+                        fetcher._fetch_realtime_list()
+                        logger.info(
+                            "[Screener] realtime_list cache warmed up before parallel fetch "
+                            "(%d candidates)", len(candidates),
+                        )
+                        break
+        except Exception:
+            pass  # Non-critical; individual queries will handle fallback
 
         # Parallel fetch of realtime quotes (max 10 workers, 2s timeout per stock)
         def _fetch_one_quote(code: str) -> tuple[str, Optional]:

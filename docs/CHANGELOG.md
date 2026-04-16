@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - **feat(picker)**: 板块强度过滤 — 选股前自动过滤弱势板块，仅从强势行业板块成分股中选股
-  - 按策略区分：buy_pullback/breakout/macd_golden_cross 启用，bottom_reversal 跳过
+  - 按策略区分：buy_pullback/breakout 启用，bottom_reversal 跳过
   - 新增 `SectorStrengthService` 提供板块排名和成分股获取（AkShare数据源）
   - 新增环境变量：`PICKER_SECTOR_FILTER`, `PICKER_SECTOR_TOP_PCT`
 - **feat(picker)**: MarketGuard 市场环境开关 — 沪指低于MA20超1%时自动限制选股策略
@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **refactor(picker)**: buy_pullback 评分优化 — 缩量(0.5-0.9)最高分、深回踩(-3%~-1%)最高分、放量(>3.0)惩罚
 - **refactor(picker)**: 底部反转策略参数优化 — 启用缩量检查、量比0.7、60日上限-5%、B浪过滤0.618
 - **refactor(picker)**: 底部反转评分增强 — 60日跌幅深度加分、缩量→放量转折信号、反转K线形态加分
-- **refactor(picker)**: bottom_reversal `daily_change_min` 0.0→1.0，macd_golden_cross 0.0→0.5，实时验证更严格
+- **refactor(picker)**: bottom_reversal `daily_change_min` 0.0→1.0，实时验证更严格
 - **refactor(picker)**: 清理未使用的全市场实时路径死代码（fetch_realtime_market_data、get_realtime_all_spots）
 - **refactor(picker)**: 删除重复的 `_has_recent_limit_up` 函数
 - **perf**: 并发超时 10s→60s，eastmoney patch 超时 15s→30s
@@ -79,7 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   2. **Real-time filtering** (NEW: intraday market conditions)
   3. AI selection (LLM picks 1-5 from filtered pool)
 
-### Picker page: Pill-style strategy chips (buy_pullback, breakout, bottom_reversal, macd_golden_cross), card container, result view shows strategy + timestamp.
+### Picker page: Pill-style strategy chips (buy_pullback, breakout, bottom_reversal), card container, result view shows strategy + timestamp.
 - Picker backtest: Strategy selection (replaces mode dropdown). API accepts `picker_strategies`; history stores `picker_strategies_json`.
 - Per-strategy leader bias exemption: `leader_bias_exempt_pct` in StrategyParams (breakout=14%, others=0). Removed global `PICKER_LEADER_BIAS_EXEMPT_PCT`.
 
@@ -87,15 +87,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - GitHub Actions `daily_analysis.yml`: default schedule Beijing 18:00 (`cron`: UTC 10:00 Mon–Fri).
 - Picker backtest: Remove `picker_mode` and `picker_leader_bias_exempt_pct` from API. Use `picker_strategies` only.
 - Backtest page: holdDays/topN inputs allow empty (string state, parse on submit).
-- Picker footer tagline: "买回踩 · 突破 · 底部反转 · MACD金叉 — 多策略并行，按需组合".
+- Picker footer tagline: "买回踩 · 突破 · 底部反转 — 多策略并行，按需组合".
 
 ### Removed
 - `PICKER_LEADER_BIAS_EXEMPT_PCT` env var (leader exemption now per-strategy).
 - Picker mode (严进/平衡/进攻) from picker backtest API and UI.
 
 ### Added (previous)
-- Multi-strategy picker: `PICKER_STRATEGIES` (comma-separated) runs multiple strategies in parallel. Strategies: `buy_pullback` (买回踩), `breakout` (突破), `bottom_reversal` (底部反转), `macd_golden_cross` (MACD金叉). Candidates merged and tagged by strategy. No intensity modes (defensive/balanced/offensive) — each strategy has fixed params.
-- MACD golden cross strategy: uses `pandas-ta-classic` for MACD (fast=12, slow=26, signal=9). Filters candidates where DIF crosses above DEA in last 2 days. Params: 60d -15% ~ 50%, daily 0% ~ 6%, volume_ratio_min 1.0.
+- Multi-strategy picker: `PICKER_STRATEGIES` (comma-separated) runs multiple strategies in parallel. Strategies: `buy_pullback` (买回踩), `breakout` (突破), `bottom_reversal` (底部反转). Candidates merged and tagged by strategy. No intensity modes (defensive/balanced/offensive) — each strategy has fixed params.
 - Picker strategy comparison view: API returns `screened_pool_by_strategy` (per-strategy candidate lists). Frontend toggle "合并" / "按策略对比" to view merged pool or each strategy's candidates separately for comparison.
 
 ### Changed
