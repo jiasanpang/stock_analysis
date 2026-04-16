@@ -860,7 +860,12 @@ class EfinanceFetcher(BaseFetcher):
                 logger.warning("[API返回] 市场统计数据为空")
                 return None
 
-            return self._calc_market_stats(df)
+            stats = self._calc_market_stats(df)
+            if stats is not None:
+                # Realtime data -> today's date
+                from zoneinfo import ZoneInfo
+                stats["data_date"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+            return stats
         except Exception as e:
             logger.error(f"[efinance] 获取市场统计失败: {e}")
             return None

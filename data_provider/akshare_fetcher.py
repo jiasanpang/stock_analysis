@@ -1590,7 +1590,7 @@ class AkshareFetcher(BaseFetcher):
         """
         import akshare as ak
 
-        # 优先东财接口
+        # Priority 1: Eastmoney
         try:
             self._set_random_user_agent()
             self._enforce_rate_limit()
@@ -1598,7 +1598,12 @@ class AkshareFetcher(BaseFetcher):
             logger.info("[API调用] ak.stock_zh_a_spot_em() 获取市场统计...")
             df = ak.stock_zh_a_spot_em()
             if df is not None and not df.empty:
-                return self._calc_market_stats(df)
+                stats = self._calc_market_stats(df)
+                if stats is not None:
+                    # Realtime data -> today's date
+                    from zoneinfo import ZoneInfo
+                    stats["data_date"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+                return stats
         except Exception as e:
             logger.warning(f"[Akshare] 东财接口获取市场统计失败: {e}，尝试新浪接口")
 
@@ -1619,7 +1624,11 @@ class AkshareFetcher(BaseFetcher):
                 df = fut.result(timeout=10)
 
             if df is not None and not df.empty:
-                return self._calc_market_stats(df)
+                stats = self._calc_market_stats(df)
+                if stats is not None:
+                    from zoneinfo import ZoneInfo
+                    stats["data_date"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+                return stats
         except _FutTimeout:
             logger.warning("[Akshare] 新浪接口获取市场统计超时(10s)")
         except Exception as e:

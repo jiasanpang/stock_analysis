@@ -2527,6 +2527,13 @@ class StockPickerService:
 
         # ── Market intel ──
         if intel.get("indices"):
+            # Check if index data is stale (e.g. from Tushare index_daily fallback)
+            idx_dates = [idx.get("data_date") for idx in intel["indices"] if idx.get("data_date")]
+            if idx_dates and all(d != today for d in idx_dates):
+                stale_date = idx_dates[0]
+                parts.append(
+                    f"\u26a0\ufe0f 注意\uff1a以下指数数据来自 {stale_date}\uff08非今日实时数据\uff09\u3002\n"
+                )
             parts.append("## 主要指数")
             for idx in intel["indices"]:
                 name = idx.get("name", "")
@@ -2538,6 +2545,13 @@ class StockPickerService:
 
         if intel.get("stats"):
             s = intel["stats"]
+            # Warn LLM if market stats are not from today (e.g. Tushare daily fallback)
+            data_date = s.get("data_date")
+            if data_date and data_date != today:
+                parts.append(
+                    f"\u26a0\ufe0f 注意\uff1a以下市场涨跌统计来自 {data_date}\uff08非今日实时数据\uff09\uff0c"
+                    "\u8bf7以指数实时涨跌为准描述今日市场\u3002\n"
+                )
             parts.append("## 市场统计")
             parts.append(
                 f"- 上涨: {s.get('up_count', 0)} | 下跌: {s.get('down_count', 0)} | "

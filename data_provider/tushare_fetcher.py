@@ -766,8 +766,15 @@ class TushareFetcher(BaseFetcher):
         return None
 
     def get_main_indices(self, region: str = "cn") -> Optional[List[dict]]:
-        """
-        获取主要指数实时行情 (Tushare Pro)，仅支持 A 股
+        """Fetch main index daily data via Tushare index_daily API.
+
+        This serves as a reliable fallback for overseas users where
+        efinance/akshare (Eastmoney/Sina) time out.
+
+        Strategy:
+        - Query each index for the last 5 calendar days via index_daily.
+        - Use the latest available row (handles weekends / holidays).
+        - Return format aligned with efinance/akshare get_main_indices().
         """
         if region != "cn":
             return None
@@ -776,64 +783,79 @@ class TushareFetcher(BaseFetcher):
 
         from .realtime_types import safe_float
 
-        # 指数映射：Tushare代码 -> 名称
+        # Index mapping: ts_code -> (display_name, efinance-style code)
         indices_map = {
-            '000001.SH': '上证指数',
-            '399001.SZ': '深证成指',
-            '399006.SZ': '创业板指',
-            '000688.SH': '科创50',
-            '000016.SH': '上证50',
-            '000300.SH': '沪深300',
+            '000001.SH': ('上证指数', 'sh000001'),
+            '399001.SZ': ('深证成指', 'sz399001'),
+            '399006.SZ': ('创业板指', 'sz399006'),
+            '000016.SH': ('上证50', 'sh000016'),
+            '000905.SH': ('中证500', 'sh000905'),
+            '000688.SH': ('科创50', 'sh000688'),
+            '000300.SH': ('沪深300', 'sh000300'),
         }
 
-        try:
-            self._check_rate_limit()
+        china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        end_date = china_now.strftime('%Y%m%d')
+        start_date = (china_now - pd.Timedelta(days=7)).strftime('%Y%m%d')
 
-            # Tushare index_daily 获取历史数据，实时数据需用其他接口或估算
-            # 由于 Tushare 免费用户可能无法获取指数实时行情，这里作为备选
-            # 使用 index_daily 获取最近交易日数据
+        results = []
 
-            end_date = datetime.now().strftime('%Y%m%d')
-            start_date = (datetime.now() - pd.Timedelta(days=5)).strftime('%Y%m%d')
-
-            results = []
-
-            # 批量获取所有指数数据
-            for ts_code, name in indices_map.items():
-                try:
-                    df = self._api.index_daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
-                    if df is not None and not df.empty:
-                        row = df.iloc[0] # 最新一天
-
-                        current = safe_float(row['close'])
-                        prev_close = safe_float(row['pre_close'])
-
-                        results.append({
-                            'code': ts_code.split('.')[0], # 兼容 sh000001 格式需转换，这里保持纯数字
-                            'name': name,
-                            'current': current,
-                            'change': safe_float(row['change']),
-                            'change_pct': safe_float(row['pct_chg']),
-                            'open': safe_float(row['open']),
-                            'high': safe_float(row['high']),
-                            'low': safe_float(row['low']),
-                            'prev_close': prev_close,
-                            'volume': safe_float(row['vol']),
-                            'amount': safe_float(row['amount']) * 1000, # 千元转元
-                            'amplitude': 0.0 # Tushare index_daily 不直接返回振幅
-                        })
-                except Exception as e:
-                    logger.debug(f"Tushare 获取指数 {name} 失败: {e}")
+        for ts_code, (name, efinance_code) in indices_map.items():
+            try:
+                self._check_rate_limit()
+                df = self._api.index_daily(
+                    ts_code=ts_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if df is None or df.empty:
+                    logger.debug(f"[Tushare] index_daily empty for {ts_code}")
                     continue
 
-            if results:
-                return results
-            else:
-                logger.warning("[Tushare] 未获取到指数行情数据")
+                # index_daily returns newest first; take the first row
+                row = df.iloc[0]
+                trade_date = str(row.get('trade_date', ''))
 
-        except Exception as e:
-            logger.error(f"[Tushare] 获取指数行情失败: {e}")
+                current = safe_float(row['close'])
+                prev_close = safe_float(row['pre_close'])
+                high = safe_float(row['high'])
+                low = safe_float(row['low'])
 
+                # Format data_date as YYYY-MM-DD for freshness tracking
+                data_date = (
+                    f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+                    if len(trade_date) == 8 else trade_date
+                )
+
+                # Compute amplitude (%) consistent with efinance/akshare
+                amplitude = 0.0
+                if prev_close and prev_close > 0 and high and low:
+                    amplitude = (high - low) / prev_close * 100
+
+                results.append({
+                    'code': efinance_code,
+                    'name': name,
+                    'current': current,
+                    'change': safe_float(row['change']),
+                    'change_pct': safe_float(row['pct_chg']),
+                    'open': safe_float(row['open']),
+                    'high': high,
+                    'low': low,
+                    'prev_close': prev_close,
+                    'volume': safe_float(row['vol']),
+                    'amount': safe_float(row['amount']) * 1000 if safe_float(row['amount']) else 0,
+                    'amplitude': amplitude,
+                    'data_date': data_date,
+                })
+            except Exception as e:
+                logger.debug(f"[Tushare] index_daily failed for {name}({ts_code}): {e}")
+                continue
+
+        if results:
+            logger.info(f"[Tushare] Fetched {len(results)}/{len(indices_map)} index quotes")
+            return results
+
+        logger.warning("[Tushare] No index data retrieved from index_daily")
         return None
 
     def get_market_stats(self) -> Optional[dict]:
@@ -919,7 +941,11 @@ class TushareFetcher(BaseFetcher):
                         f"[Tushare] market_stats from daily() date={target_date}, "
                         f"rows={len(df)}"
                     )
-                    return self._calc_market_stats(df)
+                    stats = self._calc_market_stats(df)
+                    if stats is not None:
+                        # Annotate with actual data date so callers know freshness
+                        stats["data_date"] = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:8]}"
+                    return stats
                 else:
                     logger.warning(
                         f"[Tushare] daily() returned empty for {target_date}, "
