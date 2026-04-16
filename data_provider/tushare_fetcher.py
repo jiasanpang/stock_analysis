@@ -868,39 +868,65 @@ class TushareFetcher(BaseFetcher):
             else:
                 use_realtime = False
 
-            # 若实盘的时候使用 则使用其他可以实盘获取的数据源 akshare、efinance
-            # NOTE: rt_k has strict rate limit (1/hour for standard accounts)
-            # Skip it and let other sources (akshare, efinance) handle market stats
+            # Determine the target date for daily() query.
+            # During trading hours we now attempt daily() instead of skipping,
+            # so Tushare can serve as fallback for overseas users where
+            # efinance/akshare timeout.  We avoid rt_k (rate-limited).
             if use_realtime:
-                logger.debug("[Tushare] Skipping rt_k (rate limited), delegate to other sources")
-                return None
+                # Trading hours: try today first; if empty fall back to prev day
+                target_date = current_date
+                fallback_date = date_list[1] if len(date_list) > 1 else None
+                logger.info("[Tushare] Trading hours detected, attempting daily() for market stats")
             else:
-
+                fallback_date = None
                 if current_date not in date_list:
-                    last_date = date_list[0] # 拿最近的日期
-                else:
-                    if china_now_str < '09:30': 
-                        last_date = date_list[1] # 拿取前一天的数据
-                    else:  # 即 '> 16:30'                  
-                        last_date = date_list[0] # 拿取当天的数据
+                    target_date = date_list[0]  # latest trading day
+                elif china_now_str < '09:30':
+                    target_date = date_list[1] if len(date_list) > 1 else date_list[0]
+                else:  # post-market (> 16:30)
+                    target_date = date_list[0]  # today's closed data
 
-                try:
-                    df = self._api.daily(TS_CODE='3*.SZ,6*.SH,0*.SZ,92*.BJ',start_date=last_date, end_date=last_date)
-                    # 为防止不同接口返回的列名大小写不一致（例如 rt_k 返回小写，daily 返回大写），统一将列名转为小写
+            try:
+                df = self._api.daily(
+                    TS_CODE='3*.SZ,6*.SH,0*.SZ,92*.BJ',
+                    start_date=target_date, end_date=target_date,
+                )
+
+                # If trading-hours query returned empty, fall back to previous trading day
+                if (df is None or df.empty) and fallback_date:
+                    logger.info(
+                        f"[Tushare] daily() empty for {target_date}, "
+                        f"falling back to {fallback_date}"
+                    )
+                    target_date = fallback_date
+                    df = self._api.daily(
+                        TS_CODE='3*.SZ,6*.SH,0*.SZ,92*.BJ',
+                        start_date=fallback_date, end_date=fallback_date,
+                    )
+
+                if df is not None and not df.empty:
+                    # Normalize column names to lowercase
                     df.columns = [col.lower() for col in df.columns]
 
-                    # 获取股票基础信息（包含代码和名称）
+                    # Merge stock basic info (code + name)
                     df_basic = self._api.stock_basic(fields='ts_code,name')
                     df = pd.merge(df, df_basic, on='ts_code', how='left')
-                    # 将 daily的 amount 列的值乘以 1000 来和其他数据源保持一致
+                    # Convert amount from 千元 to 元 to align with other sources
                     if 'amount' in df.columns:
                         df['amount'] = df['amount'] * 1000
 
-                    if df is not None and not df.empty:
-                        return self._calc_market_stats(df)
-                except Exception as e:
-                    logger.error(f"[Tushare] ts.pro_api().daily 获取数据失败: {e}")
-                    
+                    logger.info(
+                        f"[Tushare] market_stats from daily() date={target_date}, "
+                        f"rows={len(df)}"
+                    )
+                    return self._calc_market_stats(df)
+                else:
+                    logger.warning(
+                        f"[Tushare] daily() returned empty for {target_date}, "
+                        "no market stats available"
+                    )
+            except Exception as e:
+                logger.error(f"[Tushare] ts.pro_api().daily failed: {e}")
 
             
         except Exception as e:
