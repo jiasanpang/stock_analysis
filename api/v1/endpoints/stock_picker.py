@@ -82,6 +82,7 @@ class PickerResponse(BaseModel):
     history_id: Optional[int] = None
     picker_mode: str = "balanced"
     picker_strategies: List[str] = Field(default_factory=list)
+    indices_stale: bool = False  # Whether index realtime data was unavailable
 
 
 # ── History response models ──────────────────────────────────────

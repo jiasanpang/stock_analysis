@@ -49,6 +49,7 @@ export interface PickerResponse {
   history_id?: number | null;
   picker_mode?: string;
   picker_strategies?: string[];
+  indices_stale?: boolean;
 }
 
 export interface PickPreview {

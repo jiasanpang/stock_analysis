@@ -18,8 +18,9 @@ import logging
 import random
 import time
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from typing import Optional, List, Tuple, Dict, Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import numpy as np
@@ -1111,43 +1112,166 @@ class DataFetcherManager:
         logger.info(f"[股票名称] 批量获取完成，成功 {len(result)}/{len(stock_codes)}")
         return result
 
+    @staticmethod
+    def _is_trading_hours() -> bool:
+        """Check if current time is within A-share trading hours (weekday 09:15-15:30 CST)."""
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        if now.weekday() >= 5:  # Saturday / Sunday
+            return False
+        t = now.time()
+        return dt_time(9, 15) <= t <= dt_time(15, 30)
+
     def get_main_indices(self, region: str = "cn") -> List[Dict[str, Any]]:
-        """获取主要指数实时行情（自动切换数据源）"""
+        """Fetch main index realtime quotes with stale-data awareness.
+
+        During trading hours on weekdays, if a fetcher returns data whose
+        ``data_date`` is not today, it is considered stale and the next
+        fetcher in the fallback chain is tried.  Outside trading hours the
+        previous trading day's data is acceptable.
+
+        When all fetchers return stale data, the last result is returned
+        with an extra ``_stale`` flag on each index dict.
+        """
+        today_str = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+        require_today = self._is_trading_hours()
+        last_stale_data: Optional[List[Dict[str, Any]]] = None
+
         for fetcher in self._fetchers:
             try:
                 data = fetcher.get_main_indices(region=region)
-                if data:
-                    logger.info(f"[{fetcher.name}] 获取指数行情成功")
-                    return data
+                if not data:
+                    continue
+
+                # Check freshness via data_date field
+                idx_dates = [idx.get("data_date") for idx in data if idx.get("data_date")]
+                is_stale = bool(idx_dates) and all(d != today_str for d in idx_dates)
+
+                if is_stale and require_today:
+                    logger.warning(
+                        f"[{fetcher.name}] Index data_date={idx_dates[0]} (not today={today_str}), "
+                        "trying next fetcher"
+                    )
+                    last_stale_data = data
+                    continue
+
+                logger.info(f"[{fetcher.name}] 获取指数行情成功")
+                return data
             except Exception as e:
                 logger.warning(f"[{fetcher.name}] 获取指数行情失败: {e}")
                 continue
+
+        # All fetchers returned stale data — mark and return the last one
+        if last_stale_data is not None:
+            logger.warning(
+                "[DataFetcherManager] All fetchers returned stale index data, "
+                "marking indices as _stale"
+            )
+            for idx in last_stale_data:
+                idx["_stale"] = True
+            return last_stale_data
+
         return []
 
     def get_market_stats(self) -> Dict[str, Any]:
-        """获取市场涨跌统计（自动切换数据源）"""
+        """Fetch market up/down statistics with stale-data awareness.
+
+        During trading hours, if a fetcher returns data whose ``data_date``
+        is not today (Shanghai timezone), it is considered stale and the next
+        fetcher is tried.  When all fetchers return stale data, the last
+        result is returned with an extra ``_stale`` flag.
+        """
+        today_str = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+        require_today = self._is_trading_hours()
+        last_stale_data: Optional[Dict[str, Any]] = None
+
         for fetcher in self._fetchers:
             try:
                 data = fetcher.get_market_stats()
-                if data:
-                    logger.info(f"[{fetcher.name}] 获取市场统计成功")
-                    return data
+                if not data:
+                    continue
+
+                # Check freshness via data_date field
+                data_date = data.get("data_date")
+                is_stale = bool(data_date) and data_date != today_str
+
+                if is_stale and require_today:
+                    logger.warning(
+                        f"[{fetcher.name}] Market stats data_date={data_date} "
+                        f"(not today={today_str}), trying next fetcher"
+                    )
+                    last_stale_data = data
+                    continue
+
+                logger.info(f"[{fetcher.name}] 获取市场统计成功")
+                return data
             except Exception as e:
                 logger.warning(f"[{fetcher.name}] 获取市场统计失败: {e}")
                 continue
+
+        # All fetchers returned stale data — mark and return the last one
+        if last_stale_data is not None:
+            logger.warning(
+                "[DataFetcherManager] All fetchers returned stale market stats, "
+                "marking as _stale"
+            )
+            last_stale_data["_stale"] = True
+            return last_stale_data
+
         return {}
 
     def get_sector_rankings(self, n: int = 5) -> Tuple[List[Dict], List[Dict]]:
-        """获取板块涨跌榜（自动切换数据源）"""
+        """Fetch sector rankings with stale-data awareness.
+
+        During trading hours, if a fetcher returns sector dicts whose
+        ``data_date`` is not today (Shanghai timezone), it is considered
+        stale and the next fetcher is tried.  When all fetchers return
+        stale data, the last result is returned with ``_stale=True``
+        on each sector dict.
+        """
+        today_str = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+        require_today = self._is_trading_hours()
+        last_stale_data: Optional[Tuple[List[Dict], List[Dict]]] = None
+
         for fetcher in self._fetchers:
             try:
                 data = fetcher.get_sector_rankings(n)
-                if data:
-                    logger.info(f"[{fetcher.name}] 获取板块排行成功")
-                    return data
+                if not data:
+                    continue
+
+                top_sectors, bottom_sectors = data
+                if not top_sectors and not bottom_sectors:
+                    continue
+
+                # Check freshness via data_date on sector dicts
+                all_sectors = top_sectors + bottom_sectors
+                sec_dates = [s.get("data_date") for s in all_sectors if s.get("data_date")]
+                is_stale = bool(sec_dates) and all(d != today_str for d in sec_dates)
+
+                if is_stale and require_today:
+                    logger.warning(
+                        f"[{fetcher.name}] Sector data_date={sec_dates[0]} "
+                        f"(not today={today_str}), trying next fetcher"
+                    )
+                    last_stale_data = data
+                    continue
+
+                logger.info(f"[{fetcher.name}] 获取板块排行成功")
+                return data
             except Exception as e:
                 logger.warning(f"[{fetcher.name}] 获取板块排行失败: {e}")
                 continue
+
+        # All fetchers returned stale data — mark and return the last one
+        if last_stale_data is not None:
+            logger.warning(
+                "[DataFetcherManager] All fetchers returned stale sector data, "
+                "marking as _stale"
+            )
+            top_sectors, bottom_sectors = last_stale_data
+            for sec in top_sectors + bottom_sectors:
+                sec["_stale"] = True
+            return top_sectors, bottom_sectors
+
         return [], []
 
     def get_index_daily_data(

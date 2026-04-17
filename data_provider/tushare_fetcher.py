@@ -911,42 +911,146 @@ class TushareFetcher(BaseFetcher):
         logger.warning(f"[RealTime] Unable to fetch realtime quote for {stock_code}")
         return None
 
+    # Index mapping: ts_code -> (display_name, efinance-style code)
+    _INDICES_MAP = {
+        '000001.SH': ('上证指数', 'sh000001'),
+        '399001.SZ': ('深证成指', 'sz399001'),
+        '399006.SZ': ('创业板指', 'sz399006'),
+        '000016.SH': ('上证50', 'sh000016'),
+        '000905.SH': ('中证500', 'sh000905'),
+        '000688.SH': ('科创50', 'sh000688'),
+        '000300.SH': ('沪深300', 'sh000300'),
+    }
+
     def get_main_indices(self, region: str = "cn") -> Optional[List[dict]]:
-        """Fetch main index daily data via Tushare index_daily API.
+        """Fetch main index quotes with realtime-first, index_daily fallback.
 
-        This serves as a reliable fallback for overseas users where
-        efinance/akshare (Eastmoney/Sina) time out.
+        Priority:
+        1. api.rt_idx_k() — dedicated realtime index K-line endpoint.
+        2. api.index_daily() — returns previous trading-day close data.
 
-        Strategy:
-        - Query each index for the last 5 calendar days via index_daily.
-        - Use the latest available row (handles weekends / holidays).
-        - Return format aligned with efinance/akshare get_main_indices().
+        Return format is aligned with efinance/akshare get_main_indices().
         """
         if region != "cn":
             return None
         if self._api is None:
             return None
 
-        from .realtime_types import safe_float
+        # --- Strategy 1: rt_idx_k (realtime index K-line, dedicated endpoint) ---
+        realtime_results = self._get_indices_via_rt_idx_k()
+        if realtime_results:
+            return realtime_results
 
-        # Index mapping: ts_code -> (display_name, efinance-style code)
-        indices_map = {
-            '000001.SH': ('上证指数', 'sh000001'),
-            '399001.SZ': ('深证成指', 'sz399001'),
-            '399006.SZ': ('创业板指', 'sz399006'),
-            '000016.SH': ('上证50', 'sh000016'),
-            '000905.SH': ('中证500', 'sh000905'),
-            '000688.SH': ('科创50', 'sh000688'),
-            '000300.SH': ('沪深300', 'sh000300'),
-        }
+        # --- Strategy 2: index_daily fallback (may return previous trading day) ---
+        return self._get_indices_via_daily()
+
+    def _get_indices_via_rt_idx_k(self) -> Optional[List[dict]]:
+        """Fetch index quotes via pro_api.rt_idx_k (dedicated realtime index K-line).
+
+        rt_idx_k returns: ts_code, name, trade_time, close, pre_close, high, open, low, vol, amount.
+        pct_chg is computed as (close - pre_close) / pre_close * 100.
+        data_date is extracted from trade_time.
+
+        Returns list of index dicts, or None on failure (falls back to index_daily).
+        """
+        from .realtime_types import safe_float
+        try:
+            tushare_codes = list(self._INDICES_MAP.keys())
+            codes_str = ','.join(tushare_codes)
+
+            # Wall-clock timeout to avoid hanging on network issues
+            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ts_rt_idx_k")
+            future = pool.submit(self._api.rt_idx_k, ts_code=codes_str)
+            try:
+                df = future.result(timeout=8)
+            except Exception:
+                df = None
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+            if df is None or df.empty:
+                logger.debug("[Tushare] rt_idx_k returned empty")
+                return None
+
+            # Normalize column names to lowercase
+            df.columns = [c.lower() for c in df.columns]
+
+            results = []
+            for ts_code, (name, efinance_code) in self._INDICES_MAP.items():
+                row = df[df['ts_code'] == ts_code]
+                if row.empty:
+                    continue
+                row = row.iloc[0]
+
+                close = safe_float(row.get('close'))
+                pre_close = safe_float(row.get('pre_close'))
+                high = safe_float(row.get('high'))
+                low = safe_float(row.get('low'))
+                open_price = safe_float(row.get('open'))
+                vol = safe_float(row.get('vol'))
+                amount = safe_float(row.get('amount'))
+                trade_time = str(row.get('trade_time', ''))
+
+                if close is None or close <= 0:
+                    continue
+
+                # Compute pct_chg and change from close / pre_close
+                pct_chg = None
+                change = None
+                if pre_close and pre_close > 0:
+                    change = round(close - pre_close, 4)
+                    pct_chg = round((close - pre_close) / pre_close * 100, 4)
+
+                # Extract date from trade_time (e.g. "2026-04-17 14:30:00" -> "2026-04-17")
+                data_date = trade_time[:10] if len(trade_time) >= 10 else ''
+                if not data_date or len(data_date) != 10:
+                    # Fallback: use today's date in China timezone
+                    data_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+
+                amplitude = 0.0
+                if pre_close and pre_close > 0 and high and low:
+                    amplitude = (high - low) / pre_close * 100
+
+                results.append({
+                    'code': efinance_code,
+                    'name': name,
+                    'current': close,
+                    'change': change,
+                    'change_pct': pct_chg,
+                    'open': open_price,
+                    'high': high,
+                    'low': low,
+                    'prev_close': pre_close,
+                    'volume': vol,
+                    'amount': amount * 1000 if amount else 0,
+                    'amplitude': amplitude,
+                    'data_date': data_date,
+                })
+
+            if results:
+                logger.info(
+                    f"[Tushare] Fetched {len(results)}/{len(self._INDICES_MAP)} index quotes "
+                    "via rt_idx_k (realtime)"
+                )
+                return results
+
+            logger.debug("[Tushare] rt_idx_k matched no index codes")
+            return None
+
+        except Exception as e:
+            logger.debug(f"[Tushare] rt_idx_k index fetch failed: {e}")
+            return None
+
+    def _get_indices_via_daily(self) -> Optional[List[dict]]:
+        """Fallback: fetch index data via api.index_daily (returns previous trading day)."""
+        from .realtime_types import safe_float
 
         china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
         end_date = china_now.strftime('%Y%m%d')
         start_date = (china_now - pd.Timedelta(days=7)).strftime('%Y%m%d')
 
         results = []
-
-        for ts_code, (name, efinance_code) in indices_map.items():
+        for ts_code, (name, efinance_code) in self._INDICES_MAP.items():
             try:
                 self._check_rate_limit()
                 df = self._api.index_daily(
@@ -998,7 +1102,7 @@ class TushareFetcher(BaseFetcher):
                 continue
 
         if results:
-            logger.info(f"[Tushare] Fetched {len(results)}/{len(indices_map)} index quotes")
+            logger.info(f"[Tushare] Fetched {len(results)}/{len(self._INDICES_MAP)} index quotes via index_daily")
             return results
 
         logger.warning("[Tushare] No index data retrieved from index_daily")
@@ -1334,11 +1438,20 @@ class TushareFetcher(BaseFetcher):
             df_sw = df_sw.dropna(subset=["pct_change"])
             name_col = "name" if "name" in df_sw.columns else df_sw.columns[1]
 
+            # Convert latest_trade_date (YYYYMMDD) to YYYY-MM-DD for freshness tracking
+            data_date = f"{latest_trade_date[:4]}-{latest_trade_date[4:6]}-{latest_trade_date[6:8]}"
+
             top = df_sw.nlargest(n, "pct_change")
             bottom = df_sw.nsmallest(n, "pct_change")
-            top_sectors = [{"name": str(row[name_col]), "change_pct": float(row["pct_change"])} for _, row in top.iterrows()]
-            bottom_sectors = [{"name": str(row[name_col]), "change_pct": float(row["pct_change"])} for _, row in bottom.iterrows()]
-            logger.info(f"[板块排行] Tushare sw_daily 成功: 领涨/领跌各{n}个板块")
+            top_sectors = [
+                {"name": str(row[name_col]), "change_pct": float(row["pct_change"]), "data_date": data_date}
+                for _, row in top.iterrows()
+            ]
+            bottom_sectors = [
+                {"name": str(row[name_col]), "change_pct": float(row["pct_change"]), "data_date": data_date}
+                for _, row in bottom.iterrows()
+            ]
+            logger.info(f"[板块排行] Tushare sw_daily 成功: 领涨/领跌各{n}个板块, data_date={data_date}")
             return top_sectors, bottom_sectors
         except Exception as e:
             logger.warning(f"[板块排行] Tushare 获取失败: {e}")

@@ -338,6 +338,7 @@ class PickerResult:
     elapsed_seconds: float = 0.0
     picker_mode: str = "balanced"
     picker_strategies: List[str] = field(default_factory=list)
+    indices_stale: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -357,6 +358,7 @@ class PickerResult:
         }
         d["picker_mode"] = self.picker_mode
         d["picker_strategies"] = self.picker_strategies
+        d["indices_stale"] = self.indices_stale
         return d
 
 
@@ -778,7 +780,7 @@ class StockScreener:
           1. Get all stock codes from available fetcher
           2. Batch query realtime quotes (200 per batch) via ts.get_realtime_quotes()
           3. Compute change_pct from price / pre_close
-          4. One-pass filter: mainboard + change 3.5-5.5% + turnover 10-12% + market_cap 60-300yi
+          4. One-pass filter: mainboard + change 3-6% + turnover 5-12% + market_cap 60-300yi
           5. Check recent limit-up (Rule 4) via daily data
           6. Return ScreenedStock list
         """
@@ -910,10 +912,10 @@ class StockScreener:
         if "name" in df.columns:
             mask &= ~df["name"].str.contains("ST", na=False, case=False)
 
-        # Rule 2: change 3.5%-5.5% (filter weak gains & near-limit extremes)
-        mask &= (df["calc_change_pct"] >= 3.5) & (df["calc_change_pct"] <= 5.5)
+        # Rule 2: change 3%-6% (filter weak gains & near-limit extremes)
+        mask &= (df["calc_change_pct"] >= 3.0) & (df["calc_change_pct"] <= 6.0)
 
-        # Rule 3: turnover 10%-12% (tighter band to avoid distribution patterns)
+        # Rule 3: turnover 5%-12% (wider band to capture more candidates)
         turnover_col = None
         for col_name in ["turnover", "turnover_rate"]:
             if col_name in df.columns:
@@ -923,7 +925,7 @@ class StockScreener:
             turnover = pd.to_numeric(df[turnover_col], errors="coerce")
             has_turnover = turnover.notna() & (turnover > 0)
             if has_turnover.any():
-                mask &= ~has_turnover | ((turnover >= 10.0) & (turnover <= 12.0))
+                mask &= ~has_turnover | ((turnover >= 5.0) & (turnover <= 12.0))
                 logger.info(
                     f"[EOD-RT] Turnover filter applied via '{turnover_col}' "
                     f"({has_turnover.sum()} stocks had data)"
@@ -1150,15 +1152,15 @@ class StockScreener:
                     + (5.0 if 100 <= s.market_cap <= 200 else 0.0)
                 )
                 # -- Intra-band momentum strength (replaces limit-up signal) --
-                # Within the 3.5-5.5% band, higher change indicates stronger EOD buying pressure
+                # Within the 3-6% band, higher change indicates stronger EOD buying pressure
                 today_change = s.change_pct
-                if today_change >= 5.0:
+                if today_change >= 5.5:
                     base_score += 15.0  # Upper band: strong EOD momentum
                     logger.debug("[EOD] %s strong band momentum (%.1f%%), +15 pts", s.code, today_change)
-                elif today_change >= 4.3:
+                elif today_change >= 4.5:
                     base_score += 8.0   # Mid band: moderate EOD momentum
                     logger.debug("[EOD] %s moderate band momentum (%.1f%%), +8 pts", s.code, today_change)
-                # Below 4.3%: no bonus (weak end-of-day buying)
+                # Below 4.5%: no bonus (weak end-of-day buying)
 
                 # -- Sector strength bonus --
                 # Strong sector stocks have higher next-day continuation probability
@@ -2142,6 +2144,16 @@ class StockPickerService:
 
             self._parse_result(llm_output, result)
 
+            # Append stale-data annotation to market_summary if indices were not fresh
+            # Propagate stale flag to result for frontend warning UI
+            if intel.get("indices_stale"):
+                result.indices_stale = True
+            if intel.get("indices_stale") and result.market_summary:
+                result.market_summary = (
+                    result.market_summary.rstrip()
+                    + "（注：指数实时数据暂不可用，以上为定性判断）"
+                )
+
             # ── Post-validation: ensure LLM picks are within screened pool ──
             if result.screened_pool:
                 pool_codes = {s.code for s in result.screened_pool}
@@ -2461,13 +2473,42 @@ class StockPickerService:
 
                     if label == "indices" and result:
                         intel["indices"] = result
+                        # Check if any index is flagged stale by DataFetcherManager
+                        today_str = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+                        idx_dates = [idx.get("data_date") for idx in result if idx.get("data_date")]
+                        has_stale_flag = any(idx.get("_stale") for idx in result)
+                        if has_stale_flag or (idx_dates and all(d != today_str for d in idx_dates)):
+                            intel["indices_stale"] = True
+                            logger.warning(
+                                "[StockPicker] Index data is stale "
+                                f"(dates={set(idx_dates)}, today={today_str})"
+                            )
                     elif label == "market_stats" and result:
                         intel["stats"] = result
+                        # Check if market stats are stale
+                        has_stale_flag = result.get("_stale", False)
+                        stats_date = result.get("data_date")
+                        if has_stale_flag or (stats_date and stats_date != today_str):
+                            intel["stats_stale"] = True
+                            logger.warning(
+                                f"[StockPicker] Market stats data is stale "
+                                f"(data_date={stats_date}, today={today_str})"
+                            )
                     elif label == "sector_rankings" and result:
                         top_sectors, bottom_sectors = result
                         if top_sectors:
                             intel["top_sectors"] = top_sectors
                             intel["bottom_sectors"] = bottom_sectors
+                            # Check if sector data is stale
+                            all_secs = top_sectors + bottom_sectors
+                            has_stale_flag = any(s.get("_stale") for s in all_secs)
+                            sec_dates = [s.get("data_date") for s in all_secs if s.get("data_date")]
+                            if has_stale_flag or (sec_dates and all(d != today_str for d in sec_dates)):
+                                intel["sectors_stale"] = True
+                                logger.warning(
+                                    f"[StockPicker] Sector data is stale "
+                                    f"(dates={set(sec_dates)}, today={today_str})"
+                                )
             except FuturesTimeout:
                 # Overall timeout reached — collect whatever finished so far
                 timed_out = [lbl for f, lbl in all_futures.items() if not f.done()]
@@ -2559,7 +2600,7 @@ class StockPickerService:
     ) -> str:
         """Build the prompt with quant pool, chip data (if any), and market intel."""
         chip_map = chip_map or {}
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
         strategies = getattr(self._screener, "_picker_strategies", []) or ["buy_pullback"]
         from src.services.picker_strategies import get_strategy_params, STRATEGY_DISPLAY_NAMES
         strategy_labels = ", ".join(STRATEGY_DISPLAY_NAMES.get(x, x) for x in strategies)
@@ -2619,55 +2660,80 @@ class StockPickerService:
             )
 
         # ── Market intel ──
+        indices_stale = intel.get("indices_stale", False)
         if intel.get("indices"):
-            # Check if index data is stale (e.g. from Tushare index_daily fallback)
-            idx_dates = [idx.get("data_date") for idx in intel["indices"] if idx.get("data_date")]
-            if idx_dates and all(d != today for d in idx_dates):
-                stale_date = idx_dates[0]
+            if indices_stale:
+                # Stale index data: do NOT show specific numbers to prevent LLM from citing them
                 parts.append(
-                    f"\u26a0\ufe0f 注意\uff1a以下指数数据来自 {stale_date}\uff08非今日实时数据\uff09\u3002\n"
+                    "## 主要指数\n"
+                    "今日指数实时数据获取失败，请勿在 market_summary 中引用具体指数涨跌幅数值。"
+                    "请仅基于筛选池质量和板块数据给出市场判断。\n"
                 )
-            parts.append("## 主要指数")
-            for idx in intel["indices"]:
-                name = idx.get("name", "")
-                current = idx.get("current", 0)
-                pct = idx.get("change_pct", 0)
-                arrow = "↑" if pct > 0 else "↓" if pct < 0 else "→"
-                parts.append(f"- {name}: {current:.2f} ({arrow}{pct:+.2f}%)")
-            parts.append("")
+            else:
+                # Check if index data is stale (e.g. from Tushare index_daily fallback)
+                idx_dates = [idx.get("data_date") for idx in intel["indices"] if idx.get("data_date")]
+                if idx_dates and all(d != today for d in idx_dates):
+                    stale_date = idx_dates[0]
+                    parts.append(
+                        f"\u26a0\ufe0f 注意\uff1a以下指数数据来自 {stale_date}\uff08非今日实时数据\uff09\u3002\n"
+                    )
+                parts.append("## 主要指数")
+                for idx in intel["indices"]:
+                    name = idx.get("name", "")
+                    current = idx.get("current", 0)
+                    pct = idx.get("change_pct", 0)
+                    arrow = "\u2191" if pct > 0 else "\u2193" if pct < 0 else "\u2192"
+                    parts.append(f"- {name}: {current:.2f} ({arrow}{pct:+.2f}%)")
+                parts.append("")
 
         if intel.get("stats"):
-            s = intel["stats"]
-            # Warn LLM if market stats are not from today (e.g. Tushare daily fallback)
-            data_date = s.get("data_date")
-            if data_date and data_date != today:
+            stats_stale = intel.get("stats_stale", False)
+            if stats_stale:
+                # Stale stats: warn LLM not to cite specific numbers
                 parts.append(
-                    f"\u26a0\ufe0f 注意\uff1a以下市场涨跌统计来自 {data_date}\uff08非今日实时数据\uff09\uff0c"
-                    "\u8bf7以指数实时涨跌为准描述今日市场\u3002\n"
+                    "## 市场统计\n"
+                    "今日市场涨跌统计实时数据获取失败，以下为往期数据，请勿在 market_summary 中引用具体涨跌家数。\n"
                 )
-            parts.append("## 市场统计")
-            parts.append(
-                f"- 上涨: {s.get('up_count', 0)} | 下跌: {s.get('down_count', 0)} | "
-                f"平盘: {s.get('flat_count', 0)}"
-            )
-            parts.append(
-                f"- 涨停: {s.get('limit_up_count', 0)} | 跌停: {s.get('limit_down_count', 0)}"
-            )
-            amt = s.get("total_amount", 0)
-            if amt:
-                parts.append(f"- 两市成交额: {amt:.0f} 亿元")
-            parts.append("")
+            else:
+                s = intel["stats"]
+                # Warn LLM if market stats are not from today (e.g. Tushare daily fallback)
+                data_date = s.get("data_date")
+                if data_date and data_date != today:
+                    parts.append(
+                        f"\u26a0\ufe0f 注意\uff1a以下市场涨跌统计来自 {data_date}\uff08非今日实时数据\uff09\uff0c"
+                        "\u8bf7以指数实时涨跌为准描述今日市场\u3002\n"
+                    )
+                parts.append("## 市场统计")
+                parts.append(
+                    f"- 上涨: {s.get('up_count', 0)} | 下跌: {s.get('down_count', 0)} | "
+                    f"平盘: {s.get('flat_count', 0)}"
+                )
+                parts.append(
+                    f"- 涨停: {s.get('limit_up_count', 0)} | 跌停: {s.get('limit_down_count', 0)}"
+                )
+                amt = s.get("total_amount", 0)
+                if amt:
+                    parts.append(f"- 两市成交额: {amt:.0f} 亿元")
+                parts.append("")
 
         if intel.get("top_sectors"):
-            parts.append("## 板块排行")
-            parts.append("### 领涨板块")
-            for sec in intel["top_sectors"][:10]:
-                parts.append(f"- {sec['name']}: {sec['change_pct']:+.2f}%")
-            if intel.get("bottom_sectors"):
-                parts.append("### 领跌板块")
-                for sec in intel["bottom_sectors"][:5]:
+            sectors_stale = intel.get("sectors_stale", False)
+            if sectors_stale:
+                # Stale sector data: warn LLM not to cite specific sector rankings
+                parts.append(
+                    "## 板块排行\n"
+                    "今日板块排行实时数据获取失败，以下为往期数据，请勿在报告中引用具体板块涨跌幅。\n"
+                )
+            else:
+                parts.append("## 板块排行")
+                parts.append("### 领涨板块")
+                for sec in intel["top_sectors"][:10]:
                     parts.append(f"- {sec['name']}: {sec['change_pct']:+.2f}%")
-            parts.append("")
+                if intel.get("bottom_sectors"):
+                    parts.append("### 领跌板块")
+                    for sec in intel["bottom_sectors"][:5]:
+                        parts.append(f"- {sec['name']}: {sec['change_pct']:+.2f}%")
+                parts.append("")
 
         if intel.get("news"):
             parts.append("## 今日热点新闻")
