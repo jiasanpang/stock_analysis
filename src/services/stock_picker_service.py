@@ -26,7 +26,7 @@ from json_repair import repair_json
 from src.config import get_config
 from src.core.trading_calendar import get_last_trading_day
 from src.search_service import SearchService
-from data_provider.base import DataFetcherManager, is_kc_cy_stock
+from data_provider.base import DataFetcherManager, is_bse_code, is_kc_cy_stock, is_st_stock
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,19 @@ TREND_DECAY_THRESHOLD_PCT = 30.0
 LIMIT_UP_DAYS_THRESHOLD = 2
 LIMIT_UP_PCT_MAIN = 9.5   # main board (60/00/002) ~10%
 LIMIT_UP_PCT_KC_CY = 19.0  # ChiNext/STAR (30/688) ~20%
+LIMIT_UP_PCT_BSE = 29.0    # BSE (8/4/920) ~30%
+LIMIT_UP_PCT_ST = 4.5      # ST stocks ~5%
+
+
+def _get_limit_up_pct(code: str, name: str = "") -> float:
+    """Return limit-up percentage threshold based on board type and ST status."""
+    if is_st_stock(name):
+        return LIMIT_UP_PCT_ST
+    if is_bse_code(code):
+        return LIMIT_UP_PCT_BSE
+    if is_kc_cy_stock(code):
+        return LIMIT_UP_PCT_KC_CY
+    return LIMIT_UP_PCT_MAIN
 
 # Leader bias exemption: 60d change > this % to qualify
 LEADER_CHANGE_60D_MIN = 15.0
@@ -765,7 +778,7 @@ class StockScreener:
           1. Get all stock codes from available fetcher
           2. Batch query realtime quotes (200 per batch) via ts.get_realtime_quotes()
           3. Compute change_pct from price / pre_close
-          4. One-pass filter: mainboard + change 3-6% + turnover 8-15% + market_cap 50-300yi
+          4. One-pass filter: mainboard + change 3.5-5.5% + turnover 10-12% + market_cap 60-300yi
           5. Check recent limit-up (Rule 4) via daily data
           6. Return ScreenedStock list
         """
@@ -897,10 +910,10 @@ class StockScreener:
         if "name" in df.columns:
             mask &= ~df["name"].str.contains("ST", na=False, case=False)
 
-        # Rule 2: change 3%-6%
-        mask &= (df["calc_change_pct"] >= 3.0) & (df["calc_change_pct"] <= 6.0)
+        # Rule 2: change 3.5%-5.5% (filter weak gains & near-limit extremes)
+        mask &= (df["calc_change_pct"] >= 3.5) & (df["calc_change_pct"] <= 5.5)
 
-        # Rule 3: turnover 8%-15% (from realtime 'turnover' or daily_basic 'turnover_rate')
+        # Rule 3: turnover 10%-12% (tighter band to avoid distribution patterns)
         turnover_col = None
         for col_name in ["turnover", "turnover_rate"]:
             if col_name in df.columns:
@@ -910,7 +923,7 @@ class StockScreener:
             turnover = pd.to_numeric(df[turnover_col], errors="coerce")
             has_turnover = turnover.notna() & (turnover > 0)
             if has_turnover.any():
-                mask &= ~has_turnover | ((turnover >= 8.0) & (turnover <= 15.0))
+                mask &= ~has_turnover | ((turnover >= 10.0) & (turnover <= 12.0))
                 logger.info(
                     f"[EOD-RT] Turnover filter applied via '{turnover_col}' "
                     f"({has_turnover.sum()} stocks had data)"
@@ -920,7 +933,7 @@ class StockScreener:
         else:
             logger.info("[EOD-RT] No turnover column, skipping filter")
 
-        # Rule 6: market cap 50-300yi (from realtime or daily_basic 'total_mv_yi')
+        # Rule 6: market cap 60-300yi (from realtime or daily_basic 'total_mv_yi')
         # ts.get_realtime_quotes may provide mktcap in 万元 units; daily_basic total_mv_yi is already in 亿
         mktcap_col = None
         mktcap_already_yi = False
@@ -937,7 +950,7 @@ class StockScreener:
             mktcap_yi = mktcap if mktcap_already_yi else mktcap / 1e4
             has_mktcap = mktcap.notna() & (mktcap > 0)
             if has_mktcap.any():
-                mask &= ~has_mktcap | ((mktcap_yi >= 50.0) & (mktcap_yi <= 300.0))
+                mask &= ~has_mktcap | ((mktcap_yi >= 60.0) & (mktcap_yi <= 300.0))
                 logger.info(
                     f"[EOD-RT] Market cap filter applied via '{mktcap_col}' "
                     f"({has_mktcap.sum()} stocks had data)"
@@ -1003,10 +1016,10 @@ class StockScreener:
                         continue
                     vol_ratio = today_vol / avg_5d
                     vol_ratio_map[code] = vol_ratio
-                    if 2.0 <= vol_ratio <= 5.0:
+                    if 2.5 <= vol_ratio <= 4.0:
                         keep_idx.append(idx)
                     else:
-                        logger.debug(f"[EOD-RT] {code} vol_ratio={vol_ratio:.2f} out of [2,5], dropped")
+                        logger.debug(f"[EOD-RT] {code} vol_ratio={vol_ratio:.2f} out of [2.5,4], dropped")
                 except Exception as e:
                     logger.debug(f"[EOD-RT] vol_ratio calc error for {code}: {e}")
                     keep_idx.append(idx)  # on error, keep conservatively
@@ -1104,20 +1117,66 @@ class StockScreener:
                 strategies=["eod_buyback"],
             ))
 
-        # Step 6: Check recent limit-up (Rule 4)
-        logger.info(f"[EOD-RT] Checking recent limit-up for {len(candidates_pre)} candidates...")
+        # Step 5c: Prepare sector strength data for scoring bonus
+        _sector_top20_codes: Set[str] = set()
+        _sector_top50_codes: Set[str] = set()
+        try:
+            from src.services.sector_strength_service import SectorStrengthService
+            _eod_sector_svc = SectorStrengthService()
+            # Reuse cached sector data; no new network requests if cache is warm
+            _sector_top20_codes = _eod_sector_svc.get_strong_sector_codes(top_pct=0.20)
+            _sector_top50_codes = _eod_sector_svc.get_strong_sector_codes(top_pct=0.50)
+            logger.info(
+                "[EOD-RT] Sector strength loaded: top20%%=%d codes, top50%%=%d codes",
+                len(_sector_top20_codes), len(_sector_top50_codes),
+            )
+        except Exception as e:
+            logger.warning("[EOD-RT] Sector strength data unavailable, skipping bonus: %s", e)
+
+        # Step 5d: Filter consecutive up days (chasing risk guard)
+        from src.services.picker_strategies import EOD_BUYBACK_PARAMS as _eod_params
+        max_consec = _eod_params.max_consecutive_up_days
+        candidates_pre = self._filter_consecutive_up_days(candidates_pre, max_up_days=max_consec)
+        logger.info(f"[EOD-RT] After consecutive-up-days filter (max={max_consec}): {len(candidates_pre)} candidates")
+
+        # Step 6: Score candidates with today limit-up signal detection
+        logger.info(f"[EOD-RT] Scoring {len(candidates_pre)} candidates with today limit-up signal...")
         final: list = []
         for s in candidates_pre:
             try:
-                if self._has_recent_limit_up_check(s.code, days=20):
-                    s.score = (
-                        10.0
-                        + min(s.change_pct, 6.0) * 2
-                        + (5.0 if 100 <= s.market_cap <= 200 else 0.0)
-                    )
-                    final.append(s)
+                base_score = (
+                    10.0
+                    + min(s.change_pct, 6.0) * 2
+                    + (5.0 if 100 <= s.market_cap <= 200 else 0.0)
+                )
+                # -- Intra-band momentum strength (replaces limit-up signal) --
+                # Within the 3.5-5.5% band, higher change indicates stronger EOD buying pressure
+                today_change = s.change_pct
+                if today_change >= 5.0:
+                    base_score += 15.0  # Upper band: strong EOD momentum
+                    logger.debug("[EOD] %s strong band momentum (%.1f%%), +15 pts", s.code, today_change)
+                elif today_change >= 4.3:
+                    base_score += 8.0   # Mid band: moderate EOD momentum
+                    logger.debug("[EOD] %s moderate band momentum (%.1f%%), +8 pts", s.code, today_change)
+                # Below 4.3%: no bonus (weak end-of-day buying)
+
+                # -- Sector strength bonus --
+                # Strong sector stocks have higher next-day continuation probability
+                if _sector_top20_codes or _sector_top50_codes:
+                    if s.code in _sector_top20_codes:
+                        base_score += 10.0
+                        logger.debug("[EOD] %s sector top 20%%, +10 pts", s.code)
+                    elif s.code in _sector_top50_codes:
+                        base_score += 5.0
+                        logger.debug("[EOD] %s sector top 50%%, +5 pts", s.code)
+                    else:
+                        base_score -= 10.0
+                        logger.debug("[EOD] %s sector bottom 50%%, -10 pts", s.code)
+
+                s.score = base_score
+                final.append(s)
             except Exception as e:
-                logger.debug(f"[EOD-RT] limit-up check error for {s.code}: {e}")
+                logger.debug(f"[EOD-RT] scoring error for {s.code}: {e}")
 
         logger.info(f"[EOD-RT] Final eod_buyback candidates: {len(final)}")
 
@@ -1133,7 +1192,11 @@ class StockScreener:
         return deduped
 
     def _has_recent_limit_up_check(self, code: str, days: int = 20) -> bool:
-        """Check if stock had limit-up within recent N trading days. Used by eod_buyback screener."""
+        """Check if stock had limit-up within recent N trading days.
+
+        NOTE: Currently unused. Retained for potential future strategies.
+        The eod_buyback strategy now uses intra-band momentum scoring instead.
+        """
         try:
             if not self._data_manager:
                 return False

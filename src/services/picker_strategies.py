@@ -173,7 +173,7 @@ EOD_BUYBACK_PARAMS = StrategyParams(
     # Dynamic momentum: skip pre-filter (delegated to realtime phase)
     daily_change_min=None,
     daily_change_max=None,
-    max_consecutive_up_days=5,
+    max_consecutive_up_days=3,  # Risk surges after 3 consecutive up days
     require_volume_shrink=False,
     require_ma_bullish=False,
     max_retracement_pct=0.5,
@@ -184,9 +184,9 @@ EOD_BUYBACK_PARAMS = StrategyParams(
     volume_ratio_min=None,
     turnover_rate_min=None,
     turnover_rate_max=None,
-    # Structural: market cap range (slightly wider than realtime 50-300)
-    market_cap_min=48.0,
-    market_cap_max=320.0,
+    # Structural: market cap range (slightly wider than realtime 60-300)
+    market_cap_min=60.0,  # Raise liquidity bar (亿元)
+    market_cap_max=300.0,
 )
 
 
@@ -498,13 +498,17 @@ def score_eod_buyback(
 ) -> float:
     """Phase-1 structural scoring for EOD buyback (尾盘买入法).
 
+    NOTE: This scorer is only used by Phase-1 daily-data path (backtest).
+    The live realtime path (_screen_eod_buyback_realtime) uses its own
+    inline scoring logic and does NOT call this function.
+
     Only scores STRUCTURAL / STATIC conditions that do not change intraday.
     Dynamic indicators (change%, turnover%, volume ratio, VWAP) are evaluated
     exclusively in the Phase-2 realtime filter (_filter_by_realtime).
 
     Structural rules scored here:
         - Rule ①: Main-board only
-        - Rule ⑥: Market cap 50-300 yi
+        - Rule ⑥: Market cap 60-300 yi
         - Rule ④: Recent limit-up within 20 trading days (bonus)
 
     Args:
@@ -520,14 +524,12 @@ def score_eod_buyback(
 
     total_mv = float(row.get("总市值", 0) or 0)
 
-    # Rule ⑥: Market cap 50-300 yi (optimal center ~150 yi scores highest)
+    # Rule ⑥: Market cap 60-300 yi (optimal center ~150 yi scores highest)
     market_cap_yi = total_mv / 1e8
     if 100 <= market_cap_yi <= 200:
         cap = 30.0  # sweet spot
-    elif 50 <= market_cap_yi < 100 or 200 < market_cap_yi <= 300:
+    elif 60 <= market_cap_yi < 100 or 200 < market_cap_yi <= 300:
         cap = 20.0  # acceptable range
-    elif 40 <= market_cap_yi < 50 or 300 < market_cap_yi <= 350:
-        cap = 10.0  # borderline
     else:
         cap = 0.0
 
