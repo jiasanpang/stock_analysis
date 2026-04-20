@@ -2759,12 +2759,19 @@ class StockPickerService:
 
         full_prompt = f"{PICK_SYSTEM_PROMPT}\n\n---\n\n{prompt}"
         logger.info("[StockPicker] Calling LLM for final stock selection...")
-        return self._analyzer.generate_text(full_prompt, max_tokens=4096, temperature=0.7)
+        return self._analyzer.generate_text(full_prompt, max_tokens=16384, temperature=0.7)
 
     def _parse_result(self, llm_output: str, result: PickerResult):
         """Parse LLM JSON output into PickerResult."""
+        # Guard against empty LLM response (e.g. finish_reason="length" with reasoning models)
+        cleaned = (llm_output or "").strip()
+        if not cleaned:
+            logger.warning("[StockPicker] LLM returned empty content (possible token budget exhaustion)")
+            result.error = "LLM returned empty content \u2013 token budget may be exhausted"
+            result.success = False
+            return
+
         try:
-            cleaned = llm_output.strip()
             if cleaned.startswith("```"):
                 lines = cleaned.split("\n")
                 lines = [l for l in lines if not l.strip().startswith("```")]

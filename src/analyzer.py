@@ -774,6 +774,16 @@ class GeminiAnalyzer:
                             "total_tokens": response.usage.total_tokens or 0,
                         }
                     return (response.choices[0].message.content, model, usage)
+
+                # Diagnose empty content – check if reasoning_content was produced
+                msg = response.choices[0].message if (response and response.choices) else None
+                reasoning = getattr(msg, "reasoning_content", None) if msg else None
+                if reasoning:
+                    logger.warning(
+                        "[LiteLLM] %s returned empty content but has reasoning_content "
+                        "(len=%d). Token budget likely exhausted by reasoning.",
+                        model, len(reasoning),
+                    )
                 raise ValueError("LLM returned empty response")
 
             except Exception as e:
