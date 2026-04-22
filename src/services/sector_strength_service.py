@@ -17,8 +17,9 @@ class SectorStrengthService:
     """Evaluate industry sector strength and provide strong-sector stock codes.
 
     Data source priority for sector rankings (realtime):
-    1. Tushare (sw_daily) — stable for overseas users, no rate-limit issues
-    2. AkShare (EastMoney) — fallback with single retry
+    1. Tushare (rt_sw_k) — realtime SW industry data, highest priority
+    2. Tushare (sw_daily) — stable daily fallback for overseas users
+    3. AkShare (EastMoney) — final fallback with single retry
 
     AkShare is still used for:
     - Sector member stocks (stock_board_industry_cons_em)
@@ -136,8 +137,9 @@ class SectorStrengthService:
         """Fetch strong sectors in realtime mode.
 
         Data source priority:
-        1. Tushare sw_daily — reliable for overseas users
-        2. AkShare EastMoney — fallback with single retry
+        1. Tushare rt_sw_k — realtime SW industry data (highest priority)
+        2. Tushare sw_daily — daily fallback for overseas users
+        3. AkShare EastMoney — final fallback with single retry
         """
         pct_key = int(top_pct * 100)
         cache_key = f"sectors_realtime_{datetime.now().strftime('%Y%m%d')}_{pct_key}"
@@ -145,13 +147,19 @@ class SectorStrengthService:
         if cached is not None:
             return cached
 
-        # --- 1. Try Tushare first ---
+        # --- 1. Tushare rt_sw_k (realtime, highest priority) ---
+        result = self._fetch_sectors_tushare_realtime(top_pct)
+        if result:
+            self._set_cached(cache_key, result)
+            return result
+
+        # --- 2. Tushare sw_daily (daily, fallback) ---
         result = self._fetch_sectors_tushare(top_pct)
         if result:
             self._set_cached(cache_key, result)
             return result
 
-        # --- 2. Fallback to AkShare (single retry) ---
+        # --- 3. AkShare (final fallback) ---
         result = self._fetch_sectors_akshare(top_pct)
         if result:
             self._set_cached(cache_key, result)
@@ -161,6 +169,73 @@ class SectorStrengthService:
         return []
 
     # ------------------------------------------------------------------ realtime fetchers
+
+    def _fetch_sectors_tushare_realtime(self, top_pct: float) -> List[Dict]:
+        """Fetch SW-L1 sector rankings via Tushare rt_sw_k (realtime)."""
+        from src.config import get_config
+
+        config = get_config()
+        if not config.tushare_token:
+            logger.debug("[SectorStrength] Tushare token not configured, skipping rt_sw_k")
+            return []
+
+        try:
+            import tushare as ts
+            from concurrent.futures import ThreadPoolExecutor
+
+            api = ts.pro_api(token=config.tushare_token)
+
+            logger.info("[SectorStrength] Fetching sector rankings from Tushare rt_sw_k (realtime)...")
+
+            # Wall-clock timeout to avoid hanging on network issues (same pattern as rt_idx_k)
+            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ts_rt_sw_k")
+            future = pool.submit(api.rt_sw_k)
+            try:
+                df_sw = future.result(timeout=8)
+            except Exception:
+                df_sw = None
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+            if df_sw is None or df_sw.empty:
+                logger.warning("[SectorStrength] Tushare rt_sw_k returned empty")
+                return []
+
+            # Normalize column names to lowercase
+            df_sw.columns = [c.lower() for c in df_sw.columns]
+
+            # Filter to SW L1 industry indices only (801010~801880)
+            # rt_sw_k returns all SW indices including composite ones like 801001/801002/801003/801005
+            df_sw = df_sw[df_sw["ts_code"].str.match(r"^801\d{3}\.SI$")]
+            # Exclude composite indices
+            composite_codes = {"801001.SI", "801002.SI", "801003.SI", "801005.SI"}
+            df_sw = df_sw[~df_sw["ts_code"].isin(composite_codes)]
+
+            if df_sw.empty:
+                logger.warning("[SectorStrength] rt_sw_k no L1 sectors after filter")
+                return []
+
+            df_sw["pct_change"] = pd.to_numeric(df_sw["pct_change"], errors="coerce")
+            df_sorted = df_sw.sort_values("pct_change", ascending=False)
+            top_n = max(1, int(len(df_sorted) * top_pct))
+            top_sectors = df_sorted.head(top_n)
+
+            result = []
+            for _, row in top_sectors.iterrows():
+                result.append({
+                    "name": str(row["name"]),
+                    "change_pct": float(row["pct_change"]),
+                })
+
+            trade_time = str(df_sw["trade_time"].iloc[0]) if "trade_time" in df_sw.columns else "unknown"
+            logger.info(
+                "[SectorStrength] rt_sw_k: found %d strong sectors (top %.0f%% of %d, time=%s)",
+                len(result), top_pct * 100, len(df_sw), trade_time,
+            )
+            return result
+        except Exception as e:
+            logger.warning("[SectorStrength] Tushare rt_sw_k failed: %s", e)
+            return []
 
     def _fetch_sectors_tushare(self, top_pct: float) -> List[Dict]:
         """Fetch all SW-L1 sector rankings via Tushare sw_daily."""
@@ -193,11 +268,18 @@ class SectorStrengthService:
             if not open_dates:
                 return []
 
-            latest_trade_date = open_dates[0]
-            df_sw = api.sw_daily(trade_date=latest_trade_date, fields="ts_code,name,pct_change")
-
-            if df_sw is None or df_sw.empty:
-                logger.debug("[SectorStrength] Tushare sw_daily empty for %s, data may not be ready", latest_trade_date)
+            # Try recent trade dates (latest first, fallback to earlier if data not ready)
+            for attempt, trade_date in enumerate(open_dates[:5]):
+                df_sw = api.sw_daily(trade_date=trade_date, fields="ts_code,name,pct_change")
+                if df_sw is not None and not df_sw.empty:
+                    if attempt > 0:
+                        logger.info(
+                            "[SectorStrength] Tushare sw_daily: using %s (latest %s not ready)",
+                            trade_date, open_dates[0],
+                        )
+                    break
+            else:
+                logger.warning("[SectorStrength] Tushare sw_daily empty for all recent 5 trade dates")
                 return []
 
             df_sw.columns = [c.lower() for c in df_sw.columns]
@@ -218,7 +300,7 @@ class SectorStrengthService:
             ]
             logger.info(
                 "[SectorStrength] Tushare: found %d strong sectors (top %.0f%% of %d, date=%s)",
-                len(result), top_pct * 100, len(df_sw), latest_trade_date,
+                len(result), top_pct * 100, len(df_sw), trade_date,
             )
             return result
         except Exception as e:

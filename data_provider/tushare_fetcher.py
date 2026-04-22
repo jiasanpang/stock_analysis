@@ -1409,11 +1409,88 @@ class TushareFetcher(BaseFetcher):
 
     def get_sector_rankings(self, n: int = 5) -> Optional[Tuple[List[Dict], List[Dict]]]:
         """
-        获取板块涨跌榜 (Tushare Pro sw_daily, 5000+ 积分).
-        申万一级行业日线，按涨跌幅排序。优先于东财接口（易限流）。
+        获取板块涨跌榜 (Tushare Pro).
+        Priority: rt_sw_k (realtime) > sw_daily (daily fallback).
+        申万一级行业，按涨跌幅排序。优先于东财接口（易限流）。
         """
         if self._api is None:
             return None
+
+        # --- Strategy 1: rt_sw_k (realtime, highest priority) ---
+        rt_result = self._get_sector_rankings_via_rt_sw_k(n)
+        if rt_result is not None:
+            return rt_result
+
+        # --- Strategy 2: sw_daily (daily, fallback) ---
+        return self._get_sector_rankings_via_sw_daily(n)
+
+    def _get_sector_rankings_via_rt_sw_k(self, n: int) -> Optional[Tuple[List[Dict], List[Dict]]]:
+        """Fetch sector rankings via rt_sw_k (realtime SW industry K-line).
+
+        Returns (top_sectors, bottom_sectors) tuple, or None on failure.
+        """
+        try:
+            self._check_rate_limit()
+            logger.debug("[板块排行] Trying Tushare rt_sw_k (realtime)...")
+
+            # Wall-clock timeout to avoid hanging on network issues
+            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ts_rt_sw_k")
+            future = pool.submit(self._api.rt_sw_k)
+            try:
+                df_rt = future.result(timeout=8)
+            except Exception:
+                df_rt = None
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+            if df_rt is None or df_rt.empty:
+                logger.debug("[板块排行] rt_sw_k returned empty")
+                return None
+
+            # Normalize column names to lowercase
+            df_rt.columns = [c.lower() for c in df_rt.columns]
+
+            # Filter to L1 industry indices only (801010~801880)
+            df_rt = df_rt[df_rt["ts_code"].str.match(r"^801\d{3}\.SI$")]
+            composite_codes = {"801001.SI", "801002.SI", "801003.SI", "801005.SI"}
+            df_rt = df_rt[~df_rt["ts_code"].isin(composite_codes)]
+
+            if df_rt.empty:
+                logger.debug("[板块排行] rt_sw_k no L1 sectors after filter")
+                return None
+
+            df_rt["pct_change"] = pd.to_numeric(df_rt["pct_change"], errors="coerce")
+            df_rt = df_rt.dropna(subset=["pct_change"])
+
+            # Extract data_date from trade_time (e.g. "2026-04-22 14:30:00" -> "2026-04-22")
+            trade_time_str = str(df_rt["trade_time"].iloc[0]) if "trade_time" in df_rt.columns else ""
+            data_date = trade_time_str[:10] if len(trade_time_str) >= 10 else (
+                datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+            )
+
+            name_col = "name" if "name" in df_rt.columns else df_rt.columns[1]
+            top_df = df_rt.nlargest(n, "pct_change")
+            bottom_df = df_rt.nsmallest(n, "pct_change")
+
+            top_sectors = [
+                {"name": str(row[name_col]), "change_pct": float(row["pct_change"]), "data_date": data_date}
+                for _, row in top_df.iterrows()
+            ]
+            bottom_sectors = [
+                {"name": str(row[name_col]), "change_pct": float(row["pct_change"]), "data_date": data_date}
+                for _, row in bottom_df.iterrows()
+            ]
+
+            logger.info(
+                "[板块排行] Tushare rt_sw_k realtime: 领涨/领跌各%d个板块, data_date=%s", n, data_date
+            )
+            return top_sectors, bottom_sectors
+        except Exception as e:
+            logger.debug("[板块排行] rt_sw_k failed, falling back to sw_daily: %s", e)
+            return None
+
+    def _get_sector_rankings_via_sw_daily(self, n: int) -> Optional[Tuple[List[Dict], List[Dict]]]:
+        """Fallback: fetch sector rankings via sw_daily (daily data)."""
         try:
             self._check_rate_limit()
             china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -1431,19 +1508,22 @@ class TushareFetcher(BaseFetcher):
             if not open_dates:
                 return None
             
-            # For market review, we really want TODAY's sector rankings.
-            # If today is a trading day but data is not yet available (e.g. during trading hours),
-            # sw_daily will return empty. We should NOT fall back to yesterday's data because
-            # that would confuse the user (reporting yesterday's rising sectors as today's).
-            # So we only check the latest trading day. If it's today and empty, we return None
-            # to let the manager fall back to realtime fetchers (efinance/akshare).
+            # Try recent trade dates (latest first, fallback to earlier if data not ready)
             latest_trade_date = open_dates[0]
-            
-            self._check_rate_limit()
-            df_sw = self._api.sw_daily(trade_date=latest_trade_date, fields="ts_code,name,pct_change")
-            
-            if df_sw is None or df_sw.empty:
-                logger.debug(f"[板块排行] Tushare sw_daily 返回空 {latest_trade_date}，可能尚未更新")
+            df_sw = None
+            for attempt, try_date in enumerate(open_dates[:5]):
+                self._check_rate_limit()
+                df_sw = self._api.sw_daily(trade_date=try_date, fields="ts_code,name,pct_change")
+                if df_sw is not None and not df_sw.empty:
+                    latest_trade_date = try_date
+                    if attempt > 0:
+                        logger.info(
+                            "[板块排行] Tushare sw_daily: using %s (latest %s not ready)",
+                            try_date, open_dates[0],
+                        )
+                    break
+            else:
+                logger.warning("[板块排行] Tushare sw_daily empty for all recent 5 trade dates")
                 return None
 
             df_sw.columns = [c.lower() for c in df_sw.columns]
