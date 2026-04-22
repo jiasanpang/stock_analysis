@@ -982,14 +982,41 @@ class StockScreener:
         if df_filtered.empty:
             return []
 
-        # Rule 5: volume ratio 2-5x — only after market close (15:00+)
-        # During trading hours, intraday cumulative volume vs historical full-day volume
-        # creates a mismatch (off by tens of times), so skip.
+        # Rule 5: volume ratio — prefer realtime_list vol_ratio; fallback to
+        # 5-day avg computation (post-close only, since intraday cumulative volume
+        # vs historical full-day volume creates a mismatch).
         now_sh = datetime.now(ZoneInfo("Asia/Shanghai"))
         is_after_close = now_sh.hour >= 15
 
-        # Store computed volume ratios for later use in ScreenedStock
+        # Store volume ratios for later use in ScreenedStock
         vol_ratio_map: Dict[str, float] = {}
+
+        # Try realtime_list first for today's live vol_ratio
+        try:
+            tushare_fetcher = None
+            for fetcher in getattr(self._data_manager, '_fetchers', []):
+                if type(fetcher).__name__ == 'TushareFetcher':
+                    tushare_fetcher = fetcher
+                    break
+            if tushare_fetcher:
+                df_rt = tushare_fetcher._fetch_realtime_list()
+                if df_rt is not None and not df_rt.empty and 'vol_ratio' in df_rt.columns:
+                    rt = df_rt.copy()
+                    if 'ts_code' in rt.columns:
+                        rt['_code6'] = rt['ts_code'].str.split('.').str[0]
+                        rt = rt.drop_duplicates(subset='_code6', keep='first')
+                        rt_vr_lookup = dict(zip(rt['_code6'], pd.to_numeric(rt['vol_ratio'], errors='coerce')))
+                        for _, row in df_filtered.iterrows():
+                            code = str(row.get("code", ""))
+                            vr = rt_vr_lookup.get(code)
+                            if vr is not None and not pd.isna(vr) and vr > 0:
+                                vol_ratio_map[code] = float(vr)
+                        logger.info(
+                            "[EOD-RT] Realtime vol_ratio loaded for %d/%d candidates from realtime_list",
+                            len(vol_ratio_map), len(df_filtered),
+                        )
+        except Exception as e:
+            logger.debug("[EOD-RT] Failed to load realtime vol_ratio: %s", e)
 
         if is_after_close and "volume" in df_filtered.columns:
             logger.info("[EOD-RT] Post-close mode: computing volume ratio from 5-day avg")
@@ -997,6 +1024,14 @@ class StockScreener:
             keep_idx: list = []
             for idx, row in df_filtered.iterrows():
                 code = str(row.get("code", ""))
+                # Skip stocks already having realtime vol_ratio from realtime_list
+                if code in vol_ratio_map:
+                    vr_rt = vol_ratio_map[code]
+                    if 2.5 <= vr_rt <= 4.0:
+                        keep_idx.append(idx)
+                    else:
+                        logger.debug(f"[EOD-RT] {code} realtime vol_ratio={vr_rt:.2f} out of [2.5,4], dropped")
+                    continue
                 today_vol = float(rt_vol.get(idx, 0) or 0)
                 if today_vol <= 0:
                     keep_idx.append(idx)  # no data, keep conservatively
@@ -1031,9 +1066,16 @@ class StockScreener:
                 f"[EOD-RT] Volume ratio filter: {before_cnt} -> {len(df_filtered)} stocks"
             )
         else:
-            logger.info(
-                f"[EOD-RT] Volume ratio skipped ({'intraday' if not is_after_close else 'no volume data'})"
-            )
+            if vol_ratio_map:
+                logger.info(
+                    "[EOD-RT] Intraday mode: using %d realtime vol_ratio values from realtime_list",
+                    len(vol_ratio_map),
+                )
+            else:
+                logger.info(
+                    "[EOD-RT] Volume ratio skipped "
+                    f"({'intraday, no realtime_list data' if not is_after_close else 'no volume data'})"
+                )
 
         if df_filtered.empty:
             return []
@@ -1736,9 +1778,9 @@ class StockScreener:
             df_daily["最新价"] = df_daily["close"]
             df_daily["涨跌幅"] = df_daily.get("pct_chg", 0)
             df_daily["市盈率-动态"] = df_daily.get("pe", pd.NA)
-            # volume_ratio may be None for some Tushare tiers; default to 1.0 (neutral)
-            vr = pd.to_numeric(df_daily.get("volume_ratio", pd.NA), errors="coerce")
-            df_daily["量比"] = vr.fillna(1.0)
+            # volume_ratio from daily_basic is the PREVIOUS day's value (stale fallback).
+            vr_stale = pd.to_numeric(df_daily.get("volume_ratio", pd.NA), errors="coerce")
+            df_daily["量比"] = vr_stale.fillna(1.0)
             df_daily["换手率"] = df_daily.get("turnover_rate", pd.NA)
             df_daily["成交额"] = df_daily.get("amount", 0).astype(float) * 1000  # 千元→元
             df_daily["市净率"] = df_daily.get("pb", pd.NA)
@@ -1747,6 +1789,11 @@ class StockScreener:
             # Compute 60-day change (Tushare daily does not include it; AkShare spot does)
             df_daily = self._add_tushare_60d_change(df_daily, tushare_api, trade_date)
 
+            # Overlay realtime data from ts.realtime_list() AFTER all daily columns are set,
+            # so realtime values take precedence over stale daily_basic values.
+            if not is_historical:
+                df_daily = self._supplement_realtime_data(df_daily)
+
             elapsed = time.time() - t0
             logger.info(f"[Screener] Tushare returned {len(df_daily)} stocks in {elapsed:.1f}s")
             return df_daily
@@ -1754,6 +1801,158 @@ class StockScreener:
         except Exception as e:
             logger.warning(f"[Screener] Tushare failed: {e}")
             return None
+
+    def _supplement_realtime_data(self, df_daily: pd.DataFrame) -> pd.DataFrame:
+        """Overlay realtime fields from ts.realtime_list() onto the Tushare daily DataFrame.
+
+        Tushare daily + daily_basic only provide previous-day data.  realtime_list(src='dc')
+        returns today's live snapshot including vol_ratio, turnover_rate, pe, pb, total_mv,
+        price, pct_change, amount, and 60-day change.  This method merges those columns so
+        downstream filters and ScreenedStock objects carry current-day values.
+
+        Fields supplemented (when available from realtime_list):
+          - 量比          ← vol_ratio
+          - 换手率        ← turnover_rate  (overwritten AFTER this call in _try_tushare)
+          - 市盈率-动态   ← pe
+          - 市净率        ← pb
+          - 总市值        ← total_mv  (overwritten AFTER this call in _try_tushare)
+          - 最新价        ← price
+          - 涨跌幅        ← pct_change
+          - 成交额        ← amount  (overwritten AFTER this call in _try_tushare)
+          - 60日涨跌幅    ← 60day  (if present, used later)
+        """
+        try:
+            tushare_fetcher = None
+            for fetcher in getattr(self._data_manager, '_fetchers', []):
+                if type(fetcher).__name__ == 'TushareFetcher':
+                    tushare_fetcher = fetcher
+                    break
+
+            if tushare_fetcher is None:
+                logger.debug("[Screener] TushareFetcher not available, skipping realtime supplement")
+                return df_daily
+
+            df_rt = tushare_fetcher._fetch_realtime_list()
+            if df_rt is None or df_rt.empty:
+                logger.info("[Screener] realtime_list returned empty, using daily_basic values as fallback")
+                return df_daily
+
+            # Build a lookup by 6-digit code extracted from ts_code (e.g. '000001.SZ' -> '000001')
+            rt = df_rt.copy()
+            if 'ts_code' in rt.columns:
+                rt['_code6'] = rt['ts_code'].str.split('.').str[0]
+            else:
+                logger.debug("[Screener] realtime_list has no ts_code column, skipping supplement")
+                return df_daily
+
+            rt = rt.drop_duplicates(subset='_code6', keep='first').set_index('_code6')
+
+            # Map daily df codes to 6-digit for joining
+            if '代码' in df_daily.columns:
+                code_series = df_daily['代码'].astype(str).str[:6]
+            elif 'ts_code' in df_daily.columns:
+                code_series = df_daily['ts_code'].str.split('.').str[0]
+            else:
+                logger.debug("[Screener] Cannot determine code column for realtime join")
+                return df_daily
+
+            updated_count = 0
+
+            # -- 量比 (vol_ratio) --
+            if 'vol_ratio' in rt.columns:
+                rt_vr = code_series.map(rt['vol_ratio'])
+                rt_vr = pd.to_numeric(rt_vr, errors='coerce')
+                valid = rt_vr.notna() & (rt_vr > 0)
+                if valid.any():
+                    df_daily.loc[valid, '量比'] = rt_vr[valid]
+                    updated_count += valid.sum()
+                    logger.info(
+                        "[Screener] Realtime vol_ratio supplemented for %d/%d stocks",
+                        valid.sum(), len(df_daily),
+                    )
+
+            # -- 换手率 (turnover_rate) --
+            if 'turnover_rate' in rt.columns:
+                rt_tr = code_series.map(rt['turnover_rate'])
+                rt_tr = pd.to_numeric(rt_tr, errors='coerce')
+                valid = rt_tr.notna() & (rt_tr > 0)
+                if valid.any():
+                    df_daily['换手率'] = df_daily.get('换手率', pd.NA)
+                    df_daily.loc[valid, '换手率'] = rt_tr[valid]
+
+            # -- 市盈率 (pe) --
+            if 'pe' in rt.columns:
+                rt_pe = code_series.map(rt['pe'])
+                rt_pe = pd.to_numeric(rt_pe, errors='coerce')
+                valid = rt_pe.notna()
+                if valid.any():
+                    df_daily.loc[valid, '市盈率-动态'] = rt_pe[valid]
+
+            # -- 市净率 (pb) --
+            if 'pb' in rt.columns:
+                rt_pb = code_series.map(rt['pb'])
+                rt_pb = pd.to_numeric(rt_pb, errors='coerce')
+                valid = rt_pb.notna()
+                if valid.any():
+                    df_daily.loc[valid, '市净率'] = rt_pb[valid]
+
+            # -- 总市值 (total_mv): realtime_list returns in 元 --
+            if 'total_mv' in rt.columns:
+                rt_mv = code_series.map(rt['total_mv'])
+                rt_mv = pd.to_numeric(rt_mv, errors='coerce')
+                valid = rt_mv.notna() & (rt_mv > 0)
+                if valid.any():
+                    df_daily.loc[valid, '总市值'] = rt_mv[valid]
+
+            # -- 最新价 (price) --
+            if 'price' in rt.columns:
+                rt_price = code_series.map(rt['price'])
+                rt_price = pd.to_numeric(rt_price, errors='coerce')
+                valid = rt_price.notna() & (rt_price > 0)
+                if valid.any():
+                    df_daily.loc[valid, '最新价'] = rt_price[valid]
+
+            # -- 涨跌幅 (pct_change) --
+            if 'pct_change' in rt.columns:
+                rt_chg = code_series.map(rt['pct_change'])
+                rt_chg = pd.to_numeric(rt_chg, errors='coerce')
+                valid = rt_chg.notna()
+                if valid.any():
+                    df_daily.loc[valid, '涨跌幅'] = rt_chg[valid]
+
+            # -- 成交额 (amount): realtime_list amount unit may differ --
+            if 'amount' in rt.columns:
+                rt_amt = code_series.map(rt['amount'])
+                rt_amt = pd.to_numeric(rt_amt, errors='coerce')
+                valid = rt_amt.notna() & (rt_amt > 0)
+                if valid.any():
+                    df_daily.loc[valid, '成交额'] = rt_amt[valid]
+
+            # -- 60日涨跌幅: realtime_list may include '60day' field --
+            col_60d = None
+            for candidate_col in ('60day', '60_day'):
+                if candidate_col in rt.columns:
+                    col_60d = candidate_col
+                    break
+            if col_60d:
+                rt_60d = code_series.map(rt[col_60d])
+                rt_60d = pd.to_numeric(rt_60d, errors='coerce')
+                valid = rt_60d.notna()
+                if valid.any():
+                    df_daily.loc[valid, '60日涨跌幅'] = rt_60d[valid]
+                    logger.info(
+                        "[Screener] Realtime 60d change supplemented for %d stocks", valid.sum()
+                    )
+
+            logger.info(f"[Picker] Supplemented {updated_count} stocks with realtime data from realtime_list")
+            logger.info(
+                "[Screener] Realtime data supplement complete (realtime_list had %d rows)", len(rt)
+            )
+            return df_daily
+
+        except Exception as e:
+            logger.warning("[Screener] Failed to supplement realtime data: %s", e)
+            return df_daily
 
     def _add_tushare_60d_change(
         self, df_daily: pd.DataFrame, tushare_api, trade_date: str
@@ -2402,6 +2601,26 @@ class StockPickerService:
                 if reasons:
                     excluded_reasons[code] = reasons
                 else:
+                    # Update ScreenedStock fields with realtime values so the
+                    # candidate pool displays current-day data, not stale daily values.
+                    if realtime_quote:
+                        if change_pct is not None:
+                            stock.change_pct = change_pct
+                        if vol_ratio is not None and vol_ratio > 0:
+                            stock.volume_ratio = vol_ratio
+                        if turnover is not None and turnover > 0:
+                            stock.turnover_rate = turnover
+                        if market_cap is not None and market_cap > 0:
+                            stock.market_cap = market_cap
+                        rt_price = _safe_float(getattr(realtime_quote, 'price', None))
+                        if rt_price is not None and rt_price > 0:
+                            stock.price = rt_price
+                        rt_pe = _safe_float(getattr(realtime_quote, 'pe_ratio', None))
+                        if rt_pe is not None:
+                            stock.pe = rt_pe
+                        rt_pb = _safe_float(getattr(realtime_quote, 'pb_ratio', None))
+                        if rt_pb is not None:
+                            stock.pb = rt_pb
                     filtered.append(stock)
 
             except Exception as e:

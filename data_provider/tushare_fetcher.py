@@ -776,7 +776,20 @@ class TushareFetcher(BaseFetcher):
                     if _change_amt is None and _price is not None and _pre is not None and _pre != 0:
                         _change_amt = round(_price - _pre, 4)
 
-                    logger.debug(f"[RealTime] {stock_code} via realtime_list (cached full-market)")
+                    # realtime_list(src='dc') returns rich fields including
+                    # vol_ratio, turnover_rate, pe, pb, total_mv, float_mv, etc.
+                    _vol_ratio = safe_float(row.get('vol_ratio'))
+                    _turnover = safe_float(row.get('turnover_rate'))
+                    _pe = safe_float(row.get('pe'))
+                    _pb = safe_float(row.get('pb'))
+                    # total_mv from realtime_list is in 元; keep as-is for UnifiedRealtimeQuote
+                    _total_mv = safe_float(row.get('total_mv'))
+                    _circ_mv = safe_float(row.get('float_mv'))
+
+                    logger.debug(
+                        f"[RealTime] {stock_code} via realtime_list (cached full-market), "
+                        f"vol_ratio={_vol_ratio}"
+                    )
                     return UnifiedRealtimeQuote(
                         code=stock_code,
                         name=str(row.get('name', '')),
@@ -786,14 +799,16 @@ class TushareFetcher(BaseFetcher):
                         change_amount=_change_amt,
                         volume=safe_int(row.get('volume')),
                         amount=safe_float(row.get('amount')),
+                        volume_ratio=_vol_ratio,
+                        turnover_rate=_turnover,
                         high=safe_float(row.get('high')),
                         low=safe_float(row.get('low')),
                         open_price=safe_float(row.get('open')),
                         pre_close=_pre,
-                        turnover_rate=None,
-                        pe_ratio=None,
-                        pb_ratio=None,
-                        total_mv=None,
+                        pe_ratio=_pe,
+                        pb_ratio=_pb,
+                        total_mv=_total_mv,
+                        circ_mv=_circ_mv,
                     )
             except Exception as e:
                 logger.debug(f"[RealTime] realtime_list lookup failed for {stock_code}: {e}")
