@@ -61,6 +61,27 @@ _realtime_list_disabled_until = 0.0
 _REALTIME_LIST_MAX_FAILURES = 3
 _REALTIME_LIST_COOLDOWN = 60.0  # seconds
 
+# ---------------------------------------------------------------------------
+# Module-level cache for rt_k full-market snapshot (30s TTL, same pattern).
+# ---------------------------------------------------------------------------
+_rt_k_cache: Dict[str, UnifiedRealtimeQuote] = {}
+_rt_k_cache_time: float = 0.0
+_rt_k_cache_ttl: float = 30.0  # seconds
+_rt_k_lock = threading.Lock()
+
+# Circuit breaker for rt_k
+_rt_k_fail_count = 0
+_rt_k_disabled_until = 0.0
+_RT_K_MAX_FAILURES = 3
+_RT_K_COOLDOWN = 60.0  # seconds
+
+# ---------------------------------------------------------------------------
+# Module-level cache for daily_basic (refreshed once per trade date).
+# ---------------------------------------------------------------------------
+_daily_basic_cache: Optional[pd.DataFrame] = None
+_daily_basic_cache_date: str = ""  # YYYYMMDD of cached data
+_daily_basic_lock = threading.Lock()
+
 
 # ETF code prefixes by exchange
 # Shanghai: 51xxxx, 52xxxx, 56xxxx, 58xxxx
@@ -733,17 +754,260 @@ class TushareFetcher(BaseFetcher):
                 _realtime_list_fail_count,
             )
 
+    # ------------------------------------------------------------------
+    # rt_k full-market snapshot (cached, with wall-clock timeout)
+    # ------------------------------------------------------------------
+    def _fetch_realtime_rt_k(self, timeout: float = 8.0) -> Dict[str, UnifiedRealtimeQuote]:
+        """Fetch full-market realtime snapshot via pro_api.rt_k().
+
+        Features:
+        - Module-level cache (TTL 30s) to avoid hammering the endpoint.
+        - Double-check locking: only ONE thread fetches when cache expires.
+        - Circuit breaker: after 3 consecutive failures, skip for 60s.
+        - Wall-clock timeout (default 8s) via ThreadPoolExecutor.
+        - Returns dict keyed by ts_code (e.g. '600000.SH').
+
+        rt_k fields: ts_code, name, open, close, high, low, pre_close, vol, amount, ...
+        Note: rt_k vol is in shares (股), converted to lots (手) by /100.
+        """
+        global _rt_k_cache, _rt_k_cache_time, _rt_k_fail_count, _rt_k_disabled_until
+
+        if self._api is None:
+            return {}
+
+        current_time = time.time()
+
+        # --- circuit breaker ---
+        if current_time < _rt_k_disabled_until:
+            logger.debug(
+                "[rt_k] circuit breaker active, %.0fs remaining",
+                _rt_k_disabled_until - current_time,
+            )
+            return {}
+
+        # --- fast path: cache hit ---
+        if _rt_k_cache and current_time - _rt_k_cache_time < _rt_k_cache_ttl:
+            logger.debug("[rt_k] cache hit, age %.0fs", current_time - _rt_k_cache_time)
+            return _rt_k_cache
+
+        # --- slow path: lock, double-check, fetch ---
+        with _rt_k_lock:
+            current_time = time.time()
+            if _rt_k_cache and current_time - _rt_k_cache_time < _rt_k_cache_ttl:
+                logger.debug("[rt_k] cache hit after lock")
+                return _rt_k_cache
+
+            if current_time < _rt_k_disabled_until:
+                return {}
+
+            from .realtime_types import RealtimeSource
+
+            # Batch requests: SH + SZ (covers main boards + ChiNext + STAR)
+            batch_patterns = [
+                '6*.SH',              # Shanghai main board + STAR (688xxx)
+                '0*.SZ,3*.SZ',        # Shenzhen main board + ChiNext
+            ]
+
+            all_quotes: Dict[str, UnifiedRealtimeQuote] = {}
+
+            for pattern in batch_patterns:
+                def _call(p=pattern):
+                    return self._api.rt_k(ts_code=p)
+
+                pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ts_rt_k")
+                future = pool.submit(_call)
+                try:
+                    df = future.result(timeout=timeout)
+                except FuturesTimeoutError:
+                    logger.warning("[rt_k] wall-clock timeout (%.0fs) for pattern %s", timeout, pattern)
+                    self._record_rt_k_failure()
+                    continue
+                except Exception as e:
+                    logger.warning("[rt_k] fetch failed for pattern %s: %s", pattern, e)
+                    self._record_rt_k_failure()
+                    continue
+                finally:
+                    pool.shutdown(wait=False, cancel_futures=True)
+
+                if df is None or df.empty:
+                    logger.debug("[rt_k] empty response for pattern %s", pattern)
+                    continue
+
+                # Normalize column names
+                df.columns = [c.lower() for c in df.columns]
+
+                for _, row in df.iterrows():
+                    ts_code = str(row.get('ts_code', ''))
+                    if not ts_code:
+                        continue
+
+                    close = safe_float(row.get('close'))
+                    pre_close = safe_float(row.get('pre_close'))
+                    if close is None or close <= 0:
+                        continue
+
+                    # Compute change_pct from close / pre_close
+                    change_pct = None
+                    change_amount = None
+                    if pre_close and pre_close > 0:
+                        change_amount = round(close - pre_close, 4)
+                        change_pct = round((close - pre_close) / pre_close * 100, 2)
+
+                    # vol is in shares (股), convert to lots (手) by /100
+                    raw_vol = safe_float(row.get('vol'))
+                    volume_lots = int(raw_vol / 100) if raw_vol and raw_vol > 0 else None
+
+                    all_quotes[ts_code] = UnifiedRealtimeQuote(
+                        code=ts_code,
+                        name=str(row.get('name', '')),
+                        source=RealtimeSource.TUSHARE,
+                        price=close,
+                        change_pct=change_pct,
+                        change_amount=change_amount,
+                        volume=volume_lots,
+                        amount=safe_float(row.get('amount')),  # yuan
+                        open_price=safe_float(row.get('open')),
+                        high=safe_float(row.get('high')),
+                        low=safe_float(row.get('low')),
+                        pre_close=pre_close,
+                    )
+
+            if all_quotes:
+                # Enrich with daily_basic (PE/PB/MV/turnover)
+                self._enrich_rt_k_quotes(all_quotes)
+
+                _rt_k_cache = all_quotes
+                _rt_k_cache_time = time.time()
+                _rt_k_fail_count = 0
+                logger.info("[rt_k] fetched %d quotes, cache refreshed (TTL=%.0fs)", len(all_quotes), _rt_k_cache_ttl)
+            else:
+                self._record_rt_k_failure()
+                logger.warning("[rt_k] all batches returned empty")
+
+            return all_quotes
+
+    @staticmethod
+    def _record_rt_k_failure():
+        """Increment rt_k failure counter and activate circuit breaker if threshold reached."""
+        global _rt_k_fail_count, _rt_k_disabled_until
+        _rt_k_fail_count += 1
+        if _rt_k_fail_count >= _RT_K_MAX_FAILURES:
+            _rt_k_disabled_until = time.time() + _RT_K_COOLDOWN
+            logger.warning(
+                "[rt_k] circuit breaker activated: disabled for %.0fs after %d consecutive failures",
+                _RT_K_COOLDOWN, _rt_k_fail_count,
+            )
+
+    # ------------------------------------------------------------------
+    # daily_basic cache (PE/PB/MV/turnover, refreshed once per trade date)
+    # ------------------------------------------------------------------
+    def _get_cached_daily_basic(self) -> Optional[pd.DataFrame]:
+        """Get daily_basic data for the latest trade date, cached for the entire day.
+
+        Returns DataFrame with columns: ts_code, turnover_rate, pe_ttm, pb,
+        total_share, float_share, total_mv, circ_mv.
+        """
+        global _daily_basic_cache, _daily_basic_cache_date
+
+        if self._api is None:
+            return None
+
+        china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        today_str = china_now.strftime("%Y%m%d")
+
+        # Fast path: cache still valid for today
+        if _daily_basic_cache is not None and _daily_basic_cache_date == today_str:
+            return _daily_basic_cache
+
+        with _daily_basic_lock:
+            # Double-check
+            if _daily_basic_cache is not None and _daily_basic_cache_date == today_str:
+                return _daily_basic_cache
+
+            try:
+                # Determine latest trade date
+                start_date = (china_now - pd.Timedelta(days=10)).strftime("%Y%m%d")
+                self._check_rate_limit()
+                df_cal = self._api.trade_cal(exchange="SSE", start_date=start_date, end_date=today_str)
+                if df_cal is None or df_cal.empty:
+                    return None
+                df_cal.columns = [c.lower() for c in df_cal.columns]
+                open_dates = sorted(df_cal[df_cal["is_open"] == 1]["cal_date"].tolist(), reverse=True)
+                if not open_dates:
+                    return None
+
+                # Try latest trade dates (data may not be ready yet for today)
+                for try_date in open_dates[:3]:
+                    self._check_rate_limit()
+                    df = self._api.daily_basic(
+                        trade_date=try_date,
+                        fields='ts_code,turnover_rate,pe_ttm,pb,total_share,float_share,total_mv,circ_mv',
+                    )
+                    if df is not None and not df.empty:
+                        df.columns = [c.lower() for c in df.columns]
+                        _daily_basic_cache = df
+                        _daily_basic_cache_date = today_str
+                        logger.info("[daily_basic] cached %d rows for trade_date=%s", len(df), try_date)
+                        return df
+
+                logger.warning("[daily_basic] no data for recent trade dates")
+                return None
+
+            except Exception as e:
+                logger.warning("[daily_basic] fetch failed: %s", e)
+                return None
+
+    def _enrich_rt_k_quotes(self, quotes: Dict[str, UnifiedRealtimeQuote]):
+        """Enrich rt_k quotes with daily_basic data (PE/PB/MV/turnover).
+
+        Modifies quotes in-place. Skips silently on failure.
+        Market cap is recomputed using realtime price * shares for accuracy.
+        """
+        try:
+            df_basic = self._get_cached_daily_basic()
+            if df_basic is None or df_basic.empty:
+                return
+
+            for _, row in df_basic.iterrows():
+                code = str(row.get("ts_code", ""))
+                if code not in quotes:
+                    continue
+                q = quotes[code]
+
+                # Turnover rate from daily_basic (close enough for intraday)
+                if q.turnover_rate is None or q.turnover_rate == 0:
+                    q.turnover_rate = safe_float(row.get("turnover_rate"))
+
+                # PE/PB from daily_basic
+                if q.pe_ratio is None or q.pe_ratio == 0:
+                    q.pe_ratio = safe_float(row.get("pe_ttm"))
+                if q.pb_ratio is None or q.pb_ratio == 0:
+                    q.pb_ratio = safe_float(row.get("pb"))
+
+                # Market cap: use realtime price * shares for accuracy
+                total_share = safe_float(row.get("total_share"))  # 万股
+                float_share = safe_float(row.get("float_share"))  # 万股
+                if q.price and q.price > 0:
+                    if total_share and total_share > 0:
+                        q.total_mv = q.price * total_share * 10000  # 元
+                    if float_share and float_share > 0:
+                        q.circ_mv = q.price * float_share * 10000  # 元
+
+        except Exception as e:
+            logger.warning("[rt_k] failed to enrich with daily_basic: %s", e)
+
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
         Get realtime quote for a single stock.
 
         Strategy (priority order):
-        1. ts.realtime_list(src='dc') – 0-credit crawler, full-market snapshot
+        1. rt_k (Tushare native, stable overseas) – full-market snapshot with 30s cache.
+        2. ts.realtime_list(src='dc') – 0-credit crawler, full-market snapshot
            with 30s cache.  Rich fields: price, pct_change, volume, amount,
            open, high, low, pre_close, etc.
-        2. ts.realtime_quote() – 0-credit crawler, per-stock (legacy)
-        3. ts.get_realtime_quotes() – old Sina-based API (legacy)
-        4. Pro quotation API (requires credits)
+        3. ts.realtime_quote() – 0-credit crawler, per-stock (legacy)
+        4. ts.get_realtime_quotes() – old Sina-based API (legacy)
+        5. Pro quotation API (requires credits)
 
         Args:
             stock_code: Stock code (6-digit or with exchange suffix)
@@ -758,7 +1022,36 @@ class TushareFetcher(BaseFetcher):
 
         code_6 = stock_code.split('.')[0] if '.' in stock_code else stock_code
 
-        # === Strategy 1: realtime_list (full-market, cached) ===
+        # === Strategy 1: rt_k (Tushare native, stable overseas, cached) ===
+        rt_k_quotes = self._fetch_realtime_rt_k()
+        if rt_k_quotes:
+            ts_code_full = self._convert_stock_code(stock_code)
+            quote = rt_k_quotes.get(ts_code_full)
+            if quote:
+                # Return a copy with the original stock_code as code
+                logger.debug("[RealTime] %s via rt_k (cached full-market)", stock_code)
+                return UnifiedRealtimeQuote(
+                    code=stock_code,
+                    name=quote.name,
+                    source=quote.source,
+                    price=quote.price,
+                    change_pct=quote.change_pct,
+                    change_amount=quote.change_amount,
+                    volume=quote.volume,
+                    amount=quote.amount,
+                    volume_ratio=quote.volume_ratio,
+                    turnover_rate=quote.turnover_rate,
+                    open_price=quote.open_price,
+                    high=quote.high,
+                    low=quote.low,
+                    pre_close=quote.pre_close,
+                    pe_ratio=quote.pe_ratio,
+                    pb_ratio=quote.pb_ratio,
+                    total_mv=quote.total_mv,
+                    circ_mv=quote.circ_mv,
+                )
+
+        # === Strategy 2: realtime_list (full-market, cached) ===
         df_all = self._fetch_realtime_list()
         if df_all is not None and not df_all.empty:
             try:
@@ -813,7 +1106,7 @@ class TushareFetcher(BaseFetcher):
             except Exception as e:
                 logger.debug(f"[RealTime] realtime_list lookup failed for {stock_code}: {e}")
 
-        # === Strategy 2: ts.realtime_quote() – 0-credit crawler (per stock) ===
+        # === Strategy 3: ts.realtime_quote() – 0-credit crawler (per stock) ===
         try:
             import tushare as ts
             df = ts.realtime_quote(code_6)
@@ -848,7 +1141,7 @@ class TushareFetcher(BaseFetcher):
         except Exception as e:
             logger.debug(f"[RealTime] realtime_quote failed: {e}")
 
-        # === Strategy 3: legacy ts.get_realtime_quotes (Sina-based) ===
+        # === Strategy 4: legacy ts.get_realtime_quotes (Sina-based) ===
         try:
             import tushare as ts
             if code_6 == '000001':
@@ -894,7 +1187,7 @@ class TushareFetcher(BaseFetcher):
         except Exception as e:
             logger.debug(f"[RealTime] get_realtime_quotes failed: {e}")
 
-        # === Strategy 4: Pro quotation API (requires credits) ===
+        # === Strategy 5: Pro quotation API (requires credits) ===
         try:
             self._check_rate_limit()
             ts_code = self._convert_stock_code(stock_code)

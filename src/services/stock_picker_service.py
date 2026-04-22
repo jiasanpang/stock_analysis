@@ -710,6 +710,55 @@ class StockScreener:
         return None
 
     @staticmethod
+    def _calc_volume_ratio(current_vol: float, avg_5d_vol: float) -> float:
+        """Calculate volume ratio considering trading session elapsed time.
+
+        During trading hours the ratio is normalised to per-minute rates so that
+        a half-day volume is not compared directly against a full-day average.
+
+        After market close (>=15:00 Shanghai time) the full-day volumes are
+        compared directly.
+
+        Args:
+            current_vol: Today's cumulative volume (same unit as *avg_5d_vol*).
+            avg_5d_vol: Average daily volume over the past 5 trading days.
+
+        Returns:
+            Volume ratio rounded to 2 decimals, or 0.0 when inputs are invalid.
+        """
+        if not avg_5d_vol or avg_5d_vol <= 0 or not current_vol or current_vol <= 0:
+            return 0.0
+
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        total_minutes = 240  # 9:30-11:30 (120 min) + 13:00-15:00 (120 min)
+
+        # After market close: simple full-day ratio
+        if now.hour >= 15:
+            return round(current_vol / avg_5d_vol, 2)
+
+        # Before market open
+        if now.hour < 9 or (now.hour == 9 and now.minute < 30):
+            return 0.0
+
+        # Intraday: compute elapsed trading minutes (exclude lunch break)
+        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        morning_close = now.replace(hour=11, minute=30, second=0, microsecond=0)
+        afternoon_open = now.replace(hour=13, minute=0, second=0, microsecond=0)
+
+        if now <= morning_close:
+            elapsed = (now - market_open).total_seconds() / 60
+        elif now < afternoon_open:
+            elapsed = 120  # full morning session
+        else:
+            elapsed = 120 + (now - afternoon_open).total_seconds() / 60
+
+        elapsed = max(1, min(elapsed, total_minutes))
+        avg_per_min = avg_5d_vol / total_minutes
+        current_per_min = current_vol / elapsed
+
+        return round(current_per_min / avg_per_min, 2) if avg_per_min > 0 else 0.0
+
+    @staticmethod
     def _trade_date_to_iso(trade_date: str) -> str:
         """Convert YYYYMMDD to YYYY-MM-DD."""
         if not trade_date or len(trade_date) != 8:
@@ -1051,6 +1100,7 @@ class StockScreener:
                     if avg_5d <= 0 or pd.isna(avg_5d):
                         keep_idx.append(idx)
                         continue
+                    # Post-close: full-day ratio (no minute adjustment)
                     vol_ratio = today_vol / avg_5d
                     vol_ratio_map[code] = vol_ratio
                     if 2.5 <= vol_ratio <= 4.0:
@@ -1065,16 +1115,43 @@ class StockScreener:
             logger.info(
                 f"[EOD-RT] Volume ratio filter: {before_cnt} -> {len(df_filtered)} stocks"
             )
-        else:
-            if vol_ratio_map:
+        elif not is_after_close and "volume" in df_filtered.columns:
+            # Intraday: compute vol_ratio for candidates missing realtime_list data
+            # using _calc_volume_ratio (adjusts for elapsed trading minutes).
+            if not vol_ratio_map:
+                logger.info("[EOD-RT] Intraday: realtime_list vol_ratio unavailable, computing from 5-day avg")
+                rt_vol = pd.to_numeric(df_filtered["volume"], errors="coerce")
+                for idx, row in df_filtered.iterrows():
+                    code = str(row.get("code", ""))
+                    if code in vol_ratio_map:
+                        continue
+                    today_vol = float(rt_vol.get(idx, 0) or 0)
+                    if today_vol <= 0:
+                        continue
+                    try:
+                        df_hist, _src = self._data_manager.get_daily_data(code, days=6)
+                        if df_hist is None or len(df_hist) < 2:
+                            continue
+                        hvc = self._first_col(df_hist, "vol", "volume", "成交量")
+                        if hvc is None:
+                            continue
+                        hist_vol = pd.to_numeric(df_hist[hvc], errors="coerce").iloc[:-1]
+                        avg_5d = hist_vol.mean()
+                        if pd.isna(avg_5d) or avg_5d <= 0:
+                            continue
+                        vr = self._calc_volume_ratio(float(today_vol), float(avg_5d))
+                        if vr > 0:
+                            vol_ratio_map[code] = vr
+                    except Exception:
+                        continue
                 logger.info(
-                    "[EOD-RT] Intraday mode: using %d realtime vol_ratio values from realtime_list",
-                    len(vol_ratio_map),
+                    "[EOD-RT] Intraday vol_ratio computed for %d/%d candidates",
+                    len(vol_ratio_map), len(df_filtered),
                 )
             else:
                 logger.info(
-                    "[EOD-RT] Volume ratio skipped "
-                    f"({'intraday, no realtime_list data' if not is_after_close else 'no volume data'})"
+                    "[EOD-RT] Intraday mode: using %d realtime vol_ratio values from realtime_list",
+                    len(vol_ratio_map),
                 )
 
         if df_filtered.empty:
@@ -1948,11 +2025,81 @@ class StockScreener:
             logger.info(
                 "[Screener] Realtime data supplement complete (realtime_list had %d rows)", len(rt)
             )
-            return df_daily
 
         except Exception as e:
-            logger.warning("[Screener] Failed to supplement realtime data: %s", e)
-            return df_daily
+            logger.warning("[Screener] Failed to supplement realtime data from realtime_list: %s", e)
+
+        # --- Fallback: compute volume ratio for stocks still missing it ---
+        # When rt_k is the primary source, vol_ratio comes back as None/0;
+        # realtime_list may also be unavailable (e.g. overseas).  Compute from
+        # today's cumulative volume and 5-day historical average.
+        try:
+            self._fill_missing_volume_ratio(df_daily)
+        except Exception as e:
+            logger.warning("[Screener] Failed to fill missing volume ratio: %s", e)
+
+        return df_daily
+
+    def _fill_missing_volume_ratio(self, df_daily: pd.DataFrame) -> None:
+        """Compute volume ratio for stocks where '量比' is missing or stale (== 1.0).
+
+        Uses today's volume from the daily DataFrame and 5-day historical average
+        from get_daily_data().  Modifies *df_daily* in-place.
+        """
+        if '量比' not in df_daily.columns or not self._data_manager:
+            return
+
+        vr_col = pd.to_numeric(df_daily['量比'], errors='coerce')
+        # Identify rows needing computation: NaN, 0, or the stale default 1.0
+        needs_calc = vr_col.isna() | (vr_col <= 0) | (vr_col == 1.0)
+        if not needs_calc.any():
+            return
+
+        # Determine code column
+        if '代码' in df_daily.columns:
+            code_series = df_daily['代码'].astype(str).str[:6]
+        elif 'ts_code' in df_daily.columns:
+            code_series = df_daily['ts_code'].str.split('.').str[0]
+        else:
+            return
+
+        # Determine today's volume column (Tushare daily 'vol' is in 手)
+        vol_col = self._first_col(df_daily, 'vol', 'volume', '成交量')
+        if vol_col is None:
+            return
+
+        filled = 0
+        for idx in df_daily.index[needs_calc]:
+            code = str(code_series.get(idx, ''))
+            if not code:
+                continue
+            today_vol = pd.to_numeric(df_daily.at[idx, vol_col], errors='coerce')
+            if pd.isna(today_vol) or today_vol <= 0:
+                continue
+            try:
+                df_hist, _src = self._data_manager.get_daily_data(code, days=6)
+                if df_hist is None or len(df_hist) < 2:
+                    continue
+                hist_vol_col = self._first_col(df_hist, 'vol', 'volume', '成交量')
+                if hist_vol_col is None:
+                    continue
+                # Exclude the most recent row (today) to get previous 5 days
+                hist_vol = pd.to_numeric(df_hist[hist_vol_col], errors='coerce').iloc[:-1]
+                avg_5d = hist_vol.mean()
+                if pd.isna(avg_5d) or avg_5d <= 0:
+                    continue
+                vr = self._calc_volume_ratio(float(today_vol), float(avg_5d))
+                if vr > 0:
+                    df_daily.at[idx, '量比'] = vr
+                    filled += 1
+            except Exception:
+                continue
+
+        if filled > 0:
+            logger.info(
+                "[Screener] Computed volume ratio for %d/%d stocks (5-day avg fallback)",
+                filled, int(needs_calc.sum()),
+            )
 
     def _add_tushare_60d_change(
         self, df_daily: pd.DataFrame, tushare_api, trade_date: str
@@ -2399,17 +2546,20 @@ class StockPickerService:
         
         is_kccy = is_kc_cy_stock
 
-        # Pre-warm realtime_list cache so parallel individual queries all hit cache
-        # instead of 22 threads simultaneously triggering network requests.
+        # Pre-warm realtime caches (rt_k first, then realtime_list) so parallel
+        # individual queries all hit cache instead of 22 threads simultaneously
+        # triggering network requests.
         try:
             from data_provider.tushare_fetcher import TushareFetcher
             if self._data_manager:
                 for fetcher in getattr(self._data_manager, '_fetchers', []):
                     if isinstance(fetcher, TushareFetcher) and fetcher.is_available():
+                        # Warm rt_k (primary) and realtime_list (fallback) caches
+                        fetcher._fetch_realtime_rt_k()
                         fetcher._fetch_realtime_list()
                         logger.info(
-                            "[Screener] realtime_list cache warmed up before parallel fetch "
-                            "(%d candidates)", len(candidates),
+                            "[Screener] realtime caches (rt_k + realtime_list) warmed up "
+                            "before parallel fetch (%d candidates)", len(candidates),
                         )
                         break
         except Exception:
@@ -2497,10 +2647,29 @@ class StockPickerService:
                 if realtime_quote and realtime_quote.volume_ratio is not None and realtime_quote.volume_ratio > 0:
                     vol_ratio = _safe_float(realtime_quote.volume_ratio)
                 elif realtime_quote and (realtime_quote.volume_ratio is None or realtime_quote.volume_ratio == 0):
-                    logger.debug(
-                        f"[Picker] {code}: realtime volume_ratio missing/zero, "
-                        f"using daily value {stock.volume_ratio}"
-                    )
+                    # rt_k does not provide volume_ratio; try computing from 5-day avg
+                    rt_vol = _safe_float(getattr(realtime_quote, 'volume', None))
+                    if rt_vol and rt_vol > 0 and self._data_manager:
+                        try:
+                            df_hist, _src = self._data_manager.get_daily_data(code, days=6)
+                            if df_hist is not None and len(df_hist) >= 2:
+                                hvc = StockScreener._first_col(df_hist, 'vol', 'volume', '成交量')
+                                if hvc:
+                                    hist_vol = pd.to_numeric(
+                                        df_hist[hvc], errors='coerce'
+                                    ).iloc[:-1]
+                                    avg_5d = hist_vol.mean()
+                                    if not pd.isna(avg_5d) and avg_5d > 0:
+                                        vr = StockScreener._calc_volume_ratio(rt_vol, float(avg_5d))
+                                        if vr > 0:
+                                            vol_ratio = vr
+                        except Exception:
+                            pass  # keep stock.volume_ratio as fallback
+                    if vol_ratio is None or vol_ratio == 0:
+                        logger.debug(
+                            "[Picker] %s: realtime volume_ratio missing/zero, "
+                            "using daily value %s", code, stock.volume_ratio,
+                        )
 
                 # Log when critical fields are None for debugging
                 if change_pct is None or vol_ratio is None:
