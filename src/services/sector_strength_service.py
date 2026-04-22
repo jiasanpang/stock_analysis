@@ -6,6 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set, Tuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -15,10 +16,13 @@ logger = logging.getLogger("stock_analysis")
 class SectorStrengthService:
     """Evaluate industry sector strength and provide strong-sector stock codes.
 
-    Uses AkShare (EastMoney) as the primary data source for:
-    - Industry sector rankings (stock_board_industry_name_em)
+    Data source priority for sector rankings (realtime):
+    1. Tushare (sw_daily) — stable for overseas users, no rate-limit issues
+    2. AkShare (EastMoney) — fallback with single retry
+
+    AkShare is still used for:
     - Sector member stocks (stock_board_industry_cons_em)
-    - Historical sector performance (stock_board_industry_hist_em)
+    - Historical sector performance in backtest mode (stock_board_industry_hist_em)
 
     Backtest optimizations:
     - Sector history is preloaded once for the entire backtest range (_preload_sector_history)
@@ -129,65 +133,140 @@ class SectorStrengthService:
     # ------------------------------------------------------------------ realtime mode
 
     def _get_strong_sectors_realtime(self, top_pct: float) -> List[Dict]:
-        """Fetch strong sectors in realtime mode via AkShare."""
-        import akshare as ak
+        """Fetch strong sectors in realtime mode.
 
+        Data source priority:
+        1. Tushare sw_daily — reliable for overseas users
+        2. AkShare EastMoney — fallback with single retry
+        """
         pct_key = int(top_pct * 100)
         cache_key = f"sectors_realtime_{datetime.now().strftime('%Y%m%d')}_{pct_key}"
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
 
-        try:
-            logger.info("[SectorStrength] Fetching industry sector rankings from AkShare...")
-            # Fetch sector rankings with retry (East Money API can be flaky)
-            df = None
-            for attempt in range(3):
-                try:
-                    df = ak.stock_board_industry_name_em()
-                    if df is not None and not df.empty:
-                        break
-                except Exception as e:
-                    wait = (attempt + 1) * 5  # 5s, 10s, 15s
-                    logger.warning(
-                        "[SectorStrength] Sector ranking fetch attempt %d/3 failed: %s, retrying in %ds",
-                        attempt + 1, e, wait,
-                    )
-                    time.sleep(wait)
-
-            if df is None or df.empty:
-                logger.warning("[SectorStrength] All 3 attempts to fetch sector rankings failed")
-                return []
-
-            # Normalize column names
-            change_col = '涨跌幅'
-            name_col = '板块名称'
-            if change_col not in df.columns or name_col not in df.columns:
-                logger.warning("[SectorStrength] Unexpected columns: %s", list(df.columns))
-                return []
-
-            df[change_col] = pd.to_numeric(df[change_col], errors='coerce')
-            df = df.dropna(subset=[change_col])
-            df = df.sort_values(change_col, ascending=False)
-
-            n_top = max(1, int(len(df) * top_pct))
-            top_df = df.head(n_top)
-
-            result = [
-                {"name": row[name_col], "change_pct": float(row[change_col])}
-                for _, row in top_df.iterrows()
-            ]
-
-            logger.info(
-                "[SectorStrength] Found %d strong sectors (top %.0f%% of %d)",
-                len(result), top_pct * 100, len(df),
-            )
-
+        # --- 1. Try Tushare first ---
+        result = self._fetch_sectors_tushare(top_pct)
+        if result:
             self._set_cached(cache_key, result)
             return result
-        except Exception as e:
-            logger.warning("[SectorStrength] Failed to get sector rankings: %s", e)
+
+        # --- 2. Fallback to AkShare (single retry) ---
+        result = self._fetch_sectors_akshare(top_pct)
+        if result:
+            self._set_cached(cache_key, result)
+            return result
+
+        logger.warning("[SectorStrength] All data sources failed for sector rankings")
+        return []
+
+    # ------------------------------------------------------------------ realtime fetchers
+
+    def _fetch_sectors_tushare(self, top_pct: float) -> List[Dict]:
+        """Fetch all SW-L1 sector rankings via Tushare sw_daily."""
+        from src.config import get_config
+
+        config = get_config()
+        if not config.tushare_token:
+            logger.debug("[SectorStrength] Tushare token not configured, skipping")
             return []
+
+        try:
+            import tushare as ts
+
+            api = ts.pro_api(token=config.tushare_token)
+            china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            today_str = china_now.strftime("%Y%m%d")
+            start_date = (china_now - timedelta(days=10)).strftime("%Y%m%d")
+
+            logger.info("[SectorStrength] Fetching sector rankings from Tushare sw_daily...")
+
+            df_cal = api.trade_cal(exchange="SSE", start_date=start_date, end_date=today_str)
+            if df_cal is None or df_cal.empty:
+                logger.warning("[SectorStrength] Tushare trade_cal returned empty")
+                return []
+
+            df_cal.columns = [c.lower() for c in df_cal.columns]
+            open_dates = sorted(
+                df_cal[df_cal["is_open"] == 1]["cal_date"].tolist(), reverse=True
+            )
+            if not open_dates:
+                return []
+
+            latest_trade_date = open_dates[0]
+            df_sw = api.sw_daily(trade_date=latest_trade_date, fields="ts_code,name,pct_change")
+
+            if df_sw is None or df_sw.empty:
+                logger.debug("[SectorStrength] Tushare sw_daily empty for %s, data may not be ready", latest_trade_date)
+                return []
+
+            df_sw.columns = [c.lower() for c in df_sw.columns]
+            if "pct_change" not in df_sw.columns:
+                return []
+
+            df_sw["pct_change"] = pd.to_numeric(df_sw["pct_change"], errors="coerce")
+            df_sw = df_sw.dropna(subset=["pct_change"])
+            df_sw = df_sw.sort_values("pct_change", ascending=False)
+
+            name_col = "name" if "name" in df_sw.columns else df_sw.columns[1]
+            n_top = max(1, int(len(df_sw) * top_pct))
+            top_df = df_sw.head(n_top)
+
+            result = [
+                {"name": str(row[name_col]), "change_pct": float(row["pct_change"])}
+                for _, row in top_df.iterrows()
+            ]
+            logger.info(
+                "[SectorStrength] Tushare: found %d strong sectors (top %.0f%% of %d, date=%s)",
+                len(result), top_pct * 100, len(df_sw), latest_trade_date,
+            )
+            return result
+        except Exception as e:
+            logger.warning("[SectorStrength] Tushare sector ranking failed: %s", e)
+            return []
+
+    def _fetch_sectors_akshare(self, top_pct: float) -> List[Dict]:
+        """Fetch sector rankings via AkShare EastMoney (single retry only)."""
+        import akshare as ak
+
+        logger.info("[SectorStrength] Fetching sector rankings from AkShare (fallback)...")
+        df = None
+        for attempt in range(1):  # single attempt — overseas AkShare is unreliable
+            try:
+                df = ak.stock_board_industry_name_em()
+                if df is not None and not df.empty:
+                    break
+            except Exception as e:
+                logger.warning(
+                    "[SectorStrength] AkShare sector ranking failed: %s", e,
+                )
+
+        if df is None or df.empty:
+            logger.warning("[SectorStrength] AkShare sector ranking returned empty")
+            return []
+
+        change_col = '涨跌幅'
+        name_col = '板块名称'
+        if change_col not in df.columns or name_col not in df.columns:
+            logger.warning("[SectorStrength] AkShare unexpected columns: %s", list(df.columns))
+            return []
+
+        df[change_col] = pd.to_numeric(df[change_col], errors='coerce')
+        df = df.dropna(subset=[change_col])
+        df = df.sort_values(change_col, ascending=False)
+
+        n_top = max(1, int(len(df) * top_pct))
+        top_df = df.head(n_top)
+
+        result = [
+            {"name": row[name_col], "change_pct": float(row[change_col])}
+            for _, row in top_df.iterrows()
+        ]
+        logger.info(
+            "[SectorStrength] AkShare: found %d strong sectors (top %.0f%% of %d)",
+            len(result), top_pct * 100, len(df),
+        )
+        return result
 
     # ------------------------------------------------------------------ backtest mode
 
