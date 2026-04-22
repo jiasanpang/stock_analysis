@@ -16,7 +16,7 @@ on:
         options:
           - all              # 全部策略并行
           - buy_pullback     # 仅回踩策略
-          - eod_buyback      # 仅尾盘买入策略
+          - bottom_reversal   # 仅底部反转策略
       force_run:
         description: '强制运行（跳过交易日检查）'
         required: false
@@ -139,11 +139,11 @@ jobs:
             logs/
           retention-days: 30
 
-  # Job 2: eod_buyback strategy (尾盘买入)
-  picker-eod:
+  # Job 2: bottom_reversal strategy (底部反转)
+  picker-bottom-reversal:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    if: github.event_name == 'schedule' || github.event.inputs.strategy == 'all' || github.event.inputs.strategy == 'eod_buyback'
+    if: github.event_name == 'schedule' || github.event.inputs.strategy == 'all' || github.event.inputs.strategy == 'bottom_reversal'
     steps:
       - name: 随机延迟（避免 API 并发限流）
         run: sleep $((RANDOM % 60))
@@ -165,9 +165,9 @@ jobs:
       - name: 创建必要目录
         run: mkdir -p data logs reports
 
-      - name: 执行 AI 选股（尾盘买入策略）
+      - name: 执行 AI 选股（底部反转策略）
         env:
-          PICKER_STRATEGIES: eod_buyback
+          PICKER_STRATEGIES: bottom_reversal
         run: |
           if [ -n "$LITELLM_CONFIG_YAML" ] && [ -n "$LITELLM_CONFIG" ]; then
             mkdir -p "$(dirname "$LITELLM_CONFIG")"
@@ -175,14 +175,14 @@ jobs:
           fi
           FORCE_RUN_ARG=""
           [ "${{ github.event.inputs.force_run }}" = "true" ] && FORCE_RUN_ARG="--force-run"
-          echo "🎯 任务: AI 智能选股 (策略: eod_buyback)"
+          echo "🎯 任务: AI 智能选股 (策略: bottom_reversal)"
           python main.py --picker-only $FORCE_RUN_ARG
 
       - name: 上传报告
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: picker-eod-${{ github.run_number }}
+          name: picker-bottom-reversal-${{ github.run_number }}
           path: |
             reports/
             logs/
