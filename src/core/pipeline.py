@@ -893,6 +893,7 @@ class StockAnalysisPipeline:
         single_stock_notify: bool = False,
         report_type: ReportType = ReportType.SIMPLE,
         analysis_query_id: Optional[str] = None,
+        force_refresh: bool = False,
     ) -> Optional[AnalysisResult]:
         """
         处理单只股票的完整流程
@@ -911,6 +912,7 @@ class StockAnalysisPipeline:
             skip_analysis: 是否跳过 AI 分析
             single_stock_notify: 是否启用单股推送模式（每分析完一只立即推送）
             report_type: 报告类型枚举（从配置读取，Issue #119）
+            force_refresh: Whether to force refresh data (bypass local cache)
 
         Returns:
             AnalysisResult 或 None
@@ -919,7 +921,7 @@ class StockAnalysisPipeline:
         
         try:
             # Step 1: 获取并保存数据
-            success, error = self.fetch_and_save_stock_data(code)
+            success, error = self.fetch_and_save_stock_data(code, force_refresh=force_refresh)
             
             if not success:
                 logger.warning(f"[{code}] 数据获取失败: {error}")

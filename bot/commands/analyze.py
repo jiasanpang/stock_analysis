@@ -82,11 +82,12 @@ class AnalyzeCommand(BotCommand):
             
             service = get_task_service()
             
-            # 提交异步分析任务
+            # Submit async analysis task with force_refresh to ensure fresh data
             result = service.submit_analysis(
                 code=code,
                 report_type=ReportType.from_str(report_type),
-                source_message=message
+                source_message=message,
+                force_refresh=True,
             )
             
             if result.get("success"):

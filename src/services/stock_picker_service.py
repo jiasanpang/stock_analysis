@@ -1869,6 +1869,15 @@ class StockScreener:
             # Overlay realtime data from ts.realtime_list() AFTER all daily columns are set,
             # so realtime values take precedence over stale daily_basic values.
             if not is_historical:
+                # Force expire realtime caches to ensure fresh data for screening
+                try:
+                    from data_provider.tushare_fetcher import _realtime_list_cache
+                    import data_provider.tushare_fetcher as _ts_mod
+                    _realtime_list_cache['timestamp'] = 0.0
+                    _ts_mod._rt_k_cache_time = 0.0
+                    logger.debug("[Screener] Forced realtime cache expiry before supplement")
+                except (ImportError, KeyError) as e:
+                    logger.warning(f"[Screener] Could not force cache expiry: {e}")
                 df_daily = self._supplement_realtime_data(df_daily)
 
             elapsed = time.time() - t0
@@ -1880,23 +1889,21 @@ class StockScreener:
             return None
 
     def _supplement_realtime_data(self, df_daily: pd.DataFrame) -> pd.DataFrame:
-        """Overlay realtime fields from ts.realtime_list() onto the Tushare daily DataFrame.
+        """Overlay realtime fields onto the Tushare daily DataFrame.
 
-        Tushare daily + daily_basic only provide previous-day data.  realtime_list(src='dc')
-        returns today's live snapshot including vol_ratio, turnover_rate, pe, pb, total_mv,
-        price, pct_change, amount, and 60-day change.  This method merges those columns so
-        downstream filters and ScreenedStock objects carry current-day values.
+        Primary source: Tushare rt_k (full-market realtime daily bars, 6000 stocks per call).
+        Fallback source: realtime_list(src='dc') when rt_k is unavailable.
 
-        Fields supplemented (when available from realtime_list):
+        Fields supplemented (when available):
           - 量比          ← vol_ratio
-          - 换手率        ← turnover_rate  (overwritten AFTER this call in _try_tushare)
+          - 换手率        ← turnover_rate
           - 市盈率-动态   ← pe
           - 市净率        ← pb
-          - 总市值        ← total_mv  (overwritten AFTER this call in _try_tushare)
+          - 总市值        ← total_mv
           - 最新价        ← price
           - 涨跌幅        ← pct_change
-          - 成交额        ← amount  (overwritten AFTER this call in _try_tushare)
-          - 60日涨跌幅    ← 60day  (if present, used later)
+          - 成交额        ← amount
+          - 60日涨跌幅    ← 60day  (if present, realtime_list only)
         """
         try:
             tushare_fetcher = None
@@ -1909,9 +1916,41 @@ class StockScreener:
                 logger.debug("[Screener] TushareFetcher not available, skipping realtime supplement")
                 return df_daily
 
-            df_rt = tushare_fetcher._fetch_realtime_list()
+            # --- Primary source: rt_k ---
+            df_rt = None
+            try:
+                rt_k_quotes = tushare_fetcher._fetch_realtime_rt_k()
+                if rt_k_quotes:
+                    # Convert UnifiedRealtimeQuote dict to DataFrame with realtime_list-compatible columns
+                    rt_data = []
+                    for ts_code, quote in rt_k_quotes.items():
+                        rt_data.append({
+                            'ts_code': ts_code,
+                            'price': quote.price,
+                            'pct_change': quote.change_pct,
+                            'vol_ratio': quote.volume_ratio,
+                            'turnover_rate': quote.turnover_rate,
+                            'pe': quote.pe_ratio,
+                            'pb': quote.pb_ratio,
+                            'total_mv': quote.total_mv,
+                            'amount': quote.amount,
+                        })
+                    if rt_data:
+                        df_rt = pd.DataFrame(rt_data)
+                        logger.info("[Screener] Realtime data source: rt_k (%d quotes)", len(df_rt))
+            except Exception as e:
+                logger.debug("[Screener] rt_k fetch error: %s", e)
+
+            # --- Fallback: realtime_list ---
             if df_rt is None or df_rt.empty:
-                logger.info("[Screener] realtime_list returned empty, using daily_basic values as fallback")
+                logger.info("[Screener] rt_k unavailable, falling back to realtime_list")
+                df_rt = tushare_fetcher._fetch_realtime_list()
+
+            if df_rt is None or df_rt.empty:
+                logger.warning(
+                    "[Screener] Both rt_k and realtime_list returned empty/failed, "
+                    "falling back to daily_basic (T-1) data — candidate pool prices may be stale"
+                )
                 return df_daily
 
             # Build a lookup by 6-digit code extracted from ts_code (e.g. '000001.SZ' -> '000001')
@@ -2021,13 +2060,13 @@ class StockScreener:
                         "[Screener] Realtime 60d change supplemented for %d stocks", valid.sum()
                     )
 
-            logger.info(f"[Picker] Supplemented {updated_count} stocks with realtime data from realtime_list")
+            logger.info("[Picker] Supplemented %d stocks with realtime data", updated_count)
             logger.info(
-                "[Screener] Realtime data supplement complete (realtime_list had %d rows)", len(rt)
+                "[Screener] Realtime data supplement complete (%d rows)", len(rt)
             )
 
         except Exception as e:
-            logger.warning("[Screener] Failed to supplement realtime data from realtime_list: %s", e)
+            logger.warning("[Screener] Failed to supplement realtime data: %s", e)
 
         # --- Fallback: compute volume ratio for stocks still missing it ---
         # When rt_k is the primary source, vol_ratio comes back as None/0;

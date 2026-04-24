@@ -42,14 +42,36 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
+def _get_dynamic_cache_ttl() -> float:
+    """Return dynamic cache TTL based on A-share trading session.
+
+    During active trading hours the cache is refreshed more aggressively
+    (10 s) so that screening always works with near-real-time data.
+    Outside trading hours a conservative TTL (120 s) avoids unnecessary
+    API calls.
+    """
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    except ImportError:
+        import pytz
+        now = datetime.now(pytz.timezone("Asia/Shanghai"))
+
+    t = now.hour * 100 + now.minute
+    # Trading sessions: 9:15-11:30, 13:00-15:00
+    if (915 <= t <= 1130) or (1300 <= t <= 1500):
+        return 10.0  # aggressive refresh during trading
+    return 120.0  # conservative during off-hours
+
+
 # ---------------------------------------------------------------------------
 # Module-level cache for ts.realtime_list() full-market snapshot.
-# realtime_list returns ~5000 rows; cache 30s to avoid hammering the crawler.
+# realtime_list returns ~5000 rows; TTL is dynamic (see _get_dynamic_cache_ttl).
 # ---------------------------------------------------------------------------
 _realtime_list_cache: Dict[str, Any] = {
     'data': None,
     'timestamp': 0.0,
-    'ttl': 30,  # seconds
 }
 
 # Lock to prevent concurrent cache stampede (22 parallel threads all miss cache)
@@ -62,11 +84,10 @@ _REALTIME_LIST_MAX_FAILURES = 3
 _REALTIME_LIST_COOLDOWN = 60.0  # seconds
 
 # ---------------------------------------------------------------------------
-# Module-level cache for rt_k full-market snapshot (30s TTL, same pattern).
+# Module-level cache for rt_k full-market snapshot (dynamic TTL, same pattern).
 # ---------------------------------------------------------------------------
 _rt_k_cache: Dict[str, UnifiedRealtimeQuote] = {}
 _rt_k_cache_time: float = 0.0
-_rt_k_cache_ttl: float = 30.0  # seconds
 _rt_k_lock = threading.Lock()
 
 # Circuit breaker for rt_k
@@ -688,11 +709,12 @@ class TushareFetcher(BaseFetcher):
         # --- fast path: cache hit (no lock needed) ---
         if (
             _realtime_list_cache['data'] is not None
-            and current_time - _realtime_list_cache['timestamp'] < _realtime_list_cache['ttl']
+            and current_time - _realtime_list_cache['timestamp'] < _get_dynamic_cache_ttl()
         ):
+            dyn_ttl = _get_dynamic_cache_ttl()
             cache_age = int(current_time - _realtime_list_cache['timestamp'])
             logger.debug(
-                f"[realtime_list] cache hit, age {cache_age}s / {_realtime_list_cache['ttl']}s"
+                f"[realtime_list] cache hit, age {cache_age}s / {dyn_ttl}s"
             )
             return _realtime_list_cache['data']
 
@@ -702,7 +724,7 @@ class TushareFetcher(BaseFetcher):
             current_time = time.time()
             if (
                 _realtime_list_cache['data'] is not None
-                and current_time - _realtime_list_cache['timestamp'] < _realtime_list_cache['ttl']
+                and current_time - _realtime_list_cache['timestamp'] < _get_dynamic_cache_ttl()
             ):
                 logger.debug("[realtime_list] cache hit after lock (another thread refreshed)")
                 return _realtime_list_cache['data']
@@ -728,7 +750,7 @@ class TushareFetcher(BaseFetcher):
                     _realtime_list_fail_count = 0  # reset on success
                     logger.info(
                         f"[realtime_list] fetched {len(df)} rows, cache refreshed "
-                        f"(TTL={_realtime_list_cache['ttl']}s)"
+                        f"(TTL={_get_dynamic_cache_ttl()}s)"
                     )
                     return df
                 else:
@@ -793,14 +815,15 @@ class TushareFetcher(BaseFetcher):
             return {}
 
         # --- fast path: cache hit ---
-        if _rt_k_cache and current_time - _rt_k_cache_time < _rt_k_cache_ttl:
+        _dyn_ttl = _get_dynamic_cache_ttl()
+        if _rt_k_cache and current_time - _rt_k_cache_time < _dyn_ttl:
             logger.debug("[rt_k] cache hit, age %.0fs", current_time - _rt_k_cache_time)
             return _rt_k_cache
 
         # --- slow path: lock, double-check, fetch ---
         with _rt_k_lock:
             current_time = time.time()
-            if _rt_k_cache and current_time - _rt_k_cache_time < _rt_k_cache_ttl:
+            if _rt_k_cache and current_time - _rt_k_cache_time < _get_dynamic_cache_ttl():
                 logger.debug("[rt_k] cache hit after lock")
                 return _rt_k_cache
 
@@ -886,7 +909,7 @@ class TushareFetcher(BaseFetcher):
                 _rt_k_cache = all_quotes
                 _rt_k_cache_time = time.time()
                 _rt_k_fail_count = 0
-                logger.info("[rt_k] fetched %d quotes, cache refreshed (TTL=%.0fs)", len(all_quotes), _rt_k_cache_ttl)
+                logger.info("[rt_k] fetched %d quotes, cache refreshed (TTL=%.0fs)", len(all_quotes), _get_dynamic_cache_ttl())
             else:
                 self._record_rt_k_failure()
                 logger.warning("[rt_k] all batches returned empty")

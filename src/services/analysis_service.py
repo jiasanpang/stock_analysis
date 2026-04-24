@@ -87,7 +87,8 @@ class AnalysisService:
                 code=stock_code,
                 skip_analysis=False,
                 single_stock_notify=send_notification,
-                report_type=rt
+                report_type=rt,
+                force_refresh=force_refresh,
             )
             
             if result is None:
