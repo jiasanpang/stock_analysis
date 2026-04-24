@@ -82,6 +82,13 @@ _daily_basic_cache: Optional[pd.DataFrame] = None
 _daily_basic_cache_date: str = ""  # YYYYMMDD of cached data
 _daily_basic_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# Module-level cache for 5-day average volume (refreshed once per trade date).
+# ---------------------------------------------------------------------------
+_daily_vol_avg_cache: Optional[Dict[str, float]] = None  # ts_code -> avg_5d_vol (手)
+_daily_vol_avg_cache_date: str = ""
+_daily_vol_avg_lock = threading.Lock()
+
 
 # ETF code prefixes by exchange
 # Shanghai: 51xxxx, 52xxxx, 56xxxx, 58xxxx
@@ -957,11 +964,136 @@ class TushareFetcher(BaseFetcher):
                 logger.warning("[daily_basic] fetch failed: %s", e)
                 return None
 
+    def _get_cached_daily_vol_avg(self) -> Optional[Dict[str, float]]:
+        """Get 5-day average volume for all stocks, cached for the entire day.
+
+        Returns dict mapping ts_code -> avg 5-day volume in 手 (lots).
+        Uses Tushare daily() API to fetch last 5 trading days of volume data.
+        """
+        global _daily_vol_avg_cache, _daily_vol_avg_cache_date
+
+        if self._api is None:
+            return None
+
+        china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        today_str = china_now.strftime("%Y%m%d")
+
+        # Fast path: cache still valid for today
+        if _daily_vol_avg_cache is not None and _daily_vol_avg_cache_date == today_str:
+            return _daily_vol_avg_cache
+
+        with _daily_vol_avg_lock:
+            # Double-check
+            if _daily_vol_avg_cache is not None and _daily_vol_avg_cache_date == today_str:
+                return _daily_vol_avg_cache
+
+            try:
+                # Determine recent trade dates from daily_basic cache or trade_cal
+                start_date = (china_now - pd.Timedelta(days=15)).strftime("%Y%m%d")
+                self._check_rate_limit()
+                df_cal = self._api.trade_cal(exchange="SSE", start_date=start_date, end_date=today_str)
+                if df_cal is None or df_cal.empty:
+                    logger.debug("[daily_vol_avg] trade_cal returned empty, cannot fetch volume data")
+                    return None
+                df_cal.columns = [c.lower() for c in df_cal.columns]
+                open_dates = sorted(df_cal[df_cal["is_open"] == 1]["cal_date"].tolist(), reverse=True)
+                if not open_dates:
+                    logger.debug("[daily_vol_avg] no open trading dates found in trade_cal")
+                    return None
+
+                # We need 5 completed trading days (exclude today if market still open)
+                # Take up to 7 candidates, skip the first if it's today and market not closed
+                candidate_dates = open_dates[:7]
+                if candidate_dates and candidate_dates[0] == today_str and china_now.hour < 15:
+                    candidate_dates = candidate_dates[1:]
+                trade_dates = candidate_dates[:5]
+
+                if not trade_dates:
+                    logger.warning("[daily_vol_avg] insufficient completed trade dates after filtering")
+                    return None
+
+                # Fetch daily vol for each trade date
+                all_dfs = []
+                for td in trade_dates:
+                    self._check_rate_limit()
+                    df = self._api.daily(trade_date=td, fields='ts_code,vol')
+                    if df is not None and not df.empty:
+                        df.columns = [c.lower() for c in df.columns]
+                        all_dfs.append(df)
+
+                if not all_dfs:
+                    logger.warning("[daily_vol_avg] no daily data for recent trade dates")
+                    return None
+
+                # Compute average volume per stock
+                combined = pd.concat(all_dfs, ignore_index=True)
+                avg_vol = combined.groupby("ts_code")["vol"].mean()
+                result = avg_vol.to_dict()
+
+                _daily_vol_avg_cache = result
+                _daily_vol_avg_cache_date = today_str
+                logger.info(
+                    "[daily_vol_avg] cached avg vol for %d stocks from %d trade days (dates: %s)",
+                    len(result), len(all_dfs), ','.join(trade_dates[-1:0:-1]),  # show in reverse chronological order
+                )
+                return result
+
+            except Exception as e:
+                logger.warning("[daily_vol_avg] fetch failed: %s", e)
+                return None
+
+    @staticmethod
+    def _calc_rt_k_volume_ratio(current_vol: float, avg_5d_vol: float) -> Optional[float]:
+        """Calculate volume ratio for rt_k quotes considering trading session elapsed time.
+
+        Same logic as stock_picker_service._calc_volume_ratio but returns None on
+        invalid inputs instead of 0.0, so the caller can decide whether to set the field.
+
+        Args:
+            current_vol: Today's cumulative volume in 手.
+            avg_5d_vol: 5-day average daily volume in 手.
+
+        Returns:
+            Volume ratio rounded to 2 decimals, or None when inputs are invalid.
+        """
+        if not avg_5d_vol or avg_5d_vol <= 0 or not current_vol or current_vol <= 0:
+            return None
+
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        total_minutes = 240  # 9:30-11:30 (120 min) + 13:00-15:00 (120 min)
+
+        # After market close: simple full-day ratio
+        if now.hour >= 15:
+            return round(current_vol / avg_5d_vol, 2)
+
+        # Before market open
+        if now.hour < 9 or (now.hour == 9 and now.minute < 30):
+            return None
+
+        # Intraday: compute elapsed trading minutes (exclude lunch break)
+        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        morning_close = now.replace(hour=11, minute=30, second=0, microsecond=0)
+        afternoon_open = now.replace(hour=13, minute=0, second=0, microsecond=0)
+
+        if now <= morning_close:
+            elapsed = (now - market_open).total_seconds() / 60
+        elif now < afternoon_open:
+            elapsed = 120  # full morning session
+        else:
+            elapsed = 120 + (now - afternoon_open).total_seconds() / 60
+
+        elapsed = max(1, min(elapsed, total_minutes))
+        avg_per_min = avg_5d_vol / total_minutes
+        current_per_min = current_vol / elapsed
+
+        return round(current_per_min / avg_per_min, 2) if avg_per_min > 0 else None
+
     def _enrich_rt_k_quotes(self, quotes: Dict[str, UnifiedRealtimeQuote]):
-        """Enrich rt_k quotes with daily_basic data (PE/PB/MV/turnover).
+        """Enrich rt_k quotes with daily_basic data (PE/PB/MV/turnover) and volume ratio.
 
         Modifies quotes in-place. Skips silently on failure.
         Market cap is recomputed using realtime price * shares for accuracy.
+        Volume ratio is computed from rt_k realtime volume and 5-day avg volume.
         """
         try:
             df_basic = self._get_cached_daily_basic()
@@ -995,6 +1127,32 @@ class TushareFetcher(BaseFetcher):
 
         except Exception as e:
             logger.warning("[rt_k] failed to enrich with daily_basic: %s", e)
+
+        # --- Volume ratio enrichment (separate try-block to not block PE/PB/MV) ---
+        try:
+            vol_avg_map = self._get_cached_daily_vol_avg()
+            if not vol_avg_map:
+                logger.debug("[rt_k] volume_ratio cache unavailable, skipping enrichment")
+                return
+
+            enriched_count = 0
+            for ts_code, q in quotes.items():
+                avg_5d = vol_avg_map.get(ts_code)
+                if avg_5d is None or avg_5d <= 0:
+                    continue
+                current_vol = q.volume
+                if current_vol is None or current_vol <= 0:
+                    continue
+                vr = self._calc_rt_k_volume_ratio(current_vol, avg_5d)
+                if vr is not None:
+                    q.volume_ratio = vr
+                    enriched_count += 1
+
+            if enriched_count > 0:
+                logger.debug("[rt_k] enriched volume_ratio for %d quotes", enriched_count)
+
+        except Exception as e:
+            logger.warning("[rt_k] failed to enrich volume_ratio: %s", e)
 
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
