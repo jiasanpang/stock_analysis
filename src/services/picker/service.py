@@ -62,6 +62,7 @@ class StockPickerService:
             serpapi_keys=self.config.serpapi_keys,
             minimax_keys=self.config.minimax_api_keys,
             searxng_base_urls=self.config.searxng_base_urls,
+            zhipu_keys=self.config.zhipu_api_keys,
             news_max_age_days=1,
         )
         from src.analyzer import GeminiAnalyzer

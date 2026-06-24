@@ -159,6 +159,13 @@ def main() -> int:
             "csv -> list",
         ),
         (
+            "ZHIPU_API_KEYS",
+            "zhipu_a_t72d,zhipu_b_t72d",
+            "zhipu_api_keys",
+            lambda v: v == ["zhipu_a_t72d", "zhipu_b_t72d"],
+            "csv -> list",
+        ),
+        (
             "GEMINI_API_KEY",
             "g1_t72d,g2_t72d",
             "gemini_api_keys",

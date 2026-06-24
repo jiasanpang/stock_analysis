@@ -26,6 +26,7 @@ from .models import SearchResponse, SearchResult
 from .searxng import SearXNGSearchProvider
 from .serpapi import SerpAPISearchProvider
 from .tavily import TavilySearchProvider
+from .zhipu import ZhipuSearchProvider
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ class SearchService:
         serpapi_keys: Optional[List[str]] = None,
         minimax_keys: Optional[List[str]] = None,
         searxng_base_urls: Optional[List[str]] = None,
+        zhipu_keys: Optional[List[str]] = None,
         news_max_age_days: int = 3,
     ):
         """
@@ -80,6 +82,7 @@ class SearchService:
             serpapi_keys: SerpAPI Key 列表
             minimax_keys: MiniMax API Key 列表
             searxng_base_urls: SearXNG 实例地址列表（自建无配额兜底）
+            zhipu_keys: 智谱 BigModel API Key 列表（Web Search API，与 GLM 共用 key）
             news_max_age_days: 新闻最大时效（天）
         """
         self._providers: List[BaseSearchProvider] = []
@@ -106,12 +109,17 @@ class SearchService:
             self._providers.append(SerpAPISearchProvider(serpapi_keys))
             logger.info(f"已配置 SerpAPI 搜索，共 {len(serpapi_keys)} 个 API Key")
 
-        # 5. MiniMax（Coding Plan Web Search，结构化结果）
+        # 5. Zhipu BigModel Web Search（结构化 REST API，与 GLM 共用 key）
+        if zhipu_keys:
+            self._providers.append(ZhipuSearchProvider(zhipu_keys))
+            logger.info(f"已配置 Zhipu 搜索，共 {len(zhipu_keys)} 个 API Key")
+
+        # 6. MiniMax（Coding Plan Web Search，结构化结果）
         if minimax_keys:
             self._providers.append(MiniMaxSearchProvider(minimax_keys))
             logger.info(f"已配置 MiniMax 搜索，共 {len(minimax_keys)} 个 API Key")
 
-        # 6. SearXNG（自建实例，无配额兜底，最后兜底）
+        # 7. SearXNG（自建实例，无配额兜底，最后兜底）
         if searxng_base_urls:
             self._providers.append(SearXNGSearchProvider(searxng_base_urls))
             logger.info(f"已配置 SearXNG 搜索，共 {len(searxng_base_urls)} 个实例")
@@ -698,6 +706,7 @@ def get_search_service() -> SearchService:
             serpapi_keys=config.serpapi_keys,
             minimax_keys=config.minimax_api_keys,
             searxng_base_urls=config.searxng_base_urls,
+            zhipu_keys=config.zhipu_api_keys,
             news_max_age_days=config.news_max_age_days,
         )
     

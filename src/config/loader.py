@@ -311,6 +311,9 @@ def load_config_from_env() -> Config:
     minimax_keys_str = os.getenv('MINIMAX_API_KEYS', '')
     minimax_api_keys = [k.strip() for k in minimax_keys_str.split(',') if k.strip()]
 
+    zhipu_keys_str = os.getenv('ZHIPU_API_KEYS', '')
+    zhipu_api_keys = [k.strip() for k in zhipu_keys_str.split(',') if k.strip()]
+
     tavily_keys_str = os.getenv('TAVILY_API_KEYS', '')
     tavily_api_keys = [k.strip() for k in tavily_keys_str.split(',') if k.strip()]
 
@@ -378,6 +381,7 @@ def load_config_from_env() -> Config:
         vision_provider_priority=os.getenv('VISION_PROVIDER_PRIORITY', 'gemini,anthropic,openai'),
         bocha_api_keys=bocha_api_keys,
         minimax_api_keys=minimax_api_keys,
+        zhipu_api_keys=zhipu_api_keys,
         tavily_api_keys=tavily_api_keys,
         brave_api_keys=brave_api_keys,
         serpapi_keys=serpapi_keys,

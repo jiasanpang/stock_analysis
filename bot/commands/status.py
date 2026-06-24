@@ -76,6 +76,7 @@ class StatusCommand(BotCommand):
         status["search_brave"] = len(config.brave_api_keys) > 0
         status["search_serpapi"] = len(config.serpapi_keys) > 0
         status["search_minimax"] = len(config.minimax_api_keys) > 0
+        status["search_zhipu"] = len(config.zhipu_api_keys) > 0
         status["search_searxng"] = len(config.searxng_base_urls) > 0
         
         # 通知渠道状态

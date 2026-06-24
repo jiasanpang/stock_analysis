@@ -118,6 +118,7 @@ class Config:
     brave_api_keys: List[str] = field(default_factory=list)
     serpapi_keys: List[str] = field(default_factory=list)
     searxng_base_urls: List[str] = field(default_factory=list)
+    zhipu_api_keys: List[str] = field(default_factory=list)
 
     # === News & analysis filter ===
     news_max_age_days: int = 3

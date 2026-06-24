@@ -70,6 +70,7 @@ def validate_config_structured(config: "Config") -> List[ConfigIssue]:
     if not (
         config.bocha_api_keys
         or config.minimax_api_keys
+        or config.zhipu_api_keys
         or config.tavily_api_keys
         or config.brave_api_keys
         or config.serpapi_keys
@@ -77,7 +78,7 @@ def validate_config_structured(config: "Config") -> List[ConfigIssue]:
     ):
         issues.append(ConfigIssue(
             severity="info",
-            message="未配置搜索引擎 API Key (Bocha/MiniMax/Tavily/Brave/SerpAPI/SearXNG)，新闻搜索功能将不可用",
+            message="未配置搜索引擎 API Key (Bocha/MiniMax/Zhipu/Tavily/Brave/SerpAPI/SearXNG)，新闻搜索功能将不可用",
             field="BOCHA_API_KEY",
         ))
 
