@@ -76,6 +76,16 @@ CN_BLUEPRINT = MarketStrategyBlueprint(
             objective="提炼可交易主线与规避方向。",
             checkpoints=["领涨板块是否具备事件催化", "板块内部是否有龙头带动", "领跌板块是否扩散"],
         ),
+        StrategyDimension(
+            name="涨停情绪",
+            objective="识别短线风险偏好、连板梯队结构与炸板风险。",
+            checkpoints=["连板梯队高度与断层情况", "炸板率是否超过 40%", "高位股是否出现分歧或断板"],
+        ),
+        StrategyDimension(
+            name="持仓检视",
+            objective="评估持仓强弱与买入逻辑是否仍成立。",
+            checkpoints=["持仓是否强于大盘与所属板块", "技术位是否保持 (均线/MACD)", "买入逻辑是否仍在，破位是否需止损"],
+        ),
     ],
     action_framework=[
         "进攻：指数共振上行 + 成交额放大 + 主线强化。",

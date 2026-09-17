@@ -270,6 +270,7 @@ def run_full_analysis(
                 send_notification=send_notification,
                 merge_notification=merge_notification,
                 override_region=effective_region,
+                review_version=getattr(args, 'review_version', '') or '',
             )
             # 如果有结果，赋值给 market_report 用于后续飞书文档生成
             if review_result:
@@ -608,6 +609,46 @@ def main() -> int:
                 search_service=search_service,
                 send_notification=_should_send_notification(args),
                 override_region=effective_region,
+                review_version=getattr(args, 'review_version', '') or '',
+            )
+            return 0
+
+        # Mode: --weekly-review
+        if args.weekly_review:
+            from src.analyzer import GeminiAnalyzer
+            from src.core.weekly_review import run_weekly_review
+            from src.notification_service import NotificationService
+            from src.search_service import SearchService
+
+            logger.info("模式: 周度复盘")
+            notifier = NotificationService()
+
+            search_service = None
+            analyzer = None
+            if config.bocha_api_keys or config.tavily_api_keys or config.brave_api_keys or config.serpapi_keys or config.minimax_api_keys or config.searxng_base_urls or config.zhipu_api_keys:
+                search_service = SearchService(
+                    bocha_keys=config.bocha_api_keys,
+                    tavily_keys=config.tavily_api_keys,
+                    brave_keys=config.brave_api_keys,
+                    serpapi_keys=config.serpapi_keys,
+                    minimax_keys=config.minimax_api_keys,
+                    searxng_base_urls=config.searxng_base_urls,
+                    zhipu_keys=config.zhipu_api_keys,
+                    news_max_age_days=config.news_max_age_days,
+                )
+
+            if config.gemini_api_keys or config.openai_api_key:
+                _gk = config.gemini_api_keys[0] if config.gemini_api_keys else None
+                analyzer = GeminiAnalyzer(api_key=_gk)
+                if not analyzer.is_available():
+                    logger.warning("AI 分析器不可用")
+                    analyzer = None
+
+            run_weekly_review(
+                analyzer=analyzer,
+                search_service=search_service,
+                notifier=notifier,
+                send_notification=_should_send_notification(args),
             )
             return 0
 

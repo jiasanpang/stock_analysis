@@ -590,6 +590,229 @@ class EnhancedMarketAnalyzer(MarketAnalyzer):
         
         return report
 
+    # ------------------------------------------------------------------
+    # V2 four-step daily review
+    # ------------------------------------------------------------------
+
+    def run_daily_review_v2(self) -> str:
+        """执行 V2 四步式每日复盘流程.
+
+        Steps:
+          1. 大盘整体复盘 (复用 get_market_overview + 北向资金 + 新闻)
+          2. 涨停板 & 情绪复盘 (连板梯队 / 炸板率 / 亏钱效应)
+          3. 持仓个股深度复盘 (STOCK_LIST)
+          4. 次日观察池 (3-5 只精选)
+
+        Returns:
+            str: V2 复盘报告
+        """
+        from src._review_v2_types import DailyReviewV2, NorthBoundFlow
+        from src._review_v2_prompt_builder import compose_v2_daily_prompt
+        from src.core.holdings_review import review_holdings
+        from src.core.watch_pool import screen_watch_pool
+
+        logger.info("========== V2 四步式复盘开始 ==========")
+
+        # --- Step 1: 大盘整体 ---
+        overview = self.get_market_overview()
+        sentiment = self.analyze_market_sentiment(overview)
+        sector_hotspots = self.analyze_sector_hotspots(overview)
+        external_env = self.analyze_external_environment()
+        technical = self.analyze_technical_aspects(overview)
+        news = self.search_market_news()
+
+        # 北向资金
+        north_flow = NorthBoundFlow()
+        try:
+            from data_provider.akshare.limit_up import get_north_flow
+            north_flow = get_north_flow()
+        except Exception as e:
+            logger.warning(f"[V2] 北向资金获取失败: {e}")
+
+        # --- Step 2: 涨停 & 情绪 ---
+        from src._review_v2_types import LimitUpLadder
+        limit_up_ladder = LimitUpLadder()
+        try:
+            from data_provider.akshare.limit_up import build_limit_up_ladder
+            limit_up_ladder = build_limit_up_ladder()
+        except Exception as e:
+            logger.warning(f"[V2] 涨停数据获取失败: {e}")
+
+        # --- Step 3: 持仓深度复盘 ---
+        holdings = []
+        try:
+            holdings = review_holdings(overview)
+        except Exception as e:
+            logger.warning(f"[V2] 持仓复盘失败: {e}")
+
+        # --- Step 4: 次日观察池 ---
+        watch_pool = []
+        try:
+            watch_pool = screen_watch_pool(overview)
+        except Exception as e:
+            logger.warning(f"[V2] 观察池筛选失败: {e}")
+
+        # --- 组装数据 ---
+        v2_data = DailyReviewV2(
+            date=overview.date,
+            market_overview=overview,
+            north_flow=north_flow,
+            limit_up_ladder=limit_up_ladder,
+            holdings=holdings,
+            watch_pool=watch_pool,
+            sentiment=sentiment,
+            sector_hotspots=sector_hotspots,
+            technical=technical,
+            news=news,
+        )
+
+        # --- 生成报告 ---
+        report = self._generate_v2_report(v2_data)
+        logger.info("========== V2 四步式复盘完成 ==========")
+        return report
+
+    def _generate_v2_report(self, data) -> str:
+        """Generate V2 report via LLM or template fallback."""
+        from src._review_v2_prompt_builder import compose_v2_daily_prompt
+
+        if not self.analyzer or not self.analyzer.is_available():
+            logger.warning("[V2] AI 分析器不可用，使用模板报告")
+            return self._generate_v2_template_report(data)
+
+        prompt = compose_v2_daily_prompt(data)
+        logger.info("[V2] 调用 AI 生成 V2 复盘报告...")
+        report = self.analyzer.generate_text(prompt, max_tokens=3500, temperature=0.7)
+        if report:
+            logger.info(f"[V2] 报告生成成功，长度: {len(report)} 字符")
+            return self._inject_v2_data(report, data)
+        logger.warning("[V2] AI 返回为空，使用模板报告")
+        return self._generate_v2_template_report(data)
+
+    def _inject_v2_data(self, report: str, data) -> str:
+        """Inject structured V2 data tables into LLM prose."""
+        # Inject limit-up ladder after "### 二、涨停情绪"
+        if data.limit_up_ladder and data.limit_up_ladder.data_available:
+            ladder = data.limit_up_ladder
+            block = (
+                f"> 涨停 **{ladder.total_limit_up}** 家 | "
+                f"炸板 **{ladder.total_broken}** 家 (炸板率 **{ladder.broken_rate:.0f}%**) | "
+                f"跌停 **{ladder.dtgc_count}** 家\n"
+                f"> 连板梯队: {ladder.get_streak_summary()}\n"
+                f"> 亏钱效应: {ladder.loss_effect}"
+            )
+            report = self._insert_after_section(report, r'###\s*.*二、涨停情绪', block)
+
+        # Inject holdings table after "### 三、持仓复盘"
+        if data.holdings:
+            lines = ["| 持仓 | 涨跌 | vs大盘 | MA排列 | MACD |",
+                     "|------|------|--------|--------|------|"]
+            for h in data.holdings:
+                lines.append(
+                    f"| {h.name} | {h.change_pct:+.2f}% | {h.vs_market} "
+                    f"| {h.ma_alignment} | {h.macd_status} |"
+                )
+            report = self._insert_after_section(report, r'###\s*.*三、持仓复盘', "\n".join(lines))
+
+        # Inject watch pool after "### 四、次日观察池"
+        if data.watch_pool:
+            lines = ["| 代码 | 名称 | 板块 | 入选理由 | 止损位 |",
+                     "|------|------|------|----------|--------|"]
+            for w in data.watch_pool:
+                lines.append(
+                    f"| {w.code} | {w.name} | {w.sector} "
+                    f"| {w.reason} | {w.stop_loss:.2f} |"
+                )
+            report = self._insert_after_section(report, r'###\s*.*四、次日观察池', "\n".join(lines))
+
+        return report
+
+    def _generate_v2_template_report(self, data) -> str:
+        """Generate V2 template report when LLM is unavailable."""
+        from datetime import datetime as _dt
+        ov = data.market_overview
+        sent = data.sentiment
+        lu = data.limit_up_ladder
+
+        # Index section
+        idx_lines = []
+        for idx in (ov.indices if ov else [])[:4]:
+            arrow = "↑" if idx.change_pct > 0 else "↓" if idx.change_pct < 0 else "-"
+            idx_lines.append(f"- **{idx.name}**: {idx.current:.2f} ({arrow}{abs(idx.change_pct):.2f}%)")
+        idx_text = "\n".join(idx_lines) if idx_lines else "指数数据暂不可用"
+
+        # Stats section
+        stats_text = ""
+        if ov and ov.up_count:
+            stats_text = (
+                f"上涨 **{ov.up_count}** / 下跌 **{ov.down_count}** | "
+                f"涨停 **{ov.limit_up_count}** / 跌停 **{ov.limit_down_count}** | "
+                f"成交额 **{ov.total_amount:.0f}** 亿"
+            )
+
+        # North flow
+        north_text = data.north_flow.flow_description if data.north_flow else "北向资金数据暂不可用"
+
+        # Limit-up section
+        lu_text = ""
+        if lu and lu.data_available:
+            lu_text = (
+                f"涨停 **{lu.total_limit_up}** 家 | "
+                f"炸板 **{lu.total_broken}** 家 (炸板率 {lu.broken_rate:.0f}%) | "
+                f"跌停 **{lu.dtgc_count}** 家\n"
+                f"连板梯队: {lu.get_streak_summary()}\n"
+                f"亏钱效应: {lu.loss_effect}"
+            )
+        else:
+            lu_text = "涨停数据暂不可用"
+
+        # Holdings section
+        holdings_lines = []
+        for h in data.holdings:
+            holdings_lines.append(
+                f"- **{h.name}** ({h.code}): {h.change_pct:+.2f}% | "
+                f"{h.vs_market} | {h.ma_alignment} | {h.macd_status}"
+            )
+        holdings_text = "\n".join(holdings_lines) if holdings_lines else "无持仓数据"
+
+        # Watch pool
+        wp_lines = []
+        for w in data.watch_pool:
+            wp_lines.append(
+                f"- **{w.name}** ({w.code}) [{w.sector}]: {w.reason} | 止损 {w.stop_loss:.2f}"
+            )
+        wp_text = "\n".join(wp_lines) if wp_lines else "暂无符合条件的观察池候选"
+
+        # Sectors
+        top_sectors = "、".join([s['name'] for s in (ov.top_sectors if ov else [])[:3]]) or "暂无"
+
+        date_str = data.date or _dt.now().strftime('%Y-%m-%d')
+        return f"""## {date_str} 深度复盘
+
+### 一、大盘全景
+{idx_text}
+
+{stats_text}
+
+北向资金: {north_text}
+
+板块热点: {top_sectors}
+
+### 二、涨停情绪
+{lu_text}
+
+### 三、持仓复盘
+{holdings_text}
+
+### 四、次日观察池
+{wp_text}
+
+### 五、明日策略
+市场有风险，投资需谨慎。以上分析仅供参考，不构成投资建议。
+
+---
+*复盘时间: {_dt.now().strftime('%H:%M')} | V2 四步式复盘*
+"""
+
 
 # 测试入口
 if __name__ == "__main__":

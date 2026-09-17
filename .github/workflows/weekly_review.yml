@@ -1,39 +1,25 @@
-name: 每日股票分析
+name: 周度复盘
 
 on:
-  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  # 定时触发 - 每周日北京时间 20:00 (UTC 12:00)
   schedule:
-    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+    - cron: '0 12 * * 0'
 
   # 手动触发
   workflow_dispatch:
     inputs:
-      mode:
-        description: '运行模式'
-        required: true
-        default: 'full'
-        type: choice
-        options:
-          - full           # 完整分析（大盘+股票 双任务并行）
-          - market-only    # 仅大盘复盘
-          - stocks-only    # 仅股票分析
       force_run:
         description: '强制运行（跳过交易日检查）'
         required: false
         default: false
         type: boolean
-      review_version:
-        description: '复盘版本 (v1/v2)'
-        required: false
-        default: ''
-        type: string
 
-# 并发控制：同一时间只运行一个分析任务
+# 并发控制
 concurrency:
-  group: stock-analysis
+  group: weekly-review
   cancel-in-progress: false
 
-# 共享环境变量（各 job 复用）
+# 共享环境变量（复用 daily_analysis.yml 配置）
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   LITELLM_CONFIG: ${{ vars.LITELLM_CONFIG || secrets.LITELLM_CONFIG }}
@@ -101,14 +87,12 @@ env:
   MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '1' }}
   ENABLE_CHIP_DISTRIBUTION: 'false'
   REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
-  REVIEW_VERSION: ${{ vars.REVIEW_VERSION || secrets.REVIEW_VERSION || 'v1' }}
+  REVIEW_VERSION: ${{ vars.REVIEW_VERSION || secrets.REVIEW_VERSION || 'v2' }}
 
 jobs:
-  # 任务1: 大盘复盘
-  market-review:
+  weekly-review:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    if: github.event_name == 'schedule' || github.event.inputs.mode == 'full' || github.event.inputs.mode == 'market-only'
     steps:
       - name: 随机延迟（避免固定时间访问）
         run: sleep $((RANDOM % 60))
@@ -125,9 +109,7 @@ jobs:
           pip install -r requirements.txt
       - name: 创建必要目录
         run: mkdir -p data logs reports
-      - name: 执行大盘复盘
-        env:
-          PICKER_ENABLED: 'false'
+      - name: 执行周度复盘
         run: |
           if [ -n "$LITELLM_CONFIG_YAML" ] && [ -n "$LITELLM_CONFIG" ]; then
             mkdir -p "$(dirname "$LITELLM_CONFIG")"
@@ -135,61 +117,14 @@ jobs:
           fi
           FORCE_RUN_ARG=""
           [ "${{ github.event.inputs.force_run }}" = "true" ] && FORCE_RUN_ARG="--force-run"
-          REVIEW_VER="${{ github.event.inputs.review_version }}"
-          REVIEW_ARG=""
-          [ -n "$REVIEW_VER" ] && REVIEW_ARG="--review-version $REVIEW_VER"
-          echo "📈 任务: 大盘复盘"
-          python main.py --market-review $FORCE_RUN_ARG $REVIEW_ARG
+          echo "📊 任务: 周度复盘"
+          python main.py --weekly-review $FORCE_RUN_ARG
       - name: 上传报告
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: analysis-market-${{ github.run_number }}
+          name: weekly-review-${{ github.run_number }}
           path: |
             reports/
             logs/
           retention-days: 30
-
-  # 任务2: 股票分析（不含选股）
-  stocks:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    if: github.event_name == 'schedule' || github.event.inputs.mode == 'full' || github.event.inputs.mode == 'stocks-only'
-    steps:
-      - name: 随机延迟
-        run: sleep $((RANDOM % 60))
-      - name: 检出代码
-        uses: actions/checkout@v4
-      - name: 设置 Python 环境
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-      - name: 安装依赖
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-      - name: 创建必要目录
-        run: mkdir -p data logs reports
-      - name: 执行股票分析
-        env:
-          PICKER_ENABLED: 'false'
-        run: |
-          if [ -n "$LITELLM_CONFIG_YAML" ] && [ -n "$LITELLM_CONFIG" ]; then
-            mkdir -p "$(dirname "$LITELLM_CONFIG")"
-            echo "$LITELLM_CONFIG_YAML" > "$LITELLM_CONFIG"
-          fi
-          FORCE_RUN_ARG=""
-          [ "${{ github.event.inputs.force_run }}" = "true" ] && FORCE_RUN_ARG="--force-run"
-          echo "📊 任务: 股票分析"
-          python main.py --no-market-review $FORCE_RUN_ARG
-      - name: 上传报告
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: analysis-stocks-${{ github.run_number }}
-          path: |
-            reports/
-            logs/
-          retention-days: 30
-

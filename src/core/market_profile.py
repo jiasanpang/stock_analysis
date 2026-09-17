@@ -34,6 +34,7 @@ CN_PROFILE = MarketProfile(
         "A股 大盘 复盘",
         "股市 行情 分析",
         "A股 市场 热点 板块",
+        "北向资金 流入",
     ],
     prompt_index_hint="分析上证、深证、创业板等各指数走势特点",
     has_market_stats=True,

@@ -3,18 +3,24 @@
 data_provider/us_index_mapping.py 的单元测试
 """
 import unittest
-import sys
+import importlib.util
 import os
 
-# 确保能导入 data_provider 模块（直接导入避免加载重量级依赖）
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data_provider')))
-
-from us_index_mapping import (
-    is_us_index_code,
-    is_us_stock_code,
-    get_us_index_yf_symbol,
-    US_INDEX_MAPPING,
+# Load data_provider/us_index_mapping.py directly by file path. A sys.path
+# insert of data_provider/ would shadow the pip `akshare` package with the
+# local data_provider/akshare/ dir and break every later `import akshare`.
+_spec = importlib.util.spec_from_file_location(
+    "_us_index_mapping_under_test",
+    os.path.join(os.path.dirname(__file__), '..', 'data_provider',
+                 'us_index_mapping.py'),
 )
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+
+is_us_index_code = _mod.is_us_index_code
+is_us_stock_code = _mod.is_us_stock_code
+get_us_index_yf_symbol = _mod.get_us_index_yf_symbol
+US_INDEX_MAPPING = _mod.US_INDEX_MAPPING
 
 
 class TestIsUsIndexCode(unittest.TestCase):

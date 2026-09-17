@@ -174,6 +174,20 @@ def parse_arguments() -> argparse.Namespace:
         help='仅运行 AI 智能选股（跳过个股分析和大盘复盘）'
     )
 
+    parser.add_argument(
+        '--review-version',
+        type=str,
+        default=None,
+        choices=['v1', 'v2'],
+        help='复盘版本: v1=标准, v2=四步式深度复盘 (也可通过 REVIEW_VERSION 环境变量设置)'
+    )
+
+    parser.add_argument(
+        '--weekly-review',
+        action='store_true',
+        help='运行周度复盘分析'
+    )
+
     return parser.parse_args()
 
 

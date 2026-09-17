@@ -34,6 +34,7 @@ def run_market_review(
     merge_notification: bool = False,
     override_region: Optional[str] = None,
     use_enhanced_analyzer: bool = True,
+    review_version: str = "",
 ) -> Optional[str]:
     """
     执行大盘复盘分析
@@ -46,6 +47,7 @@ def run_market_review(
         merge_notification: 是否合并推送（跳过本次推送，由 main 层合并个股+大盘后统一发送，Issue #190）
         override_region: 覆盖 config 的 market_review_region（Issue #373 交易日过滤后有效子集）
         use_enhanced_analyzer: 是否使用增强版分析器（适合公众号发布）
+        review_version: 复盘版本 "" / "v1" = 原有流程, "v2" = 四步式深度复盘
 
     Returns:
         复盘报告文本
@@ -60,7 +62,27 @@ def run_market_review(
     if region not in ('cn', 'us', 'both'):
         region = 'cn'
 
+    # 确定复盘版本: 优先显式参数, 其次环境变量
+    effective_version = review_version or getattr(config, 'review_version', '') or ''
+    if not effective_version:
+        import os
+        effective_version = os.getenv('REVIEW_VERSION', 'v1')
+    effective_version = effective_version.strip().lower()
+
     try:
+        # V2 四步式深度复盘
+        if effective_version == 'v2':
+            logger.info("使用 V2 四步式深度复盘流程")
+            return _run_v2_review(
+                notifier=notifier,
+                analyzer=analyzer,
+                search_service=search_service,
+                send_notification=send_notification,
+                merge_notification=merge_notification,
+                region=region,
+            )
+
+        # V1 原有流程
         # 根据配置选择使用增强版分析器还是标准分析器
         config = get_config()
         use_enhanced = use_enhanced_analyzer and getattr(config, 'use_enhanced_market_review', True)
@@ -181,4 +203,57 @@ def run_market_review(
     except Exception as e:
         logger.error(f"大盘复盘分析失败: {e}")
     
+    return None
+
+
+def _run_v2_review(
+    notifier: NotificationService,
+    analyzer,
+    search_service,
+    send_notification: bool,
+    merge_notification: bool,
+    region: str,
+) -> Optional[str]:
+    """V2 四步式深度复盘入口.
+
+    V2 仅支持 cn 区域（A 股特有涨停/炸板/北向资金数据）。
+    us/both 区域回退到 V1 增强版流程。
+    """
+    if region in ('us', 'both'):
+        logger.info(f"[V2] region={region} 不支持 V2，回退到 V1 增强版")
+        # 回退到 V1 流程
+        return None
+
+    # V2 仅 A 股
+    v2_analyzer = EnhancedMarketAnalyzer(
+        search_service=search_service,
+        analyzer=analyzer,
+        region='cn',
+    )
+    logger.info("[V2] 生成 V2 四步式 A 股深度复盘...")
+    review_report = v2_analyzer.run_daily_review_v2()
+
+    if review_report:
+        date_str = datetime.now().strftime('%Y%m%d')
+        report_filename = f"market_review_v2_{date_str}.md"
+        filepath = notifier.save_report_to_file(
+            f"# 🎯 深度复盘 (V2)\n\n{review_report}",
+            report_filename,
+        )
+        logger.info(f"[V2] 报告已保存: {filepath}")
+
+        if merge_notification and send_notification:
+            logger.info("[V2] 合并推送模式：跳过单独推送")
+        elif send_notification and notifier.is_available():
+            report_content = f"🎯 深度复盘 (V2)\n\n{review_report}"
+            success = notifier.send(report_content, email_send_to_all=True)
+            if success:
+                logger.info("[V2] 复盘推送成功")
+            else:
+                logger.warning("[V2] 复盘推送失败")
+        elif not send_notification:
+            logger.info("[V2] 已跳过推送通知 (--no-notify)")
+
+        return review_report
+
     return None
