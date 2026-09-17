@@ -264,6 +264,11 @@ class ScreenedStock:
     resonance: str = ""
     # SW L1 industry name (best-effort; empty when data source missing it).
     industry: str = ""
+    # Limit-up pullback extras (default 0/"" for all other strategies):
+    # deeper-pullback add-on slot and the anchor limit-up event metadata.
+    secondary_buy: float = 0.0
+    limit_up_date: str = ""          # YYYYMMDD anchor day
+    setup: str = ""                  # pattern name, e.g. "回踩10日线"
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -288,6 +293,12 @@ class ScreenedStock:
             d["take_profit_2_rule"] = self.take_profit_2_rule
             d["position_pct"] = round(self.position_pct, 3)
             d["risk_reward"] = round(self.risk_reward, 2)
+        if self.secondary_buy > 0:
+            d["secondary_buy"] = round(self.secondary_buy, 3)
+        if self.limit_up_date:
+            d["limit_up_date"] = self.limit_up_date
+        if self.setup:
+            d["setup"] = self.setup
         if self.resonance:
             d["resonance"] = self.resonance
         return d
@@ -335,6 +346,9 @@ class StockPick:
     risk_reward: float = 0.0
     strategies: List[str] = field(default_factory=list)
     resonance: str = ""
+    secondary_buy: float = 0.0
+    limit_up_date: str = ""
+    setup: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -349,6 +363,12 @@ class StockPick:
             d["take_profit_2_rule"] = self.take_profit_2_rule
             d["position_pct"] = round(self.position_pct, 3)
             d["risk_reward"] = round(self.risk_reward, 2)
+        if self.secondary_buy > 0:
+            d["secondary_buy"] = round(self.secondary_buy, 3)
+        if self.limit_up_date:
+            d["limit_up_date"] = self.limit_up_date
+        if self.setup:
+            d["setup"] = self.setup
         if self.strategies:
             d["strategies"] = self.strategies
         if self.resonance:

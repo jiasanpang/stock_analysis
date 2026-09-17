@@ -26,6 +26,10 @@ from src.services.picker import (
     get_tushare_api,
     ScreenedStock,
 )
+from src.services.limit_up_rules import (
+    lup_exit_enabled,
+    simulate_limit_up_pullback_trade,
+)
 from src.services.trade_levels import (
     DEFAULT_SLIPPAGE_PCT,
     LIMIT_UP_KCCY,
@@ -204,6 +208,8 @@ class PickerBacktestService:
         strategy_id: str = "buy_pullback",
         stop_loss_pct: float = STOP_LOSS_PCT,    # kept for backward compat (unused)
         take_profit_pct: float = TAKE_PROFIT_PCT,
+        structural_stop: float = 0.0,
+        secondary_buy: float = 0.0,
     ) -> Dict[str, Any]:
         """Fetch daily data and simulate the forward trade with the unified
         trade_levels engine (same rules as production picker / analyzer).
@@ -214,6 +220,10 @@ class PickerBacktestService:
         stop_loss_pct/take_profit_pct kwargs are kept only for backward-compat
         with older callers; the actual exits are governed by
         trade_levels.evaluate_trailing_exit.
+
+        structural_stop/secondary_buy come from the pick's TradeLevels and
+        enable the limit-up-pullback staged-exit simulator (Step 5 of the
+        涨停回踩买入法 rollout) when LUP_EXIT is on.
         """
         try:
             start_dt = pd.Timestamp(trade_date) - pd.Timedelta(days=45)
@@ -236,6 +246,7 @@ class PickerBacktestService:
             close_col = next((c for c in ["close", "收盘"] if c in df.columns), None)
             high_col = next((c for c in ["high", "最高"] if c in df.columns), None)
             low_col = next((c for c in ["low", "最低"] if c in df.columns), None)
+            open_col = next((c for c in ["open", "开盘"] if c in df.columns), None)
             pct_col = next((c for c in ["pct_chg", "涨跌幅"] if c in df.columns), None)
             if close_col is None:
                 return {}
@@ -322,6 +333,8 @@ class PickerBacktestService:
                 }
                 if "atr" in df.columns and pd.notna(row.get("atr")):
                     bar["atr"] = float(row["atr"])
+                if open_col and pd.notna(row.get(open_col)):
+                    bar["open"] = float(row[open_col])
                 if pct_col and pd.notna(row.get(pct_col)):
                     bar["pct_chg"] = float(row[pct_col])
                 bars.append(bar)
@@ -343,6 +356,27 @@ class PickerBacktestService:
                     hard_stop_pct = float(os.environ.get("BUY_PULLBACK_HARD_STOP_PCT", "0"))
                 except ValueError:
                     hard_stop_pct = 0.0
+            # 涨停回踩 staged-exit simulator (structural stop + secondary
+            # add-on + 10% trim/MA10 trail). Only for LUP-flavored picks that
+            # carry real TradeLevels; falls through to the legacy engine
+            # otherwise or when LUP_EXIT=0.
+            if (
+                strategy_id == "buy_pullback"
+                and structural_stop > 0
+                and lup_exit_enabled()
+            ):
+                sim = simulate_limit_up_pullback_trade(
+                    entry_price=entry_price,
+                    stop_price=structural_stop,
+                    secondary_buy=secondary_buy,
+                    bars=bars,
+                    apply_slippage=True,
+                    apply_limit_up_filter=True,
+                    is_kc_cy=is_kc_cy,
+                )
+                if sim.get("skipped"):
+                    return {}
+                return sim
             sim = simulate_forward_trade(
                 strategy_id=strategy_id,
                 entry_price=entry_price,
@@ -529,6 +563,10 @@ class PickerBacktestService:
             _FORWARD_RETURNS_EXECUTOR.submit(
                 self._get_forward_return, s.code, trade_date, exit_date, s.price,
                 (s.strategies[0] if s.strategies else "buy_pullback"),
+                # limit_up_date marks picks from the 涨停回踩 engine; legacy
+                # buy_pullback picks must keep the trade_levels simulator.
+                structural_stop=s.stop_loss if s.limit_up_date else 0.0,
+                secondary_buy=s.secondary_buy if s.limit_up_date else 0.0,
             ): s
             for s in picks
         }

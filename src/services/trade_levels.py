@@ -343,6 +343,88 @@ def compute_trade_levels(
     )
 
 
+LUP_STOP_PCT = 0.04        # -4% 幅度止损（文档铁律，取代旧 6%/7%）
+LUP_CHASE_CAP_PCT = 1.08   # entry never > limit-up close * 1.08
+
+
+def compute_limit_up_pullback_levels(
+    *,
+    code: str = "",
+    current_price: float,
+    ma5: float = 0.0,
+    ma10: float = 0.0,
+    ma20: float = 0.0,
+    lu_open: float,
+    lu_low: float,
+    lu_close: float,
+    market_cap_yi: float = 0.0,
+) -> Optional[TradeLevels]:
+    """Trade levels for the limit-up pullback (涨停回踩) setup.
+
+    Anchored to the limit-up candle instead of fixed percentages:
+      ideal     = stabilisation zone (max(MA5, 涨停实体1/2)), capped by the
+                  chase boundary; 跌破涨停开盘价的事件由选股层直接淘汰.
+      stop      = max(涨停K最低价, ideal-4%) — 结构位与幅度位取先触发者.
+      tp1       = ideal * 1.10（卖出一半，锁定本金）.
+      expected  = max(涨停日收盘 * 1.10, ideal * 1.15) — 剩余仓位博弈前高突破.
+      secondary = 更深回踩加仓位（MA10/MA20 锚定，保持 <= ideal*0.98 UI 不变式）.
+
+    Returns ``None`` when the anchor candle or current price is invalid, or
+    when the geometry leaves no usable risk window.
+    """
+    if not _safe_pos(current_price, lu_open, lu_low, lu_close):
+        logger.debug("[trade_levels] %s LUP skipped: bad anchor", code)
+        return None
+    mid = (lu_open + lu_close) / 2.0
+
+    ideal = current_price
+    zone = max(ma5 if _safe_pos(ma5) else 0.0, mid)
+    if zone > 0 and ideal > zone:
+        ideal = zone
+    cap = lu_close * LUP_CHASE_CAP_PCT
+    if ideal > cap:
+        return None
+
+    stop = max(lu_low, ideal * (1 - LUP_STOP_PCT))
+    if stop >= ideal * 0.97:
+        # Structural + amplitude stops leave < 3% risk window — geometric
+        # dead zone (entry glued to the low); caller re-checks R/R anyway.
+        stop = min(lu_low, ideal * (1 - LUP_STOP_PCT))
+    if not stop < ideal:
+        return None
+
+    tp1 = ideal * 1.10
+    expected = max(lu_close * 1.10, ideal * 1.15)
+    risk = max(ideal - stop, 1e-6)
+    rr = (expected - ideal) / risk
+
+    base_pos = min(_base_position_pct(market_cap_yi), 0.15)
+    pos = min(_adjust_position_by_rr(base_pos, rr), 0.15)  # 单票≤15% 铁律
+    secondary = _pullback_secondary(ideal, ma10, ma20)
+    if secondary <= stop:
+        secondary = 0.0
+
+    return TradeLevels(
+        ideal_buy=ideal, secondary_buy=secondary,
+        stop_loss=stop, take_profit_1=tp1,
+        take_profit_2_rule=(
+            "+10% 卖出一半；剩余跟踪 MA10 或自峰值回撤 2.5 倍日波幅清仓；"
+            "无法突破涨停日收盘（前高）则清仓；放量长上影/天量滞涨直接全清"
+        ),
+        expected_target=expected, position_pct=pos, risk_reward=rr,
+        stage_rules={
+            "entry_split": "企稳确认日尾盘 4 成底仓；次日放量站上 5 日线加 2 成（总仓位 ≤6 成、单票 ≤15% 资金）",
+            "tp_half": "浮盈 +10% 卖出一半",
+            "trail": "剩余仓位跌破 MA10 或自峰值回撤 2.5×ATR 清仓",
+            "prior_high": "未能突破涨停日收盘价（前高）→ 清仓",
+            "top_signal": "放量长上影 / 天量滞涨 / 高位十字星 → 无视涨幅全清",
+            "time_stop": "回调超 7 个交易日未拉升，或买入后 5 日无预期上涨 → 清仓",
+            "trend_break": "收盘跌破 20 日均线且 3 日未收回 → 趋势走坏离场",
+        },
+        notes=["limit_up_pullback", f"anchor_low={lu_low:.3f}"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Trailing exit evaluation
 # ---------------------------------------------------------------------------

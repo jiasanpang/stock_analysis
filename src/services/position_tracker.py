@@ -24,6 +24,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from src.services.limit_up_rules import (
+    evaluate_limit_up_pullback_exit,
+    lup_exit_enabled,
+)
 from src.services.trade_levels import evaluate_trailing_exit
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,56 @@ def _stage_note(profit_pct: float, strategy_id: str) -> str:
     return "成本下方，关注止损位"
 
 
+def _lup_stage_note(profit_pct: float, trimmed: bool) -> str:
+    """Stage hint aligned with the 涨停回踩 staged-exit rules."""
+    if trimmed:
+        return "已减半止盈，剩余仓位按 MA10 / ATR×2.5 跟踪，回吐 <+5% 清仓"
+    if profit_pct >= 10.0:
+        return "触及 +10%：分批止盈一半，止损上移至成本"
+    if profit_pct >= 0.0:
+        return "持有观察，+10% 分批止盈；破涨停最低价/-4% 止损"
+    return "成本下方，严守结构止损位（涨停最低价）"
+
+
+def _evaluate_lup_holding(
+    *,
+    code: str,
+    name: str,
+    entry_price: float,
+    current_price: float,
+    profit_pct: float,
+    ma10: float,
+    ma20: float,
+    atr: float,
+    holding_days: int,
+    peak_price: Optional[float],
+    trimmed: bool,
+) -> HoldingDecision:
+    """涨停回踩 path: staged trim + trailing rules from limit_up_rules."""
+    verdict, reason = evaluate_limit_up_pullback_exit(
+        entry_price=entry_price,
+        current_price=current_price,
+        ma10=ma10, ma20=ma20, atr=atr,
+        holding_days=holding_days,
+        peak_price=peak_price,
+        trimmed=trimmed,
+    )
+    if verdict == "exit":
+        should_exit, action = True, "清仓"
+    elif verdict == "trim":
+        should_exit, action = False, "止盈 1/2 + 止损上移至成本"
+    else:
+        should_exit, action = False, "持有"
+    return HoldingDecision(
+        code=code, name=name,
+        entry_price=entry_price, current_price=current_price,
+        profit_pct=profit_pct,
+        should_exit=should_exit, exit_reason=reason,
+        action=action,
+        stage_note=_lup_stage_note(profit_pct, trimmed),
+    )
+
+
 def evaluate_holding(
     *,
     code: str,
@@ -89,10 +143,13 @@ def evaluate_holding(
     atr: float = 0.0,
     holding_days: int = 0,
     peak_price: Optional[float] = None,
+    trimmed: bool = False,
 ) -> HoldingDecision:
     """Evaluate whether a single held position should be exited or trimmed.
 
-    Wraps `trade_levels.evaluate_trailing_exit` and adds stage-aware action
+    For ``buy_pullback`` (涨停回踩 engine, LUP_EXIT=1) this routes to
+    ``limit_up_rules.evaluate_limit_up_pullback_exit``; all other strategies
+    wrap ``trade_levels.evaluate_trailing_exit``. Adds stage-aware action
     classification (持有 / 减仓 / 清仓).
     """
     if entry_price <= 0 or current_price <= 0:
@@ -103,6 +160,16 @@ def evaluate_holding(
         )
 
     profit_pct = (current_price - entry_price) / entry_price * 100.0
+
+    if strategy_id == "buy_pullback" and lup_exit_enabled():
+        return _evaluate_lup_holding(
+            code=code, name=name,
+            entry_price=entry_price, current_price=current_price,
+            profit_pct=profit_pct,
+            ma10=ma10, ma20=ma20, atr=atr,
+            holding_days=holding_days, peak_price=peak_price,
+            trimmed=trimmed,
+        )
 
     should_exit, reason = evaluate_trailing_exit(
         strategy_id=strategy_id,

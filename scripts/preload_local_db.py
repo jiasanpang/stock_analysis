@@ -44,14 +44,16 @@ def main() -> int:
     parser.add_argument(
         "--tables",
         default="all",
-        help="comma list: daily,daily_basic,moneyflow,index,top_list,hsgt,basic,cal,all",
+        help="comma list: daily,daily_basic,moneyflow,index,top_list,limit_list,"
+             "hsgt,basic,cal,all",
     )
     parser.add_argument("--sleep", type=float, default=0.0,
                         help="seconds to sleep between Tushare calls (rate limit)")
     args = parser.parse_args()
 
     requested = (
-        {"daily", "daily_basic", "moneyflow", "index", "top_list", "hsgt", "basic", "cal"}
+        {"daily", "daily_basic", "moneyflow", "index", "top_list", "limit_list",
+         "hsgt", "basic", "cal"}
         if args.tables == "all"
         else {t.strip() for t in args.tables.split(",") if t.strip()}
     )
@@ -96,6 +98,11 @@ def main() -> int:
     if "top_list" in requested:
         logger.info("=== sync top_list ===")
         r = db.sync_top_list(args.start, args.end)
+        logger.info("  rows=%d errors=%d %.1fs", r.rows_added, r.errors, r.elapsed_s)
+
+    if "limit_list" in requested:
+        logger.info("=== sync limit_list_d ===")
+        r = db.sync_limit_list(args.start, args.end)
         logger.info("  rows=%d errors=%d %.1fs", r.rows_added, r.errors, r.elapsed_s)
 
     if "hsgt" in requested:

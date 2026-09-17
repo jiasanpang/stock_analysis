@@ -545,11 +545,14 @@ def merge_candidates_by_code(candidates_per_strategy: Dict[str, List[ScreenedSto
                     strategies=[strategy_id],
                     industry=s.industry,
                     ideal_buy=s.ideal_buy,
+                    secondary_buy=getattr(s, "secondary_buy", 0.0),
                     stop_loss=s.stop_loss,
                     take_profit_1=s.take_profit_1,
                     take_profit_2_rule=s.take_profit_2_rule,
                     position_pct=s.position_pct,
                     risk_reward=s.risk_reward,
+                    limit_up_date=getattr(s, "limit_up_date", ""),
+                    setup=getattr(s, "setup", ""),
                 )
             else:
                 strategies = getattr(existing, "strategies", []) or []

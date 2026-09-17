@@ -34,6 +34,8 @@ class _PipelineMixin:
         Uses multi-strategy when picker_strategies has multiple entries."""
         stats = ScreenStats()
         self._gated_strategies = []
+        from .limit_up_pullback import limit_up_pullback_enabled
+        _lup_on = limit_up_pullback_enabled()
         self._as_of_date = self._trade_date_to_iso(trade_date) if trade_date else None
         # Push as_of_date to the caching manager so its LocalStockDB-backed
         # window resolution doesn't peek into the future during backtests.
@@ -56,15 +58,18 @@ class _PipelineMixin:
             import os as _os
             _bypass_guard = bool(_os.environ.get("EOD_VARIANT", "").strip())
             # buy_pullback regime gate: requires SSE > MA20 by an explicit
-            # threshold (default +2.0%) to avoid the 2025-11 -389% drawdown.
-            # +1% was too lenient — Nov had several days briefly above +1%
-            # that turned into losses. +2% requires confirmed uptrend.
+            # threshold to avoid the 2025-11 -389% drawdown.
+            # +2% was calibrated for the legacy cross-sectional chain; the LUP
+            # engine self-limits (structural stop + RR>=2 + 缩量确认), and the
+            # +2% gate cut 47/65 backtest days for no PF benefit. Under LUP the
+            # default drops to -2% (stop only when SSE is deeply below MA20).
             # Toggle via BUY_PULLBACK_REQUIRE_STRONG (default on).
-            # Threshold via BUY_PULLBACK_GATE_PCT (default 2.0).
+            # Threshold via BUY_PULLBACK_GATE_PCT (default: -2.0 LUP / 2.0 legacy).
+            _default_gate = "-2.0" if _lup_on else "2.0"
             try:
-                _gate_pct = float(_os.environ.get("BUY_PULLBACK_GATE_PCT", "2.0"))
+                _gate_pct = float(_os.environ.get("BUY_PULLBACK_GATE_PCT", _default_gate))
             except ValueError:
-                _gate_pct = 2.0
+                _gate_pct = float(_default_gate)
             if (
                 _os.environ.get("BUY_PULLBACK_REQUIRE_STRONG", "1") == "1"
                 and "buy_pullback" in self._picker_strategies
@@ -253,6 +258,9 @@ class _PipelineMixin:
                         # blocks below.
                         if strategy_id in ("small_cap", "bottom_reversal", "reversal_breakout"):
                             continue
+                        if strategy_id == "buy_pullback" and _lup_on:
+                            # 涨停回踩引擎（专用 dispatch，见下方）接管 buy_pullback
+                            continue
                         params = get_strategy_params(strategy_id)
 
                         # Apply sector filter for applicable strategies
@@ -365,6 +373,23 @@ class _PipelineMixin:
                 if rb_cands:
                     candidates_per_strategy["reversal_breakout"] = rb_cands
                     logger.info(f"[Screener] reversal_breakout: {len(rb_cands)} candidates")
+
+            # --- buy_pullback (涨停回踩引擎): event-driven. Anchor universe
+            # is the recent limit-up pool (tushare limit_list_d, daily-bar
+            # derived fallback); five pullback patterns confirm the entry.
+            # Toggle back to the legacy trend-pullback chain via LUP_ENABLED=0.
+            if "buy_pullback" in self._picker_strategies and _lup_on:
+                td_yyyymmdd = trade_date if trade_date else (
+                    self._as_of_date.replace("-", "") if self._as_of_date else None
+                )
+                lup_cands = self._screen_limit_up_pullback(
+                    spot_df=df,
+                    trade_date_yyyymmdd=td_yyyymmdd,
+                    sector_strong_codes=_sector_strong_codes,
+                )
+                if lup_cands:
+                    candidates_per_strategy["buy_pullback"] = lup_cands
+                    logger.info(f"[Screener] buy_pullback(涨停回踩): {len(lup_cands)} candidates")
 
             if not candidates_per_strategy:
                 stats.final_pool = 0

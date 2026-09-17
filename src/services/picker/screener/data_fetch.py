@@ -235,6 +235,9 @@ class _DataFetchMixin:
             # Compute 60-day change
             df_daily = self._add_tushare_60d_change(df_daily, tushare_api, trade_date)
 
+            # Join MA5/MA10/MA20/ATR_20 (required by trade_levels anchoring)
+            df_daily = self._add_tushare_ma_atr(df_daily, tushare_api, trade_date)
+
             # Overlay realtime data
             if not is_historical:
                 try:
@@ -538,6 +541,76 @@ class _DataFetchMixin:
         except Exception as e:
             logger.warning(f"[Screener] Failed to add 60d change: {e}")
             df_daily["60日涨跌幅"] = 0
+        return df_daily
+
+    def _add_tushare_ma_atr(
+        self, df_daily: pd.DataFrame, tushare_api, trade_date: str
+    ) -> pd.DataFrame:
+        """Join MA5/MA10/MA20/ATR_20 computed from bulk daily bars.
+
+        trade_levels anchors ideal_buy/secondary_buy/stop on these columns;
+        without them every price level silently degrades to fixed constants.
+        Disabled with env ``PICKER_MA_JOIN=0``.
+        """
+        if os.environ.get("PICKER_MA_JOIN", "1") != "1":
+            return df_daily
+        try:
+            if "ts_code" not in df_daily.columns:
+                return df_daily
+            start = (pd.Timestamp(trade_date) - pd.Timedelta(days=60)).strftime("%Y%m%d")
+            df_cal = tushare_api.trade_cal(exchange="SSE", start_date=start, end_date=trade_date)
+            if df_cal is None or df_cal.empty:
+                logger.warning("[Screener] trade_cal empty, MA/ATR join skipped")
+                return df_daily
+            df_cal.columns = [c.lower() for c in df_cal.columns]
+            sessions = df_cal[df_cal["is_open"] == 1]["cal_date"].sort_values().tolist()
+            sessions = [s for s in sessions if s <= trade_date][-21:]
+            if len(sessions) < 5:
+                return df_daily
+
+            frames: List[pd.DataFrame] = []
+            for td in sessions:
+                try:
+                    d = tushare_api.daily(
+                        trade_date=td, fields="ts_code,close,high,low,pre_close"
+                    )
+                    if d is not None and not d.empty:
+                        d.columns = [c.lower() for c in d.columns]
+                        d["trade_date"] = td
+                        frames.append(d)
+                except Exception as e:
+                    logger.debug("[Screener] MA/ATR history fetch %s failed: %s", td, e)
+            if not frames:
+                return df_daily
+
+            hist = pd.concat(frames, ignore_index=True)
+            for col in ("close", "high", "low", "pre_close"):
+                hist[col] = pd.to_numeric(hist[col], errors="coerce")
+            hist = hist.sort_values(["ts_code", "trade_date"], kind="stable")
+            g = hist.groupby("ts_code", sort=False)
+            hist["_ma5"] = g["close"].transform(lambda s: s.rolling(5).mean())
+            hist["_ma10"] = g["close"].transform(lambda s: s.rolling(10).mean())
+            hist["_ma20"] = g["close"].transform(lambda s: s.rolling(20).mean())
+            tr = pd.concat([
+                hist["high"] - hist["low"],
+                (hist["high"] - hist["pre_close"]).abs(),
+                (hist["low"] - hist["pre_close"]).abs(),
+            ], axis=1).max(axis=1)
+            hist["_tr"] = tr
+            hist["_atr20"] = hist.groupby("ts_code", sort=False)["_tr"].transform(
+                lambda s: s.rolling(20).mean()
+            )
+
+            latest = hist.groupby("ts_code", sort=False).tail(1).set_index("ts_code")
+            for src_col, dst_col in (
+                ("_ma5", "MA5"), ("_ma10", "MA10"),
+                ("_ma20", "MA20"), ("_atr20", "ATR_20"),
+            ):
+                df_daily[dst_col] = df_daily["ts_code"].map(latest[src_col])
+            filled = int(df_daily["MA20"].notna().sum())
+            logger.info("[Screener] MA/ATR joined for %d/%d stocks", filled, len(df_daily))
+        except Exception as e:
+            logger.warning(f"[Screener] Failed to add MA/ATR columns: {e}")
         return df_daily
 
     @staticmethod

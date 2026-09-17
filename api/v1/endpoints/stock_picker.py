@@ -58,6 +58,9 @@ class ScreenedStockResponse(BaseModel):
     position_pct: Optional[float] = None
     risk_reward: Optional[float] = None
     resonance: Optional[str] = None
+    secondary_buy: Optional[float] = None
+    limit_up_date: Optional[str] = None
+    setup: Optional[str] = None
 
 
 class PickRecommendation(BaseModel):
@@ -77,6 +80,9 @@ class PickRecommendation(BaseModel):
     risk_reward: Optional[float] = None
     strategies: Optional[List[str]] = None
     resonance: Optional[str] = None   # "" / "double" / "triple"
+    secondary_buy: Optional[float] = None
+    limit_up_date: Optional[str] = None
+    setup: Optional[str] = None
 
 
 class PickerRecommendRequest(BaseModel):

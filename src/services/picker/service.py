@@ -5,9 +5,13 @@ StockPickerService - Main coordinator for the two-stage stock picking pipeline.
 Stage 1: Quantitative screening (StockScreener)
 Stage 1.5: Real-time filtering
 Stage 2: AI selection (AISelector)
+
+Set PICKER_DISABLE_AI=1 to skip all news-search / LLM calls and receive
+the pure rule-based (tushare quantitative) output of Stage 1/1.5.
 """
 
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -51,10 +55,16 @@ class StockPickerService:
         )
         self._search_service: Optional[SearchService] = None
         self._analyzer = None
+        # When true the pipeline stops after Stage 1.5: no search service,
+        # no LLM, rule-based reasons only (pure tushare data path).
+        self._disable_ai = os.environ.get("PICKER_DISABLE_AI", "0") == "1"
         self._init_services()
 
     def _init_services(self):
         """Initialize search and LLM services."""
+        if self._disable_ai:
+            logger.info("[StockPicker] PICKER_DISABLE_AI=1: search/LLM services not initialized")
+            return
         self._search_service = SearchService(
             bocha_keys=self.config.bocha_api_keys,
             tavily_keys=self.config.tavily_api_keys,
@@ -67,6 +77,58 @@ class StockPickerService:
         )
         from src.analyzer import GeminiAnalyzer
         self._analyzer = GeminiAnalyzer(self.config)
+
+    @staticmethod
+    def _screened_to_pick(s: ScreenedStock) -> StockPick:
+        """Convert a Stage-1 candidate into a rule-based StockPick."""
+        reason = (
+            f"量化评分 {s.score:.1f}（换手率 {s.turnover_rate:.1f}%，"
+            f"涨跌 {s.change_pct:+.1f}%）"
+        )
+        risk_note = "仅量化筛选，未经 AI 深度分析"
+        limit_up_date = getattr(s, "limit_up_date", "")
+        setup = getattr(s, "setup", "")
+        if limit_up_date:
+            reason = f"{setup or '涨停回踩'}｜涨停日 {limit_up_date}｜{reason}"
+            risk_note = "涨停回踩量化规则选出，未叠加消息面判断"
+        return StockPick(
+            code=s.code,
+            name=s.name,
+            sector=getattr(s, "sector", ""),
+            reason=reason,
+            catalyst="",
+            attention="medium",
+            risk_note=risk_note,
+            ideal_buy=s.ideal_buy,
+            stop_loss=s.stop_loss,
+            take_profit_1=s.take_profit_1,
+            take_profit_2_rule=s.take_profit_2_rule,
+            position_pct=s.position_pct,
+            risk_reward=s.risk_reward,
+            strategies=list(s.strategies or []),
+            resonance=s.resonance,
+            secondary_buy=getattr(s, "secondary_buy", 0.0),
+            limit_up_date=limit_up_date,
+            setup=setup,
+        )
+
+    def _quant_only_result(
+        self,
+        result: PickerResult,
+        candidates: List[ScreenedStock],
+        start: float,
+        summary: str,
+        risk_warning: str,
+    ) -> PickerResult:
+        """Finalize the pipeline with Stage-1 candidates only (no LLM)."""
+        result.market_summary = summary
+        result.picks = [self._screened_to_pick(s) for s in candidates[:10]]
+        result.sectors_to_watch = []
+        result.risk_warning = risk_warning
+        result.generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+        result.success = True
+        result.elapsed_seconds = time.time() - start
+        return result
 
     def run(self) -> PickerResult:
         """Execute the full two-stage stock picking pipeline."""
@@ -118,6 +180,16 @@ class StockPickerService:
                 result.elapsed_seconds = time.time() - start
                 return result
 
+            # -- AI disabled: pure rule-based output --
+            if self._disable_ai:
+                logger.info("[StockPicker] AI disabled, finalizing with quant picks")
+                return self._quant_only_result(
+                    result, candidates, start,
+                    summary="AI 精筛已关闭（PICKER_DISABLE_AI=1），"
+                            "以下为量化筛选 + 涨停回踩买卖规则结果，仅供参考。",
+                    risk_warning="未经 AI 消息面交叉验证，请结合大盘环境控制仓位。",
+                )
+
             # -- Stage 2: Gather market intel + AI selection --
             logger.info("[StockPicker] === Stage 2: AI Selection ===")
             ai_selector = AISelector(
@@ -146,36 +218,11 @@ class StockPickerService:
                     "[StockPicker] LLM unavailable, returning quantitative "
                     "screening results without AI analysis"
                 )
-                result.market_summary = (
-                    "AI 分析暂不可用（LLM 服务异常），以下为量化筛选结果，仅供参考。"
+                return self._quant_only_result(
+                    result, candidates, start,
+                    summary="AI 分析暂不可用（LLM 服务异常），以下为量化筛选结果，仅供参考。",
+                    risk_warning="LLM 服务异常，仅返回量化筛选结果，请谨慎参考。",
                 )
-                result.picks = [
-                    StockPick(
-                        code=s.code,
-                        name=s.name,
-                        sector=getattr(s, "sector", ""),
-                        reason=f"量化评分 {s.score:.1f}（换手率 {s.turnover_rate:.1f}%，"
-                               f"涨跌 {s.change_pct:+.1f}%）",
-                        catalyst="",
-                        attention="medium",
-                        risk_note="仅量化筛选，未经 AI 深度分析",
-                        ideal_buy=s.ideal_buy,
-                        stop_loss=s.stop_loss,
-                        take_profit_1=s.take_profit_1,
-                        take_profit_2_rule=s.take_profit_2_rule,
-                        position_pct=s.position_pct,
-                        risk_reward=s.risk_reward,
-                        strategies=list(s.strategies or []),
-                        resonance=s.resonance,
-                    )
-                    for s in candidates[:10]
-                ]
-                result.sectors_to_watch = []
-                result.risk_warning = "LLM 服务异常，仅返回量化筛选结果，请谨慎参考。"
-                result.generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
-                result.success = True
-                result.elapsed_seconds = time.time() - start
-                return result
 
             ai_selector.parse_result(llm_output, result)
 

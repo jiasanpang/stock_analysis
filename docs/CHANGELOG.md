@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Feat — 涨停回踩买入法引擎接管 buy_pullback（纯 tushare，LUP）
+
+- **新引擎** `src/services/picker/screener/limit_up_pullback.py`：事件驱动
+  涨停回踩选股。tushare `limit_list_d` 锚点池（缺权限时日线推导兜底）→
+  涨停日质检（红线否决 + 教科书区间加分，阈值经 4142 个真实涨停样本校准）→
+  5 日观察窗内五大形态确认（三阴不破阳/龙回头/回踩5日线/回踩10日线/假阴真阳）
+  → 结构化买卖点（`compute_limit_up_pullback_levels`）。
+- **卖出规则** `src/services/limit_up_rules.py`：+10% 减半仓 → MA10/ATR×2.5
+  移动止损 → 3 日无 +5% 时间止损 / 最长 3 天持仓（超短风格）；position_tracker
+  与回测器同步路由。
+- **MarketGuard 放宽**：LUP 下 `BUY_PULLBACK_GATE_PCT` 默认 +2% → **-2%**
+  （旧链路不变）。原 +2% 门控在回测中砍掉 47/65 个交易日且无 PF 收益。
+- **`PICKER_DISABLE_AI=1`**：Stage 2 跳过新闻/LLM，直出量化选股+买卖价位；
+  LLM 降级路径复用同一 `_quant_only_result`。
+- **观察池**：复盘 V2 `screen_watch_pool` 优先输出 LUP 观察池
+  （`limit_up_watch_candidates`），板块热度法降为兜底。
+- **Fix**：`merge_candidates_by_code` 丢失 `limit_up_date/secondary_buy/setup`
+  导致下游（回测出场路由、API 展示）静默回退旧链路；已随合并传递。
+- **回测重基线**（2026-02-02~05-15，65 交易日）：11 笔，WR 63.6%，
+  AvgRet +1.53%，**PF 2.31**，MDD 3.86%，+21.3% vs 基准 +5.5%。消融实验：
+  缩量红线放宽（0.6→0.8）召回 6 倍但 PF 0.95，维持默认。
+- 回滚：`LUP_ENABLED=0` 恢复旧横截面链路；`LUP_EXIT=0` 恢复旧卖出规则。
+
+### Feat — 复盘 V2：四步式深度复盘 + 周度复盘 + 持仓复盘
+
+- **V2 日报**（`--review-version v2`）：四步法结构（`src/core/market_review.py`
+  分流，`src/_review_v2_*` 类型与提示词），涨停梯队/北向数据经
+  `data_provider/akshare/limit_up.py` 采集。
+- **周度复盘** `src/core/weekly_review.py` + `--weekly-review` CLI +
+  `.github/workflows/weekly_review.yml`（每周六定时）。
+- **持仓复盘** `src/core/holdings_review.py`、**次日观察池**
+  `src/core/watch_pool.py`（LUP 观察池优先、板块热度兜底）。
+- 附带：修复 `test_us_index_mapping` 的 sys.path 污染（改为 importlib 按文件
+  加载，消除本地 `data_provider/akshare` 目录遮蔽 pip `akshare` 包）。
+
 ### Fixed — secondary_buy 与 ideal_buy 价格区间在报告 UI 重叠
 
 - `trade_levels._resolve_entry_anchor` 在 `buy_pullback` 策略下用

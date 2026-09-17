@@ -447,6 +447,9 @@ class AISelector:
                         pick.risk_reward = cand.risk_reward
                         pick.strategies = list(cand.strategies or [])
                         pick.resonance = cand.resonance
+                        pick.secondary_buy = getattr(cand, "secondary_buy", 0.0)
+                        pick.limit_up_date = getattr(cand, "limit_up_date", "")
+                        pick.setup = getattr(cand, "setup", "")
                     result.picks.append(pick)
 
             logger.info(f"[StockPicker] Parsed {len(result.picks)} stock picks")

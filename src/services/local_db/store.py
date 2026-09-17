@@ -51,7 +51,8 @@ DEFAULT_ROOT = Path(os.environ.get("STOCK_LOCAL_DB", "data/local_db"))
 PER_STOCK_TABLES = ("daily", "daily_basic", "moneyflow", "index_daily")
 
 # Single-file tables (unsharded; ranges queried via filters)
-SINGLE_TABLES = ("moneyflow_hsgt", "top_list", "stock_basic", "trade_cal")
+SINGLE_TABLES = ("moneyflow_hsgt", "top_list", "stock_basic", "trade_cal",
+                 "limit_list_d")
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +203,11 @@ class LocalStockDB:
         self, start_date: Optional[str] = None, end_date: Optional[str] = None
     ) -> pd.DataFrame:
         return self._read_single("top_list", start_date, end_date)
+
+    def get_limit_list(
+        self, start_date: Optional[str] = None, end_date: Optional[str] = None
+    ) -> pd.DataFrame:
+        return self._read_single("limit_list_d", start_date, end_date)
 
     def get_moneyflow_hsgt(
         self, start_date: Optional[str] = None, end_date: Optional[str] = None
@@ -419,6 +425,9 @@ class LocalStockDB:
 
     def sync_top_list(self, start_date: str, end_date: str) -> SyncReport:
         return self._sync_single_by_date("top_list", start_date, end_date)
+
+    def sync_limit_list(self, start_date: str, end_date: str) -> SyncReport:
+        return self._sync_single_by_date("limit_list_d", start_date, end_date)
 
     def sync_moneyflow_hsgt(self, start_date: str, end_date: str) -> SyncReport:
         return self._sync_single_by_date("moneyflow_hsgt", start_date, end_date)

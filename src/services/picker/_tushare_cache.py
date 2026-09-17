@@ -13,6 +13,7 @@ Cached methods:
   - sw_daily(trade_date=td, fields=...)
   - stock_basic(fields=...)         # cached forever, key=fields hash
   - top_list(trade_date=td)         # 龙虎榜
+  - limit_list_d(trade_date=td)     # 涨停池明细
   - trade_cal(exchange=..., start_date=..., end_date=...)
 
 Other methods pass through to the real api.
@@ -91,6 +92,8 @@ def _localdb_lookup(api: str, **kw) -> Optional[pd.DataFrame]:
                 return _project_fields(db.get_index_daily(ts_code, sd, ed), kw.get("fields"))
         if api == "top_list" and td:
             return _project_fields(db.get_top_list(td, td), kw.get("fields"))
+        if api == "limit_list_d" and td:
+            return _project_fields(db.get_limit_list(td, td), kw.get("fields"))
         if api == "stock_basic":
             return _project_fields(db.get_stock_basic(), kw.get("fields"))
         if api == "trade_cal":
@@ -228,6 +231,13 @@ class CachedTushareAPI:
         if td:
             return _get("top_list", td, lambda: self._api.top_list(**kw), localdb_kwargs=kw)
         return self._api.top_list(**kw)
+
+    def limit_list_d(self, **kw):
+        td = kw.get("trade_date")
+        if td:
+            return _get("limit_list_d", td,
+                        lambda: self._api.limit_list_d(**kw), localdb_kwargs=kw)
+        return self._api.limit_list_d(**kw)
 
     def trade_cal(self, **kw):
         ex = kw.get("exchange", "SSE")
