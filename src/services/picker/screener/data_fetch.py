@@ -21,9 +21,6 @@ import pandas as pd
 from src._concurrency import get_executor, run_with_timeout
 from src.config import get_config
 from src.services.picker.constants import (
-    AMOUNT_MIN_LARGE_CAP,
-    AMOUNT_MIN_SMALL_CAP,
-    MARKET_CAP_TIER_YI,
     _resolve_fallback_trade_date,
     get_tushare_api,
 )

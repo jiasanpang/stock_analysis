@@ -1,5 +1,9 @@
 # Small-Cap Factor — Final Report
 
+> **[已下线 2026-09-20]** 本文是历史研究记录。据此实现过的小市值（small_cap）与
+> 反转突破（reversal_breakout）策略已于 commit bfb239c 整体移除，文中指向
+> `screener/small_cap.py` 等文件的实现清单不再有效，仅作研究存档，勿按此施工。
+
 **研究时间**: 2026-05-14 ~ 2026-05-16
 **回测窗口**: 2020-01-09 ~ 2026-05-09（6.3 年）
 **数据源**: LocalDB（Tushare 全市场 daily + daily_basic + index_daily）
