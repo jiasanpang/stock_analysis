@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Feat — LUP 第六形态"缩量横盘"兜底开关（默认关闭）
+
+- `LUP_ALLOW_CONSOLIDATION=1` 启用：过红线与观察否决、但几何上不像五大
+  经典形态的锚点，若缩量 ≤ `LUP_CONSOL_VOL_MAX`(0.45)、收阳且站上涨停
+  实体中轴，按"缩量横盘"(强度 66) 确认出票。
+- 回测消融：以 0.6 同标准放宽召回会使 PF 2.73→1.16（32 笔/WR 40.6%）；
+  收紧到 0.45 标准在 65 交易日窗口内零新增出票、与基准完全一致，
+  故做成默认关闭的兜底开关，保留手动开启能力。
+
 ### Refactor — 选股策略精简：下线 reversal_breakout 与 small_cap
 
 - 删除 `reversal_breakout`（反转突破）与 `small_cap`（小市值）两个策略：

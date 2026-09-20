@@ -66,6 +66,8 @@ _DEFAULTS = {
     "DRAGON_MIN_RISE": 50.0,    # first-wave gain %
     "DRAGON_MAX_AGE": 10,       # second-wave window is longer
     "CHASE_CAP_PCT": 8.0,       # entry not more than this above limit-up close
+    "ALLOW_CONSOLIDATION": 0.0, # 1 = 第六形态"缩量横盘"兜底（先回测再默认开）
+    "CONSOL_VOL_MAX": 0.45,     # 兜底形态的缩量上限（比五形态 0.6 更严）
     "TOP_N": 20,
 }
 
@@ -75,6 +77,7 @@ _PATTERN_STRENGTH = {
     "回踩5日线": 85.0,
     "回踩10日线": 82.0,
     "假阴真阳": 75.0,
+    "缩量横盘": 66.0,
 }
 
 _PATTERN_ENV_ID = {
@@ -83,6 +86,7 @@ _PATTERN_ENV_ID = {
     "回踩5日线": "MA5",
     "回踩10日线": "MA10",
     "假阴真阳": "FAKE_YIN",
+    "缩量横盘": "CONSOLIDATION",
 }
 
 
@@ -623,6 +627,18 @@ class _LimitUpPullbackMixin:
                 return name, "ok"
             if name == "龙回头" and 3 <= age <= int(_envf("DRAGON_MAX_AGE")) and fn():
                 return name, "ok"
+
+        # 第六形态兜底"缩量横盘"：过了全部红线与观察否决、但几何上不像
+        # 五大经典形态的锚点（如横住不碰均线的小阳/十字）。兜底比五形态
+        # 更严：缩量 ≤ CONSOL_VOL_MAX、当日不低开低走、站上涨停实体中轴，
+        # 否则宁缺毋滥（0.6 同标准放宽实测 PF 2.73→1.16）。
+        if (_envf("ALLOW_CONSOLIDATION") >= 1
+                and _pattern_enabled("缩量横盘")
+                and 2 <= age <= int(_envf("OBS_WINDOW"))
+                and shrink <= _envf("CONSOL_VOL_MAX")
+                and c[i_t] >= mid
+                and c[i_t] >= o[i_t]):
+            return "缩量横盘", "ok"
         return None, "no_pattern"
 
     @staticmethod
