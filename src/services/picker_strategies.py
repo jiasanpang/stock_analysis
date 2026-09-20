@@ -2,13 +2,15 @@
 """
 Picker strategies: each strategy has its own screening logic and fixed params.
 
-Strategies: buy_pullback, bottom_reversal, reversal_breakout, small_cap
+Strategies: buy_pullback, bottom_reversal
 No intensity modes (defensive/balanced/offensive) — each strategy has one set of params.
 
 Removed strategies (kept here for context — see docs/CHANGELOG.md):
 - eod_buyback (May 2026): 2yr OOS PF=0.58, negative alpha vs CSI300 B&H.
 - breakout    (May 2026): two-window backtest PF 0.71/0.78, total return
   -64% vs benchmark +24% in 2025-05~2026-05; A/B tuning saturated at PF<1.
+- reversal_breakout / small_cap (Sep 2026): no longer used by the primary
+  trader; 涨停回踩 (LUP) now carries the buy_pullback strategy.
 """
 
 from dataclasses import dataclass
@@ -35,14 +37,12 @@ from src.services.trade_levels import (
 # Strategy IDs (used in config)
 BUY_PULLBACK = "buy_pullback"
 BOTTOM_REVERSAL = "bottom_reversal"
-REVERSAL_BREAKOUT = "reversal_breakout"  # right-side breakout of a deep base
-SMALL_CAP = "small_cap"  # cross-sectional smallest-market-cap factor
 
 # Default strategy when PICKER_STRATEGIES not set
 DEFAULT_STRATEGIES = [BUY_PULLBACK]
 
 # All available strategies
-ALL_STRATEGIES = [BUY_PULLBACK, BOTTOM_REVERSAL, REVERSAL_BREAKOUT, SMALL_CAP]
+ALL_STRATEGIES = [BUY_PULLBACK, BOTTOM_REVERSAL]
 
 def is_mainboard_stock(code: str) -> bool:
     """Check if a stock is listed on the main board (SSE/SZSE main).
@@ -66,8 +66,6 @@ _MID_CAP_MAX = 500e8
 STRATEGY_DISPLAY_NAMES: Dict[str, str] = {
     BUY_PULLBACK: "买回踩",
     BOTTOM_REVERSAL: "底部反转",
-    REVERSAL_BREAKOUT: "反转突破",
-    SMALL_CAP: "小市值",
 }
 
 

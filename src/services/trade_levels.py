@@ -11,7 +11,7 @@ Single source of truth for entry/stop/target levels across:
 Design principles:
 1. Numerical layer is owned by code, not LLM. LLM only explains, never invents
    stop/take-profit numbers.
-2. Strategy-aware: each strategy (buy_pullback / bottom_reversal / reversal_breakout)
+2. Strategy-aware: each strategy (buy_pullback / bottom_reversal)
    has its own level computation logic.
 3. ATR-based trailing stop replaces fixed-percentage take-profit ceilings to
    let winners run while protecting profits.
@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 # Strategy IDs (mirrored from picker_strategies for cross-import safety)
 BUY_PULLBACK = "buy_pullback"
 BOTTOM_REVERSAL = "bottom_reversal"
-REVERSAL_BREAKOUT = "reversal_breakout"
 
 # Risk/Reward floor: candidates below this should be filtered by callers.
 # Tuned to 2.0 (was 1.8): A-share round-trip cost (slippage + tax + commission)
@@ -494,42 +493,6 @@ def evaluate_trailing_exit(
             return True, "bottom_reversal_hard_floor_-8pct"
         if holding_days >= 60 and profit_pct < 3.0:
             return True, "time_stop_60d_no_progress"
-        return False, ""
-
-    # reversal_breakout (v3 right-side): actionable swing entry after
-    # the breakout has already happened. Tight rules tuned for a
-    # ~20d hold and a quick lock-in:
-    #   +25% hardcap, ATR trailing from +12%, MA10 trail from +8%,
-    #   -6% hard floor, 20d time stop.
-    # All thresholds env-overridable for A/B tuning.
-    if sid == REVERSAL_BREAKOUT:
-        import os as _os
-        def _ef(k, d):
-            try: return float(_os.environ.get(k, d))
-            except (ValueError, TypeError): return float(d)
-        hardcap = _ef("RB_EXIT_HARDCAP_PCT", 25.0)
-        trail_start = _ef("RB_EXIT_TRAIL_START_PCT", 12.0)
-        trail_atr_mul = _ef("RB_EXIT_TRAIL_ATR_MUL", 2.0)
-        ma10_start = _ef("RB_EXIT_MA10_START_PCT", 8.0)
-        ma10_buf = _ef("RB_EXIT_MA10_BUF_PCT", 2.0)
-        hard_floor = _ef("RB_EXIT_HARD_FLOOR_PCT", -6.0)
-        grace_days = int(_ef("RB_EXIT_GRACE_DAYS", 0))
-        time_stop_days = int(_ef("RB_EXIT_TIME_STOP_DAYS", 20))
-        time_stop_min_pct = _ef("RB_EXIT_TIME_STOP_MIN_PCT", 2.0)
-        if profit_pct >= hardcap:
-            return True, f"reversal_breakout_hardcap_{int(hardcap)}pct"
-        if profit_pct >= trail_start:
-            if _safe_pos(atr) and atr > 0:
-                retrace = peak - current_price
-                if retrace >= atr * trail_atr_mul:
-                    return True, f"trailing_atr{trail_atr_mul}_retrace"
-        if profit_pct >= ma10_start:
-            if _safe_pos(ma10) and current_price < ma10 * (1.0 - ma10_buf / 100.0):
-                return True, f"trailing_below_ma10_{int(ma10_buf)}pct"
-        if profit_pct <= hard_floor and holding_days > grace_days:
-            return True, f"reversal_breakout_hard_floor_{int(hard_floor)}pct"
-        if holding_days >= time_stop_days and profit_pct < time_stop_min_pct:
-            return True, f"time_stop_{time_stop_days}d_no_progress"
         return False, ""
 
     # ---- buy_pullback (default): short-term rules below ----

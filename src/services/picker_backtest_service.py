@@ -94,7 +94,7 @@ class PickerBacktestSummary:
     market_eqw_total_return_pct: Optional[float] = None
     bh_alpha_vs_benchmark_pct: Optional[float] = None
     bh_alpha_vs_market_eqw_pct: Optional[float] = None
-    # NAV-derived portfolio metrics (especially relevant for small_cap)
+    # NAV-derived portfolio metrics
     cagr_pct: Optional[float] = None
     sharpe_ratio: Optional[float] = None
     calmar_ratio: Optional[float] = None
@@ -278,45 +278,7 @@ class PickerBacktestService:
                     return {}
                 entry_price = float(close_v)
 
-            # small_cap is a cross-sectional rebalance factor: hold N trading
-            # days, no stop/TP, only frictions. Different semantics from the
-            # single-stock momentum strategies below.
-            if strategy_id == "small_cap":
-                # Find the exit-date row inside the local bar window. We
-                # used to reference an undefined `hold_days` here, which
-                # threw NameError → caught by the outer try → every
-                # small_cap pick returned {} ("数据不足"). Derive the
-                # actual exit index from exit_date instead.
-                exit_str = f"{exit_date[:4]}-{exit_date[4:6]}-{exit_date[6:8]}"
-                exit_mask = df["_date_str"] == exit_str
-                forward_df = df.iloc[entry_idx:].copy()
-                if exit_mask.any():
-                    exit_idx = int(df.index[exit_mask].max())
-                    hold = exit_idx - entry_idx
-                else:
-                    # Caller's exit_date is past the bars we have; clip
-                    # to the last available bar instead of skipping.
-                    hold = len(forward_df) - 1
-                hold = max(1, hold)
-                if len(forward_df) < 2:
-                    return {}
-                hold = min(hold, len(forward_df) - 1)
-                exit_row = forward_df.iloc[hold]
-                exit_price_raw = float(exit_row[close_col]) if pd.notna(exit_row[close_col]) else 0.0
-                if exit_price_raw <= 0:
-                    return {}
-                ENTRY_SLIP, EXIT_SLIP, ROUND_TRIP = 0.001, 0.001, 0.10
-                eff_entry = entry_price * (1 + ENTRY_SLIP)
-                eff_exit = exit_price_raw * (1 - EXIT_SLIP)
-                net_pct = (eff_exit - eff_entry) / eff_entry * 100.0 - ROUND_TRIP
-                return {
-                    "exit_price": eff_exit,
-                    "return_pct": net_pct,
-                    "exit_reason": "rebalance_window_end",
-                    "hold_days": hold,
-                }
-
-            # Multi-day strategies (buy_pullback / bottom_reversal / reversal_breakout):
+            # Multi-day strategies (buy_pullback / bottom_reversal):
             # use unified trade_levels engine with ATR-trailing stop /
             # strategy-specific TP rules.
             forward_df = df.iloc[entry_idx:].copy()
@@ -622,19 +584,6 @@ class PickerBacktestService:
         Returns:
             Dict with results, summary, and performance metrics.
         """
-        # small_cap is a monthly-rebalance factor; force hold_days >= 20 unless
-        # the caller already requested a longer window. Top-N also defaults to
-        # 50 to match the recommended portfolio size from the research report.
-        # reversal_breakout (right-side) is a short swing; force ≥20d
-        # window so trailing/time-stop rules have room to fire.
-        if picker_strategies and set(picker_strategies) == {"reversal_breakout"}:
-            if hold_days < 20:
-                logger.info(
-                    "[PickerBacktest] reversal_breakout swing window: forcing hold_days=20 (was %d)",
-                    hold_days,
-                )
-                hold_days = 20
-
         # bottom_reversal (left-side watchlist) is a medium swing trade
         # observed over longer windows; force ≥40d to match the 60d
         # time-stop in trade_levels.
@@ -645,20 +594,6 @@ class PickerBacktestService:
                     hold_days,
                 )
                 hold_days = 40
-
-        if picker_strategies and set(picker_strategies) == {"small_cap"}:
-            if hold_days < 20:
-                logger.info(
-                    "[PickerBacktest] small_cap rebalance window: forcing hold_days=20 (was %d)",
-                    hold_days,
-                )
-                hold_days = 20
-            if top_n < 30:
-                logger.info(
-                    "[PickerBacktest] small_cap recommended top_n>=30; forcing top_n=50 (was %d)",
-                    top_n,
-                )
-                top_n = 50
 
         if picker_strategies is not None:
             cfg = get_config()

@@ -116,7 +116,7 @@ const PickerPage: React.FC = () => {
             </button>
           </div>
           <p className="text-xs text-muted text-center mt-4">
-            买回踩 · 突破 · 底部反转 · 小市值 — 多策略并行，按需组合
+            涨停回踩 · 底部反转 — 多策略并行，按需组合
           </p>
         </div>
 

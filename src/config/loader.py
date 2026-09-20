@@ -118,7 +118,7 @@ def _resolve_bias_threshold() -> float:
 
 def _parse_picker_strategies(value: str) -> List[str]:
     """Parse PICKER_STRATEGIES (comma-separated). Default [buy_pullback] when empty."""
-    valid = ('buy_pullback', 'bottom_reversal', 'reversal_breakout', 'small_cap')
+    valid = ('buy_pullback', 'bottom_reversal')
     if not value or not value.strip():
         return ['buy_pullback']
     parts = [p.strip().lower() for p in value.split(',') if p.strip()]

@@ -14,8 +14,6 @@ from .data_fetch import _DataFetchMixin
 from .filters_scoring import _FilterScoringMixin
 from .limit_up_pullback import _LimitUpPullbackMixin
 from .pipeline import _PipelineMixin
-from .reversal_breakout import _ReversalBreakoutMixin
-from .small_cap import _SmallCapMixin
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +22,7 @@ class StockScreener(
     _PipelineMixin,
     _FilterScoringMixin,
     _DataFetchMixin,
-    _SmallCapMixin,
     _BottomReversalV2Mixin,
-    _ReversalBreakoutMixin,
     _LimitUpPullbackMixin,
     _ScreenerBase,
 ):

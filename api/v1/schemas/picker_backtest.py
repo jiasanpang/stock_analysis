@@ -15,7 +15,7 @@ class PickerBacktestRunRequest(BaseModel):
     top_n: int = Field(5, ge=1, le=20, description="Number of picks per day by score")
     picker_strategies: Optional[List[str]] = Field(
         None,
-        description="Strategies to use: buy_pullback, bottom_reversal, reversal_breakout, small_cap",
+        description="Strategies to use: buy_pullback, bottom_reversal",
     )
 
 
@@ -31,7 +31,7 @@ class PickerBacktestResultItem(BaseModel):
     # Trade-levels engine diagnostics (why/when the trade exited)
     exit_reason: Optional[str] = None  # stop_loss / trailing_ma10 / stage_break_+12pct / hardcap_+20pct / window_end / ...
     hold_days: Optional[int] = None
-    strategy_id: Optional[str] = None  # buy_pullback / bottom_reversal / reversal_breakout / small_cap
+    strategy_id: Optional[str] = None  # buy_pullback / bottom_reversal
 
 
 class PickerBacktestSummary(BaseModel):
@@ -50,9 +50,8 @@ class PickerBacktestSummary(BaseModel):
     profit_factor: Optional[float] = None
     alpha_vs_benchmark_pct: Optional[float] = None
     benchmark_avg_return_pct: Optional[float] = None
-    # Portfolio-level NAV metrics (especially meaningful for portfolio
-    # strategies like small_cap where single-trade stats undersell the
-    # compounding picture).
+    # Portfolio-level NAV metrics (single-trade stats can undersell the
+    # compounding picture for portfolio-style strategies).
     cagr_pct: Optional[float] = None
     sharpe_ratio: Optional[float] = None
     calmar_ratio: Optional[float] = None

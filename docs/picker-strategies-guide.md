@@ -180,7 +180,6 @@
 |------|---------|------|
 | buy_pullback | 启用 | 强势板块回踩反弹概率更高 |
 | bottom_reversal | 跳过 | 超跌反弹可出现在任意板块 |
-| reversal_breakout | 启用 | 强势板块右侧突破更有持续性 |
 
 **配置参数**：
 | 环境变量 | 默认值 | 说明 |
@@ -264,7 +263,7 @@
 
 ```bash
 # 选股策略，逗号分隔，默认 buy_pullback
-PICKER_STRATEGIES=buy_pullback,bottom_reversal,reversal_breakout
+PICKER_STRATEGIES=buy_pullback,bottom_reversal
 
 # 是否允许亏损股
 PICKER_ALLOW_LOSS=false
@@ -298,7 +297,7 @@ Content-Type: application/json
 | 数据 | 来源 | 说明 |
 | ---- | ---- | ---- |
 | 全市场行情 | Tushare / AkShare / efinance | 含 60 日涨跌幅（Tushare 需 trade_cal + daily 计算） |
-| small_cap 全市场快照 | LocalStockDB (Tushare `daily` + `daily_basic`) | 按日 parquet 分片，毫秒级读取 |
+| 涨停锚点池 | tushare `limit_list_d`（LocalStockDB by-date 分片缓存） | 缺权限时由日线数据推导兜底 |
 | 日线 | DataFetcherManager.get_daily_data | 乖离率、连板、连涨、健康回踩、MACD 均需日线 |
 
 ---
@@ -307,45 +306,13 @@ Content-Type: application/json
 
 | 市场环境 | 推荐策略 |
 | ---- | ---- |
-| 趋势上行 | 买回踩、突破 |
+| 趋势上行 | 涨停回踩（buy_pullback） |
 | 震荡筑底 | 底部反转 |
-| 长期持有 | 小市值（月度再平衡） |
 | 趋势不明 | 多策略并行，对比结果 |
 
 ---
 
-## 十、横截面因子：small_cap（小市值）
-
-**策略逻辑**：每个交易日返回市值最小的 top-N 只 A 股，作为 A 股市场上经过 6 年 OOS 验证的稳定 alpha 因子（详见 `docs/research/SMALL_CAP_FINAL_REPORT.md`）。
-
-### 数据来源
-
-- LocalStockDB 全市场 `daily` + `daily_basic` by-date 分片（毫秒级读取）
-- 不依赖盘中实时行情，也不依赖 daily-spot 流水线
-
-### 筛选逻辑
-
-1. 排除 ST / `*ST` / 退市股票
-2. 排除上市未满 365 天的新股
-3. 可选流动性下限：过去 5 个交易日平均成交额 ≥ 200 万元
-4. 按 `total_mv` 升序取 top-N
-
-### 配置开关
-
-| 环境变量 | 默认值 | 说明 |
-| ---- | ---- | ---- |
-| `SMALL_CAP_TOP_N` | 50 | 每日输出的候选数量 |
-| `SMALL_CAP_MIN_AMOUNT_YUAN` | 2000000 | 流动性下限（设 0 关闭） |
-
-### 使用建议
-
-- 推荐再平衡频率 20 个交易日（约月度）；picker 本身每日输出快照，调仓由调用方决定
-- 建议组合规模 30-50 只以分散个股黑天鹅
-- 单年最大回撤 25%+ 的历史记录，建议仅作为长期持有的组合配置而非短线工具
-
----
-
-## 十一、免责声明
+## 十、免责声明
 
 本系统仅供学习研究，不构成任何投资建议。股市有风险，投资需谨慎。
 

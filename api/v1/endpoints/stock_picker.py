@@ -88,7 +88,7 @@ class PickRecommendation(BaseModel):
 class PickerRecommendRequest(BaseModel):
     """Optional overrides for picker run. Omit to use .env config."""
     picker_strategies: Optional[List[str]] = Field(
-        None, description="Strategies: buy_pullback, bottom_reversal, reversal_breakout, small_cap"
+        None, description="Strategies: buy_pullback, bottom_reversal"
     )
     picker_mode: Optional[str] = Field(None, description="deprecated, use picker_strategies")
 

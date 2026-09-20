@@ -407,7 +407,7 @@ class BacktestResult(Base):
     signal_score_at_eval = Column(Integer)
     buy_signal_at_eval = Column(String(24))           # STRONG_BUY/BUY/HOLD/AVOID/STRONG_AVOID
     market_environment_at_eval = Column(String(24))   # bull/bear/sideways/strong_bear
-    strategy_id = Column(String(32))                  # buy_pullback/bottom_reversal/reversal_breakout
+    strategy_id = Column(String(32))                  # buy_pullback/bottom_reversal
     risk_reward_at_eval = Column(Float)
     position_pct_at_eval = Column(Float)
 

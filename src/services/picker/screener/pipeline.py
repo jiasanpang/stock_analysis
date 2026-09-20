@@ -93,38 +93,9 @@ class _PipelineMixin:
 
             # bottom_reversal regime gate: same lesson as buy_pullback —
             # "second buy point" technical patterns only convert into
-            # MarketGuard for reversal_breakout: right-side breakouts in a
-            # falling tape become "fake breakout then crash". Gate only
-            # opens when SSE is at least +1% above its MA20. Default +1%
-            # (looser than buy_pullback's +2% because reversal candidates
-            # are catch-up rebounds, not momentum trades). Toggle via
-            # REVERSAL_BREAKOUT_REQUIRE_STRONG / REVERSAL_BREAKOUT_GATE_PCT.
+            # follow-through in a non-crashing tape.
             # bottom_reversal (v2) is a manual-analysis watchlist and is
             # not gated by this guard.
-            try:
-                _rb_gate = float(_os.environ.get("REVERSAL_BREAKOUT_GATE_PCT", "1.0"))
-            except ValueError:
-                _rb_gate = 1.0
-            if (
-                _os.environ.get("REVERSAL_BREAKOUT_REQUIRE_STRONG", "1") == "1"
-                and "reversal_breakout" in self._picker_strategies
-                and market_env is not None
-                and market_env.diff_pct < _rb_gate
-                and not _bypass_guard
-            ):
-                logger.warning(
-                    "[MarketGuard/reversal_breakout] SSE diff %+.2f%% < %+.2f%% required, "
-                    "removing reversal_breakout for this day",
-                    market_env.diff_pct, _rb_gate,
-                )
-                self._gated_strategies.append((
-                    "reversal_breakout",
-                    f"大盘强度不足（上证仅高于MA20 {market_env.diff_pct:+.2f}% < 要求 +{_rb_gate:.2f}%），"
-                    f"反转突破策略已自动暂停以规避假突破风险",
-                ))
-                self._picker_strategies = [s for s in self._picker_strategies if s != "reversal_breakout"]
-                if not self._picker_strategies:
-                    return [], stats, {}
 
             if getattr(cfg, "picker_market_guard", True) and not _bypass_guard:
                 if market_env and not market_env.is_strong:
@@ -148,6 +119,12 @@ class _PipelineMixin:
                     elif action == "limit":
                         allowed_str = getattr(cfg, "picker_weak_market_strategies", "bottom_reversal")
                         allowed = [s.strip() for s in allowed_str.split(",") if s.strip()]
+                        # LUP self-limits (red-line vetoes + structural stops
+                        # + the -2% crash gate above); its backtest edge was
+                        # measured across weak-regime days too, so keep it
+                        # alive in a weak-but-not-crashing market.
+                        if _lup_on and "buy_pullback" not in allowed:
+                            allowed.append("buy_pullback")
                         original = list(self._picker_strategies)
                         self._picker_strategies = [s for s in self._picker_strategies if s in allowed]
                         if not self._picker_strategies:
@@ -250,13 +227,12 @@ class _PipelineMixin:
 
                     # Run each daily-data strategy
                     for strategy_id in daily_strategies:
-                        # small_cap and bottom_reversal both live in
-                        # DAILY_DATA_STRATEGIES so we fetch spot once
-                        # across strategies, but they do NOT go through
-                        # the params-driven momentum / volume / score
-                        # pipeline — handled by dedicated dispatch
-                        # blocks below.
-                        if strategy_id in ("small_cap", "bottom_reversal", "reversal_breakout"):
+                        # bottom_reversal lives in DAILY_DATA_STRATEGIES so
+                        # we fetch spot once across strategies, but it does
+                        # NOT go through the params-driven momentum / volume
+                        # / score pipeline — handled by the dedicated
+                        # dispatch block below.
+                        if strategy_id == "bottom_reversal":
                             continue
                         if strategy_id == "buy_pullback" and _lup_on:
                             # 涨停回踩引擎（专用 dispatch，见下方）接管 buy_pullback
@@ -322,24 +298,6 @@ class _PipelineMixin:
             else:
                 logger.info("[Screener] No daily-data strategies selected; skipping spot fetch")
 
-            # --- small_cap: cross-sectional market-cap rank ---
-            # Live mode uses the realtime spot DataFrame fetched above
-            # (today's full-market quote). Historical / backtest mode reads
-            # from LocalStockDB by-date shards.
-            if "small_cap" in self._picker_strategies:
-                from .small_cap import small_cap_min_amount_yuan, small_cap_top_n
-                td_yyyymmdd = trade_date if trade_date else (
-                    self._as_of_date.replace("-", "") if self._as_of_date else None
-                )
-                sc_cands = self._screen_small_cap(
-                    trade_date_yyyymmdd=td_yyyymmdd,
-                    top_n=small_cap_top_n(),
-                    min_amount_yuan=small_cap_min_amount_yuan(),
-                )
-                if sc_cands:
-                    candidates_per_strategy["small_cap"] = sc_cands
-                    logger.info(f"[Screener] small_cap: {len(sc_cands)} candidates")
-
             # --- bottom_reversal (v2): left-side "still consolidating,
             # about to launch" screener. Watchlist-grade output for
             # manual analysis — looser geometric filters, no sector
@@ -355,24 +313,6 @@ class _PipelineMixin:
                 if br_cands:
                     candidates_per_strategy["bottom_reversal"] = br_cands
                     logger.info(f"[Screener] bottom_reversal: {len(br_cands)} candidates")
-
-            # --- reversal_breakout (v3): right-side confirmation. Buys
-            # only AFTER a deep-bottom stock breaks out of its base with
-            # volume + same-day main-force net inflow. Actionable swing
-            # entry. See reversal_breakout.py.
-            if "reversal_breakout" in self._picker_strategies:
-                td_yyyymmdd = trade_date if trade_date else (
-                    self._as_of_date.replace("-", "") if self._as_of_date else None
-                )
-                _rb_sector_codes = _sector_strong_codes if needs_daily else set()
-                rb_cands = self._screen_reversal_breakout(
-                    spot_df=df,
-                    trade_date_yyyymmdd=td_yyyymmdd,
-                    sector_strong_codes=_rb_sector_codes,
-                )
-                if rb_cands:
-                    candidates_per_strategy["reversal_breakout"] = rb_cands
-                    logger.info(f"[Screener] reversal_breakout: {len(rb_cands)} candidates")
 
             # --- buy_pullback (涨停回踩引擎): event-driven. Anchor universe
             # is the recent limit-up pool (tushare limit_list_d, daily-bar

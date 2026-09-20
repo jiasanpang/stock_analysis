@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Refactor — 选股策略精简：下线 reversal_breakout 与 small_cap
+
+- 删除 `reversal_breakout`（反转突破）与 `small_cap`（小市值）两个策略：
+  实际交易中不再使用。移除专属模块（`screener/reversal_breakout.py`、
+  `screener/small_cap.py`）、MarketGuard RB 门控、trade_levels RB 出场规则、
+  回测器专属持仓窗口/再平衡分支、API/前端选项与相关文档章节。
+- `PICKER_STRATEGIES` 合法值收敛为 `buy_pullback, bottom_reversal`；
+  历史数据库中的旧 strategy_id 记录保持可读，不做迁移。
+- **Fix**：弱市 regime 白名单会在 -2% 门控之外再次移除 `buy_pullback`
+  导致 LUP 弱市日 0 票；LUP 开启时自动将 `buy_pullback` 加入白名单
+  （LUP 自身红线 + 3 天持仓已具限损能力）。
+
 ### Feat — 涨停回踩买入法引擎接管 buy_pullback（纯 tushare，LUP）
 
 - **新引擎** `src/services/picker/screener/limit_up_pullback.py`：事件驱动

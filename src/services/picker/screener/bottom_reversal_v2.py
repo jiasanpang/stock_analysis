@@ -52,7 +52,7 @@ _VOL_LONG = 60                # long volume average
 # that are genuinely sitting in a real bottom right now, for manual
 # review. We deliberately do NOT require "about-to-break" geometry
 # (price-pos near range top, MA60 already turning up) — those are
-# the right-side signals handled by ``reversal_breakout``. Here we
+# right-side breakout signals. Here we
 # want the earlier picture: real fall happened, range has formed,
 # price still inside the range. Each value is env-overridable for
 # discretionary tuning.
@@ -141,7 +141,7 @@ class _BottomReversalV2Mixin:
             panel = panel[~panel["名称"].astype(str).str.contains(
                 r"ST|退|\*", regex=True, na=False,
             )]
-        # Drop BSE (same convention as small_cap)
+        # Drop BSE
         if "代码" in panel.columns:
             code_str = panel["代码"].astype(str)
             panel = panel[~code_str.str.startswith(("8", "4", "92"))]
