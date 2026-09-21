@@ -269,7 +269,7 @@ class PickerHistory(Base):
     elapsed_seconds = Column(Float, default=0.0)
     created_at = Column(DateTime, default=datetime.now, index=True)
     picker_mode = Column(String(20), default=None)  # deprecated, use picker_strategies
-    picker_strategies_json = Column(Text, default=None)  # JSON array: ["buy_pullback","bottom_reversal"]
+    picker_strategies_json = Column(Text, default=None)  # JSON array: ["buy_pullback"]
     picker_leader_bias_exempt_pct = Column(Float, default=None)
 
     def to_summary_dict(self) -> Dict[str, Any]:
@@ -327,7 +327,7 @@ class PickerBacktestHistory(Base):
     hold_days = Column(Integer, nullable=False, default=10)
     top_n = Column(Integer, nullable=False, default=5)
     picker_mode = Column(String(20), default="balanced")  # deprecated, use picker_strategies_json
-    picker_strategies_json = Column(Text, default=None)  # JSON array: ["buy_pullback","bottom_reversal"]
+    picker_strategies_json = Column(Text, default=None)  # JSON array: ["buy_pullback"]
     picker_leader_bias_exempt_pct = Column(Float, default=None)
     trade_dates_count = Column(Integer, default=0)
     results_json = Column(Text, default="[]")
@@ -407,7 +407,7 @@ class BacktestResult(Base):
     signal_score_at_eval = Column(Integer)
     buy_signal_at_eval = Column(String(24))           # STRONG_BUY/BUY/HOLD/AVOID/STRONG_AVOID
     market_environment_at_eval = Column(String(24))   # bull/bear/sideways/strong_bear
-    strategy_id = Column(String(32))                  # buy_pullback/bottom_reversal
+    strategy_id = Column(String(32))                  # buy_pullback (historical rows may hold retired IDs)
     risk_reward_at_eval = Column(Float)
     position_pct_at_eval = Column(Float)
 

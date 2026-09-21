@@ -278,9 +278,8 @@ class PickerBacktestService:
                     return {}
                 entry_price = float(close_v)
 
-            # Multi-day strategies (buy_pullback / bottom_reversal):
-            # use unified trade_levels engine with ATR-trailing stop /
-            # strategy-specific TP rules.
+            # Multi-day strategy (buy_pullback): use unified trade_levels
+            # engine with ATR-trailing stop / strategy-specific TP rules.
             forward_df = df.iloc[entry_idx:].copy()
             if len(forward_df) < 2:
                 return {}
@@ -579,22 +578,11 @@ class PickerBacktestService:
             end_date: YYYY-MM-DD or YYYYMMDD
             hold_days: holding period in trading days
             top_n: number of picks per day (by score)
-            picker_strategies: optional override (buy_pullback, bottom_reversal, etc.)
+            picker_strategies: optional override (currently buy_pullback)
 
         Returns:
             Dict with results, summary, and performance metrics.
         """
-        # bottom_reversal (left-side watchlist) is a medium swing trade
-        # observed over longer windows; force ≥40d to match the 60d
-        # time-stop in trade_levels.
-        if picker_strategies and set(picker_strategies) == {"bottom_reversal"}:
-            if hold_days < 40:
-                logger.info(
-                    "[PickerBacktest] bottom_reversal medium-swing window: forcing hold_days=40 (was %d)",
-                    hold_days,
-                )
-                hold_days = 40
-
         if picker_strategies is not None:
             cfg = get_config()
             screener = StockScreener(

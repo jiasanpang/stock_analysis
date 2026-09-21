@@ -8,7 +8,6 @@ import math
 import pytest
 
 from src.services.trade_levels import (
-    BOTTOM_REVERSAL,
     BUY_PULLBACK,
     RR_MIN,
     TradeLevels,
@@ -81,17 +80,6 @@ def test_buy_pullback_secondary_fallback_when_no_ma10():
         market_cap_yi=120.0,
     )
     assert tl.secondary_buy == pytest.approx(tl.ideal_buy * 0.96, abs=0.001)
-
-
-def test_bottom_reversal_no_trailing():
-    tl = compute_trade_levels(
-        strategy_id=BOTTOM_REVERSAL,
-        current_price=8.0, ma5=8.1, ma10=8.5, ma20=9.0,
-        market_cap_yi=80.0, recent_low=7.5,
-    )
-    # Bottom reversal must NOT use trailing.
-    assert "trailing" not in tl.take_profit_2_rule
-    assert "15%" in tl.take_profit_2_rule
 
 
 def test_position_size_by_market_cap():
@@ -186,27 +174,6 @@ def test_stage6_break_cost():
     # profit_pct≈-0.1% (not in band) but MA20 break check: 9.99 < 10.5*0.97=10.185 → exit.
     assert should2 is True
     assert reason2 == "broke_ma20"
-
-
-def test_bottom_reversal_35pct_hardcap():
-    """bottom_reversal v2 (left-side) uses a loose +35% hardcap, not +20%."""
-    should, reason = evaluate_trailing_exit(
-        strategy_id=BOTTOM_REVERSAL,
-        entry_price=10.0, current_price=13.5, current_high=13.5,
-        ma10=10.5, ma20=10.0, atr=0.3, holding_days=10, peak_price=13.5,
-    )
-    assert should is True
-    assert reason == "bottom_reversal_hardcap_35pct"
-
-
-def test_bottom_reversal_no_exit_below_25pct():
-    """Below +25% profit, bottom_reversal holds (loose left-side rules)."""
-    should, _ = evaluate_trailing_exit(
-        strategy_id=BOTTOM_REVERSAL,
-        entry_price=10.0, current_price=12.0, current_high=12.0,
-        ma10=10.5, ma20=10.0, atr=0.3, holding_days=5, peak_price=12.0,
-    )
-    assert should is False
 
 
 def test_time_stop_20d_no_progress():

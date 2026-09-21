@@ -241,7 +241,7 @@ class TestPositionTrackerLupRouting(unittest.TestCase):
     def test_other_strategy_keeps_legacy_rules(self):
         from src.services.position_tracker import evaluate_holding
         d = evaluate_holding(
-            code="600001", name="测试", strategy_id="bottom_reversal",
+            code="600001", name="测试", strategy_id="nonexistent",
             entry_price=10.0, current_price=10.5, ma10=10.2, ma20=10.1,
             atr=0.3, holding_days=2)
         self.assertEqual(d.action, "持有")

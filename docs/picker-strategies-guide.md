@@ -116,57 +116,7 @@
 
 ---
 
-### 3.2 底部反转 (bottom_reversal)
-
-**策略逻辑**：大跌后企稳，左侧或早期反转。要求缩量确认底部、放量反转信号。
-
-| 参数 | 值 | 说明 |
-| ---- | - | ---- |
-| 60日涨跌幅 | -25% ~ **-5%** | 跌够多且仍处于底部区间（收紧上限，排除已反弹较多的标的） |
-| 当日涨幅 | **1%** ~ 5% | 要求明确反弹信号（收紧下限，排除弱势横盘） |
-| 量比 | > **0.7** | 降低门槛，底部缩量也接受 |
-| 乖离率 | ≤ 6% | 底部时多为负乖离 |
-| 均线 | 不要求 | 底部往往未形成多头 |
-| 最大回调（B浪） | **61.8%** | 斐波那契 B 浪过滤（收紧，排除 B 浪反弹陷阱） |
-| 缩量检查 | **启用** | `require_volume_shrink=True`，回调缩量确认底部 |
-| 连涨天数 | ≤ 3 | 不追连涨 |
-
-**评分逻辑**（趋势 + 动量 + 量能 + PE + 市值 + **增强信号**）：
-
-- **趋势**：60d 越不负面越高分；-25% 得 0，0 得 20，0–10% 得 20–25
-- **60日跌幅深度加分**（新增）：跌幅 ≤ -15% 额外 +5，≤ -20% 额外 +8，深度超跌反弹空间更大
-- **动量**：0–3% 最高 20 分；3–5% 15 分；5%+ 10 分
-- **缩量→放量转折信号**（新增）：近期缩量后当日放量（量比 > 1.5），额外 +5，确认资金入场
-- **反转K线形态**（新增）：出现锤子线、吞没阳线等经典反转形态，额外 +3
-- **量比**：≥ 1.5 满分；≥ 0.7 部分分
-- **换手**：1–10% 满分
-- **PE**：8–35 满分
-- **市值**：50–500 亿 加 5 分
-
----
-
-## 四、策略参数对照表
-
-| 参数 | 买回踩 | 底部反转 |
-| ---- | ---- | ---- |
-| change_60d_min | 5% | -25% |
-| change_60d_max | **40%** | **-5%** |
-| daily_change_min | **-2.0%** | **1%** |
-| daily_change_max | **2%** | 5% |
-| volume_ratio_min | **0.7** | **0.7** |
-| max_bias_pct | **5%** | 6% |
-| pe_max | **60** | 100 |
-| pe_ideal_low | 10 | 8 |
-| pe_ideal_high | **30** | 35 |
-| max_consecutive_up_days | **2** | 3 |
-| require_ma_bullish | ✓ | ✗ |
-| require_volume_shrink | **✓** | **✓** |
-| max_retracement_pct | **40%** | **61.8%** |
-| min_pullback_from_high_pct | **3.0** | 0 (disabled) |
-| require_price_above_ma20 | **True** | False |
-| max_distance_above_ma10_pct | **3.0** | 0 (disabled) |
-
-### 板块强度过滤（Sector Strength Filter）
+## 四、板块强度过滤（Sector Strength Filter）
 
 在基础过滤之后、策略过滤之前，通过行业板块强度排名筛选候选股。
 
@@ -178,11 +128,9 @@
 3. 获取强势板块的所有成分股代码
 4. 候选股必须在强势板块成分股中才能进入后续策略筛选
 
-**按策略区分**：
-| 策略 | 板块过滤 | 原因 |
-|------|---------|------|
-| buy_pullback | 启用 | 强势板块回踩反弹概率更高 |
-| bottom_reversal | 跳过 | 超跌反弹可出现在任意板块 |
+**按策略区分**：buy_pullback 启用板块过滤——强势板块回踩反弹概率更高。
+（历史注：bottom_reversal 曾跳过板块过滤，该策略已于 2026-09 下线：
+2026-02~09 回测 425 笔，胜率 10.1%，平均 -7.13%，PF 0.22。）
 
 **配置参数**：
 | 环境变量 | 默认值 | 说明 |
@@ -210,7 +158,6 @@
 
 - 策略 `require_volume_shrink=True` 时启用
 - 当日为跌或平盘（change_pct ≤ 0）且量比 ≥ 1.3 时排除（1.0–1.3 视为轻微放量，仍可接受）
-- **底部反转策略启用**（`require_volume_shrink=True`），回调缩量确认底部
 
 ### 5.2 Check 2: 均线多头排列（可选）
 
@@ -223,7 +170,6 @@
 - 公式：`retracement = (近10日高点 - 当前价) / (近10日高点 - 近10日低点)`
 - 仅当 `current_pullback > 0`（即当前价低于近 10 日高点）时检查
 - 若 retracement > max_retracement_pct，排除
-- 底部反转设为 100%， effectively 不限制（因底部时 retracement 常接近 100%）
 
 ### 5.4 Check 4: 距20日高点最小距离（`min_pullback_from_high_pct`）
 
@@ -265,8 +211,8 @@
 ### 7.1 环境变量
 
 ```bash
-# 选股策略，逗号分隔，默认 buy_pullback
-PICKER_STRATEGIES=buy_pullback,bottom_reversal
+# 选股策略，目前仅 buy_pullback（涨停回踩 LUP 引擎）
+PICKER_STRATEGIES=buy_pullback
 
 # 是否允许亏损股
 PICKER_ALLOW_LOSS=false
@@ -282,7 +228,7 @@ POST /api/v1/picker/recommend
 Content-Type: application/json
 
 {
-  "picker_strategies": ["buy_pullback", "bottom_reversal"]
+  "picker_strategies": ["buy_pullback"]
 }
 ```
 
@@ -307,11 +253,10 @@ Content-Type: application/json
 
 ## 九、策略选择建议
 
-| 市场环境 | 推荐策略 |
+| 市场环境 | 推荐 |
 | ---- | ---- |
 | 趋势上行 | 涨停回踩（buy_pullback） |
-| 震荡筑底 | 底部反转 |
-| 趋势不明 | 多策略并行，对比结果 |
+| 弱市/趋势不明 | MarketGuard 门控（上证 < MA20-2%）自动 0 票，宁缺毋滥 |
 
 ---
 

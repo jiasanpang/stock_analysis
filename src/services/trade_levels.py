@@ -11,8 +11,7 @@ Single source of truth for entry/stop/target levels across:
 Design principles:
 1. Numerical layer is owned by code, not LLM. LLM only explains, never invents
    stop/take-profit numbers.
-2. Strategy-aware: each strategy (buy_pullback / bottom_reversal)
-   has its own level computation logic.
+2. Strategy-aware: buy_pullback has its own level computation logic.
 3. ATR-based trailing stop replaces fixed-percentage take-profit ceilings to
    let winners run while protecting profits.
 4. Risk/Reward (R/R) is always computed; callers can hard-filter R/R < 1.8.
@@ -34,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 # Strategy IDs (mirrored from picker_strategies for cross-import safety)
 BUY_PULLBACK = "buy_pullback"
-BOTTOM_REVERSAL = "bottom_reversal"
 
 # Risk/Reward floor: candidates below this should be filtered by callers.
 # Tuned to 2.0 (was 1.8): A-share round-trip cost (slippage + tax + commission)
@@ -223,19 +221,6 @@ _STRATEGY_CONFIGS: Dict[str, _StrategyConfig] = {
             "stage_15pct": "剩余 1/3 启用动态保护：跌破 10 日均线或从最高点回撤 2.5 倍日波幅时清仓",
         },
     ),
-    BOTTOM_REVERSAL: _StrategyConfig(
-        # Hard cap raised +15→+20: real reversals run +18-25% on main leg;
-        # +15 single-shot exit caps fat-tail winners. New rule: +15 减半 / +20 全清.
-        tp1_mult=1.08, expected_mult=1.14,
-        pos_mult=0.6, stop_pct_extra=0.02,
-        tp2_rule="浮盈 +15% 减半，+20% 全部止盈（让真反转走完主升段）",
-        stage_rules={
-            "stage_8pct": "减仓 1/3",
-            "stage_15pct": "再减 1/2，止损上移至 +8%",
-            "stage_20pct": "全部止盈（反转策略硬顶 +20%）",
-            "no_progress_3d": "买入 3 日内未确认上涨 → 减半",
-        },
-    ),
 }
 
 
@@ -255,8 +240,7 @@ def _pullback_secondary(ideal: float, ma10: float, ma20: float) -> float:
 
 
 def _resolve_entry_anchor(
-    sid: str, current_price: float, ma5: float, ma10: float, ma20: float,
-    prior_high: Optional[float], recent_low: Optional[float], day_low: Optional[float],
+    current_price: float, ma5: float, ma10: float, ma20: float,
 ) -> Tuple[float, float, Optional[float]]:
     """Return (ideal_buy, secondary_buy, tech_stop_anchor).
 
@@ -264,14 +248,10 @@ def _resolve_entry_anchor(
     - secondary_buy:    deeper pullback re-entry reference shown in UI.
     - tech_stop_anchor: technical stop reference (None = use abs_stop only).
     """
-    if sid == BUY_PULLBACK:
-        ideal = min(current_price, ma5 * 1.01) if _safe_pos(ma5) else current_price
-        return ideal, _pullback_secondary(ideal, ma10, ma20), None
-    if sid == BOTTOM_REVERSAL:
-        anchor = recent_low * 0.98 if _safe_pos(recent_low) else current_price * 0.94
-        secondary = recent_low if _safe_pos(recent_low) and recent_low < current_price else current_price * 0.95
-        return current_price, min(secondary, current_price * 0.97), anchor
-    ideal = min(current_price, ma5 * 1.01) if _safe_pos(ma5) else current_price
+    if _safe_pos(ma5):
+        ideal = min(current_price, ma5 * 1.01)
+    else:
+        ideal = current_price
     return ideal, _pullback_secondary(ideal, ma10, ma20), None
 
 
@@ -290,9 +270,6 @@ def compute_trade_levels(
     ma20: float = 0.0,
     atr: float = 0.0,
     market_cap_yi: float = 0.0,
-    prior_high: Optional[float] = None,
-    recent_low: Optional[float] = None,
-    day_low: Optional[float] = None,
 ) -> TradeLevels:
     """Compute strategy-specific trade levels for a stock snapshot.
 
@@ -307,7 +284,7 @@ def compute_trade_levels(
     cfg = _STRATEGY_CONFIGS.get(sid) or _STRATEGY_CONFIGS[BUY_PULLBACK]
 
     ideal, secondary, tech_stop_anchor = _resolve_entry_anchor(
-        sid, current_price, ma5, ma10, ma20, prior_high, recent_low, day_low,
+        current_price, ma5, ma10, ma20,
     )
 
     # Stop-loss: max(technical_anchor, absolute) so the higher floor wins.
@@ -445,10 +422,9 @@ def evaluate_trailing_exit(
 
     Sequence of checks (early-return on first hit):
       1. Below initial absolute stop: hard exit.
-      2. Bottom-reversal special rule: +15% hard take-profit.
-      3. Stage-based stop tightening (浮盈 5% → 成本，10% → +5%).
-      4. Trailing (浮盈 >20%): below MA10 OR retraced ATR×2.5 from peak.
-      5. Time stop: 20 trading days no meaningful progress.
+      2. Stage-based stop tightening (浮盈 5% → 成本，10% → +5%).
+      3. Trailing (浮盈 >20%): below MA10 OR retraced ATR×2.5 from peak.
+      4. Time stop: 20 trading days no meaningful progress.
 
     Args:
         strategy_id:   Strategy that opened the position.
@@ -471,29 +447,6 @@ def evaluate_trailing_exit(
     peak = peak_price if (peak_price and peak_price > entry_price) else current_price
 
     sid = (strategy_id or "").strip().lower()
-
-    # ---- Bottom reversal: swing-trade rules ----
-    # This is a medium-term (20-60d) bet on "true bottom → consolidation
-    # bottom_reversal (v2 left-side): manual-analysis watchlist for stocks
-    # sitting in a real consolidation. Loose exit rules — the strategy
-    # is observed, not auto-traded. Original v2 rule set:
-    #   +35% hardcap, ATR/MA10 trailing only after +25%, 60d time stop,
-    #   -8% hard floor.
-    if sid == BOTTOM_REVERSAL:
-        if profit_pct >= 35.0:
-            return True, "bottom_reversal_hardcap_35pct"
-        if profit_pct >= 25.0:
-            if _safe_pos(atr) and atr > 0:
-                retrace = peak - current_price
-                if retrace >= atr * 3.0:
-                    return True, "trailing_atr3.0_retrace"
-            if _safe_pos(ma10) and current_price < ma10 * 0.97:
-                return True, "trailing_below_ma10_3pct"
-        if profit_pct <= -8.0:
-            return True, "bottom_reversal_hard_floor_-8pct"
-        if holding_days >= 60 and profit_pct < 3.0:
-            return True, "time_stop_60d_no_progress"
-        return False, ""
 
     # ---- buy_pullback (default): short-term rules below ----
     # Trailing zone (>=15% profit, was 20%): A-share rallies often start ABC
@@ -523,7 +476,7 @@ def evaluate_trailing_exit(
     if holding_days >= 20 and profit_pct < 5.0:
         return True, "time_stop_20d_no_progress"
 
-    # MA20 break for non-reversal strategies (defensive trend-failure exit).
+    # MA20 break (defensive trend-failure exit).
     if _safe_pos(ma20) and current_price < ma20 * 0.97:
         return True, "broke_ma20"
 

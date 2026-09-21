@@ -134,7 +134,6 @@ def _format_picker_report(result_dict: dict) -> str:
     if strategy_pool:
         strategy_label = {
             "buy_pullback": "回踩买入",
-            "bottom_reversal": "底部反转",
         }
         total = sum(len(v) for v in strategy_pool.values())
         pool_lines = [f"\n📋 候选池（共{total}只）"]

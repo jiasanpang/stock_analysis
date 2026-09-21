@@ -15,7 +15,7 @@ class PickerBacktestRunRequest(BaseModel):
     top_n: int = Field(5, ge=1, le=20, description="Number of picks per day by score")
     picker_strategies: Optional[List[str]] = Field(
         None,
-        description="Strategies to use: buy_pullback, bottom_reversal",
+        description="Strategies to use: buy_pullback",
     )
 
 
@@ -31,7 +31,7 @@ class PickerBacktestResultItem(BaseModel):
     # Trade-levels engine diagnostics (why/when the trade exited)
     exit_reason: Optional[str] = None  # stop_loss / trailing_ma10 / stage_break_+12pct / hardcap_+20pct / window_end / ...
     hold_days: Optional[int] = None
-    strategy_id: Optional[str] = None  # buy_pullback / bottom_reversal
+    strategy_id: Optional[str] = None  # buy_pullback
 
 
 class PickerBacktestSummary(BaseModel):

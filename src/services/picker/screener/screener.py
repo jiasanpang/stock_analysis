@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 
 from .base import _ScreenerBase
-from .bottom_reversal_v2 import _BottomReversalV2Mixin
 from .data_fetch import _DataFetchMixin
 from .filters_scoring import _FilterScoringMixin
 from .limit_up_pullback import _LimitUpPullbackMixin
@@ -22,7 +21,6 @@ class StockScreener(
     _PipelineMixin,
     _FilterScoringMixin,
     _DataFetchMixin,
-    _BottomReversalV2Mixin,
     _LimitUpPullbackMixin,
     _ScreenerBase,
 ):

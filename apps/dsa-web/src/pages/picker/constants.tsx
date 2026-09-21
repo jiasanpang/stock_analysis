@@ -3,7 +3,6 @@ import type { PickerStrategy } from '../../api/picker';
 
 export const STRATEGY_OPTIONS: { value: PickerStrategy; label: string }[] = [
   { value: 'buy_pullback', label: '买回踩' },
-  { value: 'bottom_reversal', label: '底部反转' },
 ];
 
 export const ATTENTION_CFG: Record<string, { dot: string; badge: string; label: string }> = {

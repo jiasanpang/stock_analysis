@@ -51,8 +51,8 @@ class _PipelineMixin:
         try:
             # -- Market environment guard --
             cfg = get_config()
-            # Always evaluate market_env (used downstream for regime-aware position
-            # scaling even when picker_market_guard is disabled).
+            # Always evaluate market_env (used downstream for regime-aware
+            # position scaling).
             market_env = self._check_market_environment()
             # EOD_VARIANT bypasses market guard (variants have own regime logic)
             import os as _os
@@ -91,53 +91,6 @@ class _PipelineMixin:
                 if not self._picker_strategies:
                     return [], stats, {}
 
-            # bottom_reversal regime gate: same lesson as buy_pullback —
-            # "second buy point" technical patterns only convert into
-            # follow-through in a non-crashing tape.
-            # bottom_reversal (v2) is a manual-analysis watchlist and is
-            # not gated by this guard.
-
-            if getattr(cfg, "picker_market_guard", True) and not _bypass_guard:
-                if market_env and not market_env.is_strong:
-                    raw_action = getattr(cfg, "picker_weak_market_action", "limit")
-                    action = (raw_action or "limit").strip().lower()
-                    if action not in ("skip", "limit"):
-                        logger.warning(
-                            "[MarketGuard] Invalid picker_weak_market_action=%r, fallback to 'limit'",
-                            raw_action,
-                        )
-                        action = "limit"
-                    logger.warning(
-                        "[MarketGuard] Weak market (regime=%s), action=%s",
-                        market_env.regime, action,
-                    )
-                    if action == "skip":
-                        logger.warning(
-                            "[MarketGuard] Weak market detected, skipping all strategies"
-                        )
-                        return [], stats, {}
-                    elif action == "limit":
-                        allowed_str = getattr(cfg, "picker_weak_market_strategies", "bottom_reversal")
-                        allowed = [s.strip() for s in allowed_str.split(",") if s.strip()]
-                        # LUP self-limits (red-line vetoes + structural stops
-                        # + the -2% crash gate above); its backtest edge was
-                        # measured across weak-regime days too, so keep it
-                        # alive in a weak-but-not-crashing market.
-                        if _lup_on and "buy_pullback" not in allowed:
-                            allowed.append("buy_pullback")
-                        original = list(self._picker_strategies)
-                        self._picker_strategies = [s for s in self._picker_strategies if s in allowed]
-                        if not self._picker_strategies:
-                            logger.warning(
-                                "[MarketGuard] Weak market, no allowed strategies remain "
-                                "(original: %s, allowed: %s)", original, allowed,
-                            )
-                            return [], stats, {}
-                        logger.warning(
-                            "[MarketGuard] Weak market, limiting to strategies: %s",
-                            self._picker_strategies,
-                        )
-
             # Determine which strategies need daily data vs realtime-only path
             daily_strategies = [s for s in self._picker_strategies if s in self.DAILY_DATA_STRATEGIES]
             realtime_only_strategies = [s for s in self._picker_strategies if s not in self.DAILY_DATA_STRATEGIES]
@@ -158,10 +111,9 @@ class _PipelineMixin:
 
             candidates_per_strategy: Dict[str, List[ScreenedStock]] = {}
 
-            # df and _sector_strong_codes are referenced by post-pipeline
-            # strategy dispatch blocks (bottom_reversal) outside the
-            # if-needs-daily branch — keep them bound to safe defaults
-            # when no daily fetch happens.
+            # df and _sector_strong_codes are referenced by the LUP dispatch
+            # block outside the if-needs-daily branch — keep them bound to
+            # safe defaults when no daily fetch happens.
             df = None
             _sector_strong_codes: Set[str] = set()
             # --- Daily-data pipeline: only fetch spot data when at least one strategy needs it ---
@@ -227,13 +179,6 @@ class _PipelineMixin:
 
                     # Run each daily-data strategy
                     for strategy_id in daily_strategies:
-                        # bottom_reversal lives in DAILY_DATA_STRATEGIES so
-                        # we fetch spot once across strategies, but it does
-                        # NOT go through the params-driven momentum / volume
-                        # / score pipeline — handled by the dedicated
-                        # dispatch block below.
-                        if strategy_id == "bottom_reversal":
-                            continue
                         if strategy_id == "buy_pullback" and _lup_on:
                             # 涨停回踩引擎（专用 dispatch，见下方）接管 buy_pullback
                             continue
@@ -297,22 +242,6 @@ class _PipelineMixin:
                                 logger.debug(f"[Screener] {strategy_id} top-5: {top5_str}")
             else:
                 logger.info("[Screener] No daily-data strategies selected; skipping spot fetch")
-
-            # --- bottom_reversal (v2): left-side "still consolidating,
-            # about to launch" screener. Watchlist-grade output for
-            # manual analysis — looser geometric filters, no sector
-            # gate, no smart-money confirmation. See bottom_reversal_v2.py.
-            if "bottom_reversal" in self._picker_strategies:
-                td_yyyymmdd = trade_date if trade_date else (
-                    self._as_of_date.replace("-", "") if self._as_of_date else None
-                )
-                br_cands = self._screen_bottom_reversal_v2(
-                    spot_df=df,
-                    trade_date_yyyymmdd=td_yyyymmdd,
-                )
-                if br_cands:
-                    candidates_per_strategy["bottom_reversal"] = br_cands
-                    logger.info(f"[Screener] bottom_reversal: {len(br_cands)} candidates")
 
             # --- buy_pullback (涨停回踩引擎): event-driven. Anchor universe
             # is the recent limit-up pool (tushare limit_list_d, daily-bar

@@ -42,7 +42,6 @@ export function boolIcon(value?: boolean | null): React.ReactElement {
   return <span className="text-muted">--</span>;
 }
 
-export const STRATEGY_OPTIONS: { value: 'buy_pullback' | 'bottom_reversal'; label: string }[] = [
+export const STRATEGY_OPTIONS: { value: 'buy_pullback'; label: string }[] = [
   { value: 'buy_pullback', label: '买回踩' },
-  { value: 'bottom_reversal', label: '底部反转' },
 ];

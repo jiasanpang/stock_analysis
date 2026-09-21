@@ -34,10 +34,10 @@ class _ScreenerBase:
     _ETF_PREFIXES = ("51", "52", "56", "58", "15", "16", "18")
 
     # Strategies that require daily spot data (fetched via _fetch_spot_data).
-    DAILY_DATA_STRATEGIES = {"buy_pullback", "bottom_reversal"}
+    DAILY_DATA_STRATEGIES = {"buy_pullback"}
 
     # Strategies that benefit from sector strength filtering
-    SECTOR_FILTER_STRATEGIES = {"buy_pullback", "bottom_reversal"}
+    SECTOR_FILTER_STRATEGIES = {"buy_pullback"}
 
     def __init__(
         self,

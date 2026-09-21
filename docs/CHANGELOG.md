@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Refactor — 下线 bottom_reversal（底部反转）策略
+
+- 长区间回测（2026-02~09，425 笔）判负：胜率 10.1%，平均收益 -7.13%，
+  PF 0.22——在任何持仓窗口下均为亏损方向，下线处理。
+- 删除策略模块（`screener/bottom_reversal_v2.py`）、打分器与参数块、
+  弱市白名单机制（`PICKER_MARKET_GUARD` / `PICKER_WEAK_MARKET_ACTION` /
+  `PICKER_WEAK_MARKET_STRATEGIES`）、trade_levels 专属买卖点/出场规则、
+  回测器 hold_days=40 强制分支、API/前端策略选项与文档章节。
+- `PICKER_STRATEGIES` 合法值收敛为 `buy_pullback`；弱市行为统一由
+  buy_pullback 门控（`BUY_PULLBACK_GATE_PCT`，LUP 下默认 -2%）决定，
+  弱市直接 0 票（宁缺毋滥）。历史数据库中的旧 strategy_id 记录保持可读。
+
 ### Feat — LUP 第六形态"缩量横盘"兜底开关（默认关闭）
 
 - `LUP_ALLOW_CONSOLIDATION=1` 启用：过红线与观察否决、但几何上不像五大

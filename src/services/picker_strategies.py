@@ -2,8 +2,8 @@
 """
 Picker strategies: each strategy has its own screening logic and fixed params.
 
-Strategies: buy_pullback, bottom_reversal
-No intensity modes (defensive/balanced/offensive) — each strategy has one set of params.
+Strategy: buy_pullback
+No intensity modes (defensive/balanced/offensive) — the strategy has one set of params.
 
 Removed strategies (kept here for context — see docs/CHANGELOG.md):
 - eod_buyback (May 2026): 2yr OOS PF=0.58, negative alpha vs CSI300 B&H.
@@ -11,6 +11,8 @@ Removed strategies (kept here for context — see docs/CHANGELOG.md):
   -64% vs benchmark +24% in 2025-05~2026-05; A/B tuning saturated at PF<1.
 - reversal_breakout / small_cap (Sep 2026): no longer used by the primary
   trader; 涨停回踩 (LUP) now carries the buy_pullback strategy.
+- bottom_reversal (Sep 2026): 2026-02~09 backtest 425 picks, WR 10.1%,
+  avg -7.13%, PF 0.22 — a directional money loser at any holding window.
 """
 
 from dataclasses import dataclass
@@ -36,13 +38,12 @@ from src.services.trade_levels import (
 
 # Strategy IDs (used in config)
 BUY_PULLBACK = "buy_pullback"
-BOTTOM_REVERSAL = "bottom_reversal"
 
 # Default strategy when PICKER_STRATEGIES not set
 DEFAULT_STRATEGIES = [BUY_PULLBACK]
 
 # All available strategies
-ALL_STRATEGIES = [BUY_PULLBACK, BOTTOM_REVERSAL]
+ALL_STRATEGIES = [BUY_PULLBACK]
 
 def is_mainboard_stock(code: str) -> bool:
     """Check if a stock is listed on the main board (SSE/SZSE main).
@@ -65,7 +66,6 @@ _MID_CAP_MAX = 500e8
 
 STRATEGY_DISPLAY_NAMES: Dict[str, str] = {
     BUY_PULLBACK: "买回踩",
-    BOTTOM_REVERSAL: "底部反转",
 }
 
 
@@ -134,35 +134,9 @@ BUY_PULLBACK_PARAMS = StrategyParams(
     require_price_above_ma20=True,     # Below MA20 = downtrend, reject
 )
 
-# Bottom reversal: 60d -25% ~ -5%, true bottom with volume shrink stabilisation
-BOTTOM_REVERSAL_PARAMS = StrategyParams(
-    max_bias_pct=6.0,  # Stricter (near support)
-    leader_bias_exempt_pct=0.0,  # No exemption: bottom stocks are not leaders
-    pe_max=60,   # Tightened 100→60: reversal strategy is mean-reversion bet on
-                 # oversold names; PE>60 with 15-20% drawdown is rarely a true
-                 # "low base" — historical win rate <30% in this band.
-    pe_ideal_low=8,
-    pe_ideal_high=35,
-    daily_change_min=1.0,  # Must be rising today — confirms reversal signal
-    daily_change_max=5.0,
-    max_consecutive_up_days=3,
-    require_volume_shrink=True,  # Bottom must show volume contraction stabilisation
-    require_ma_bullish=False,  # Bottom stocks often not MA bullish
-    max_retracement_pct=0.618,  # Fibonacci 61.8% B-wave rebound filter
-    change_60d_min=-25.0,
-    change_60d_max=-10.0,  # Tightened -8→-10: drops shallower than -10% are usually
-                           # noise/pullbacks rather than true reversals — filter them out
-                           # to avoid pseudo-reversal candidates.
-    volume_ratio_min=0.7,  # Allow low volume ratio (stabilisation = shrinking volume)
-    # Cap market cap: oversold reversal works best on small/mid caps;
-    # large caps (>300亿) rebound slower and dilute the bet.
-    market_cap_max=300.0,
-)
-
 # Registry for get_strategy_params (single source of truth)
 _STRATEGY_PARAMS: Dict[str, StrategyParams] = {
     BUY_PULLBACK: BUY_PULLBACK_PARAMS,
-    BOTTOM_REVERSAL: BOTTOM_REVERSAL_PARAMS,
 }
 
 
@@ -182,11 +156,6 @@ def _score_pe(pe: float, params: StrategyParams) -> float:
     if 5 < pe <= params.pe_ideal_low or params.pe_ideal_high <= pe < PE_SCORE_PARTIAL_MAX:
         return 5.0
     return 0.0
-
-
-def _score_pe_simple(pe: float, params: StrategyParams) -> float:
-    """PE score: ideal 10, else 5 (for bottom_reversal)."""
-    return 10.0 if params.pe_ideal_low < pe < params.pe_ideal_high else 5.0
 
 
 def _score_mid_cap(total_mv: float) -> float:
@@ -209,7 +178,7 @@ def filter_momentum(df: pd.DataFrame, params: StrategyParams) -> pd.DataFrame:
     When a param is None the corresponding condition is skipped entirely.
     """
     # Per-strategy PE ceiling (shared basic filter only enforces pe<100;
-    # tighter strategies like bottom_reversal need their own pe_max applied).
+    # strategy-specific pe_max is applied here).
     if "市盈率-动态" in df.columns and params.pe_max is not None:
         pe = pd.to_numeric(df["市盈率-动态"], errors="coerce")
         df = df[(pe > 0) & (pe < params.pe_max)]
@@ -350,88 +319,6 @@ def score_buy_pullback(row: Dict[str, Any], params: StrategyParams) -> float:
     pe_s = _score_pe(pe, params)
     mid = _score_mid_cap(total_mv)
     return trend + mom + vol + to + pe_s + mid
-
-
-def score_bottom_reversal(row: Dict[str, Any], params: StrategyParams) -> float:
-    """Score for bottom reversal: deep 60d decline + volume transition + reversal candle.
-
-    Scoring components:
-        1. 60d decline depth: deeper decline = higher value at bottom  (0-25)
-        2. Momentum: slight up preferred (daily_change_min=1.0 enforced) (10-20)
-        3. Volume transition: shrink-then-expand breakout signal       (0-25)
-        4. Turnover                                                    (5-10)
-        5. PE simple                                                   (5-10)
-        6. Mid-cap bonus                                               (0-5)
-        7. Reversal candle pattern (bullish body / long lower shadow)  (0-10)
-    """
-    pct_60d = float(row.get("60日涨跌幅", 0) or 0)
-    change_pct = float(row.get("涨跌幅", 0) or 0)
-    vol_ratio = float(row.get("量比", 0) or 0)
-    turnover = float(row.get("换手率", 0) or 0)
-    pe = float(row.get("市盈率-动态", 0) or 0)
-    total_mv = float(row.get("总市值", 0) or 0)
-
-    # --- 1. 60d decline depth scoring ---
-    # Deeper decline (-30% ~ -20%) = higher bottom value
-    if pct_60d >= 0:
-        trend = min(25.0, 20.0 + pct_60d * 0.5)
-    elif pct_60d >= -10:
-        # -10% ~ 0%: moderate value
-        trend = max(0.0, 20.0 + pct_60d * 0.8)  # -10 -> 12, 0 -> 20
-    elif pct_60d >= -30:
-        # -30% ~ -10%: deep bottom bonus — deeper = more value
-        trend = 15.0 + (-pct_60d - 10) * 0.5  # -10 -> 15, -20 -> 20, -30 -> 25
-    else:
-        # Below -30%: cap at 25 (diminishing returns at extreme decline)
-        trend = 25.0
-
-    # --- 2. Momentum: slight up preferred (daily_change_min=1.0 enforced) ---
-    mom = 20.0 if 0 <= change_pct <= 3 else (15.0 if 3 < change_pct <= 5 else 10.0)
-
-    # --- 3. Volume transition: shrink-to-expand breakout signal ---
-    # Today's vol_ratio > 1.2 on a stabilising day = volume expansion after contraction
-    # (The 5d avg vol_ratio check requires daily data; here we use row-level proxy)
-    if vol_ratio > 1.5:
-        vol = 25.0  # Strong volume expansion — breakout signal
-    elif vol_ratio > 1.2:
-        vol = 20.0  # Moderate expansion — potential breakout
-    elif vol_ratio >= 0.7:
-        vol = 10.0  # Low volume — still in contraction phase, acceptable
-    else:
-        vol = 0.0
-
-    # --- 4. Turnover ---
-    to = 10.0 if 1 <= turnover <= 10 else 5.0
-
-    # --- 5. PE ---
-    pe_s = _score_pe_simple(pe, params)
-
-    # --- 6. Mid-cap bonus ---
-    mid = _score_mid_cap(total_mv)
-
-    # --- 7. Reversal candle pattern ---
-    candle_bonus = 0.0
-    open_price = float(row.get("今开", 0) or row.get("开盘", 0) or 0)
-    close_price = float(row.get("最新价", 0) or row.get("收盘", 0) or 0)
-    low_price = float(row.get("最低", 0) or 0)
-    if open_price > 0 and close_price > 0:
-        # Bullish candle: close > open
-        if close_price > open_price:
-            candle_bonus += 5.0
-        # Long lower shadow: (open - low) > (close - open) indicates buying at bottom
-        body = abs(close_price - open_price)
-        lower_shadow = min(open_price, close_price) - low_price if low_price > 0 else 0
-        if lower_shadow > body and lower_shadow > 0:
-            candle_bonus += 5.0
-
-    return trend + mom + vol + to + pe_s + mid + candle_bonus
-
-
-# Populate _SCORERS after all scorers are defined
-_SCORERS.update({
-    BUY_PULLBACK: score_buy_pullback,
-    BOTTOM_REVERSAL: score_bottom_reversal,
-})
 
 
 def score_and_rank(

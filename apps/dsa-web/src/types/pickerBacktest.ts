@@ -3,7 +3,7 @@
  * Mirrors api/v1/schemas/picker_backtest.py
  */
 
-export type PickerStrategy = 'buy_pullback' | 'bottom_reversal';
+export type PickerStrategy = 'buy_pullback';
 
 export interface PickerBacktestRunRequest {
   startDate: string;
@@ -24,7 +24,7 @@ export interface PickerBacktestResultItem {
   score?: number;
   exitReason?: string;  // stop_loss / trailing_ma10 / stage_break_+12pct / hardcap_+20pct / window_end / ...
   holdDays?: number;
-  strategyId?: string;  // buy_pullback / bottom_reversal
+  strategyId?: string;  // buy_pullback
 }
 
 export interface PickerBacktestSummary {
