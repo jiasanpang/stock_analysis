@@ -17,7 +17,7 @@ fully back-testable):
        limit-up open, any high-volume bearish day (放量回调), or a
        close below a falling MA20 kills the event.
     4. PATTERN CONFIRMATION at T (today must NOT be limit-up):
-       回踩5日线 / 回踩10日线 / 三阴不破阳 / 假阴真阳 / 龙回头.
+       回踩5日线 / 回踩10日线 / 三阴不破阳 / 假阴真阳.
     5. TRADE LEVELS via ``compute_limit_up_pullback_levels`` —
        structural stop at the limit-up candle low / -4% (tighter),
        +10% half-off then MA10/ATR trailing.
@@ -62,18 +62,14 @@ _DEFAULTS = {
     "PULLBACK_VOL_MAX": 0.6,    # confirmation-day vol / limit-up vol
     "BIG_YIN_VOL_RATIO": 0.9,   # bearish day >=0.9x limit-up vol = 出货
     "INDEX_CRASH_PCT": -1.5,    # limit-up day set while SSE <= this: 孤板
-    "DRAGON_MIN_STREAK": 2,     # 龙回头 needs a multi-board first wave
-    "DRAGON_MIN_RISE": 50.0,    # first-wave gain %
-    "DRAGON_MAX_AGE": 10,       # second-wave window is longer
     "CHASE_CAP_PCT": 8.0,       # entry not more than this above limit-up close
-    "ALLOW_CONSOLIDATION": 0.0, # 1 = 第六形态"缩量横盘"兜底（先回测再默认开）
-    "CONSOL_VOL_MAX": 0.45,     # 兜底形态的缩量上限（比五形态 0.6 更严）
+    "ALLOW_CONSOLIDATION": 0.0, # 1 = 第五形态"缩量横盘"兜底（先回测再默认开）
+    "CONSOL_VOL_MAX": 0.45,     # 兜底形态的缩量上限（比四形态 0.6 更严）
     "TOP_N": 20,
 }
 
 _PATTERN_STRENGTH = {
     "三阴不破阳": 92.0,
-    "龙回头": 90.0,
     "回踩5日线": 85.0,
     "回踩10日线": 82.0,
     "假阴真阳": 75.0,
@@ -82,7 +78,6 @@ _PATTERN_STRENGTH = {
 
 _PATTERN_ENV_ID = {
     "三阴不破阳": "THREE_YIN",
-    "龙回头": "DRAGON",
     "回踩5日线": "MA5",
     "回踩10日线": "MA10",
     "假阴真阳": "FAKE_YIN",
@@ -574,8 +569,7 @@ class _LimitUpPullbackMixin:
                 return False, "broke_limit_up_open"   # 跌破涨停开盘价
             if c[j] < o[j] and v[j] >= _envf("BIG_YIN_VOL_RATIO") * lu_vol:
                 return False, "high_volume_pullback"  # 放量阴线回调
-        if i_t - i_d > max(int(_envf("OBS_WINDOW")),
-                           int(_envf("DRAGON_MAX_AGE"))):
+        if i_t - i_d > int(_envf("OBS_WINDOW")):
             return False, "window_expired"
         m20 = _ma(c, 20, i_t)
         if np.isnan(m20) or c[i_t] < m20 * 0.99:
@@ -583,7 +577,7 @@ class _LimitUpPullbackMixin:
         return True, "ok"
 
     # ------------------------------------------------------------------
-    # Five classic pullback patterns
+    # Four classic pullback patterns
     # ------------------------------------------------------------------
 
     @classmethod
@@ -609,7 +603,6 @@ class _LimitUpPullbackMixin:
 
         checks = [
             ("三阴不破阳", lambda: cls._lup_p_three_yin(o, c, v, i_d, i_t, lu_vol, lu_open)),
-            ("龙回头", lambda: cls._lup_p_dragon(bars, o, lo, c, v, i_d, i_t, ev, lu_close)),
             ("回踩5日线", lambda: cls._lup_p_ma(bars, c, v, o, lo, h, i_d, i_t, lu_vol, 5, mid)),
             ("回踩10日线", lambda: cls._lup_p_ma(bars, c, v, o, lo, h, i_d, i_t, lu_vol, 10, lu_open)),
             ("假阴真阳", lambda: cls._lup_p_fake_yin(o, c, v, i_d, i_t)),
@@ -625,11 +618,9 @@ class _LimitUpPullbackMixin:
                 return name, "ok"
             if name == "假阴真阳" and age == 1 and fn():
                 return name, "ok"
-            if name == "龙回头" and 3 <= age <= int(_envf("DRAGON_MAX_AGE")) and fn():
-                return name, "ok"
 
-        # 第六形态兜底"缩量横盘"：过了全部红线与观察否决、但几何上不像
-        # 五大经典形态的锚点（如横住不碰均线的小阳/十字）。兜底比五形态
+        # 第五形态兜底"缩量横盘"：过了全部红线与观察否决、但几何上不像
+        # 四大经典形态的锚点（如横住不碰均线的小阳/十字）。兜底比四形态
         # 更严：缩量 ≤ CONSOL_VOL_MAX、当日不低开低走、站上涨停实体中轴，
         # 否则宁缺毋滥（0.6 同标准放宽实测 PF 2.73→1.16）。
         if (_envf("ALLOW_CONSOLIDATION") >= 1
@@ -691,40 +682,6 @@ class _LimitUpPullbackMixin:
             return False
         return bool(o[i_t] > c[i_d] and c[i_t] < o[i_t]
                     and c[i_t] > c[i_d] and v[i_t] <= v[i_d])
-
-    @staticmethod
-    def _lup_p_dragon(
-        bars: pd.DataFrame, o: np.ndarray, lo: np.ndarray, c: np.ndarray,
-        v: np.ndarray, i_d: int, i_t: int, ev: dict, lu_close: float,
-    ) -> bool:
-        """龙头 second wave: deep streak rise, shallow orderly pullback, volume re-breakout."""
-        lt = pd.to_numeric(pd.Series([ev.get("limit_times")]), errors="coerce").iloc[0]
-        streak_known = pd.notna(lt)
-        if streak_known and lt < _envf("DRAGON_MIN_STREAK"):
-            return False
-        prior_low = c[max(0, i_d - 40):i_d].min()
-        if prior_low > 0:
-            rise = (lu_close / prior_low - 1) * 100
-        else:
-            return False
-        if not streak_known:
-            prev_day_limit = (c[i_d - 1] / c[i_d - 2] - 1) * 100 >= 9.5
-            if not (rise >= _envf("DRAGON_MIN_RISE") and prev_day_limit):
-                return False
-        elif rise < _envf("DRAGON_MIN_RISE"):
-            return False
-        closes = c
-        for j in range(i_d + 1, i_t + 1):
-            m20 = _ma(closes, 20, j)
-            if np.isnan(m20) or lo[j] < m20 * 0.99:
-                return False
-        wave = lu_close - prior_low
-        if wave > 0 and (lu_close - lo[i_d + 1:i_t + 1].min()) > 0.5 * wave:
-            return False
-        base = v[max(0, i_t - 5):i_t].mean()
-        ma5 = _ma(closes, 5, i_t)
-        return bool(base > 0 and v[i_t] >= 1.5 * base
-                    and not np.isnan(ma5) and c[i_t] > ma5)
 
     # ------------------------------------------------------------------
     # Output assembly

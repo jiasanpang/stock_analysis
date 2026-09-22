@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Refactor — 下线 LUP "龙回头"确认形态
+
+- 高位连板后的二波回踩属出货中继高风险区（外部笔记战法与复盘结论一致），
+  用户 2026-09-22 拍板移除。
+- 删除 `_lup_p_dragon` 形态函数、`DRAGON_MIN_STREAK/DRAGON_MIN_RISE/
+  DRAGON_MAX_AGE` 参数、强度表与 env 开关条目；观察窗上限回归
+  `LUP_OBS_WINDOW` 单一旋钮；确认形态收敛为四大经典 + 缩量横盘兜底。
+- 影响：历史出票中由龙回头确认的票不再复现；其余形态确认路径不变。
+
 ### Refactor — 下线 bottom_reversal（底部反转）策略
 
 - 长区间回测（2026-02~09，425 笔）判负：胜率 10.1%，平均收益 -7.13%，
